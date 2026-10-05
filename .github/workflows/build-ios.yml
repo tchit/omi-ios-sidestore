@@ -23,7 +23,7 @@ concurrency:
 env:
   OMI_COMMIT: 93b7ac97c4fa4800b2e2299b640309dd8af9feeb   # même version que le serveur
   OMI_DEV_HOST: 100.80.3.54                             # adresse Tailscale du serveur
-  OMI_DEVICE_SUFFIX: sidestore                          # identifiant : com.friend-app-with-wearable.ios12-sidestore
+  OMI_DEVICE_SUFFIX: sidestore
   FLUTTER_VERSION: 3.44.5
 
 jobs:
@@ -66,17 +66,17 @@ jobs:
           setup_firebase
           bash scripts/generate_ios_dev_info_plist.sh
           generate_ios_custom_config Dev omi-dev
-          base="com.friend-app-with-wearable.ios12-${OMI_DEVICE_SUFFIX}"
-          if [ -n "${TEAM_ID}" ]; then
-            # SideStore ajoute le Team ID à l'identifiant de l'app ; Firebase exige le même dans sa configuration
-            final="${base}.${TEAM_ID}"
-            for p in ios/Runner/GoogleService-Info.plist ios/Config/Dev/GoogleService-Info.plist; do
-              /usr/libexec/PlistBuddy -c "Set :BUNDLE_ID ${final}" "$p"
-            done
-            echo "Identifiant Firebase : ${final}"
-          else
-            echo "Identifiant Firebase : ${base} (premier essai, sans Team ID)"
-          fi
+          # identifiant réel de l'app compilée (configurations « -dev » du projet Xcode d'Omi) ; Firebase est
+          # démarré par le code Dart avec iosBundleId (lib/firebase_options_local.dart) : les deux doivent
+          # correspondre à l'identifiant final. SideStore y ajoute le Team ID de l'identifiant Apple.
+          base="com.friend-app-with-wearable.ios12.development"
+          final="${base}${TEAM_ID:+.${TEAM_ID}}"
+          sed -i '' "s|iosBundleId: '${base}'|iosBundleId: '${final}'|g" lib/firebase_options_local.dart
+          for p in ios/Runner/GoogleService-Info.plist ios/Config/Dev/GoogleService-Info.plist; do
+            /usr/libexec/PlistBuddy -c "Set :BUNDLE_ID ${final}" "$p"
+          done
+          echo "Identifiant Firebase : ${final}"
+          grep -c "iosBundleId: '${final}'" lib/firebase_options_local.dart
           grep API_BASE_URL .dev.env
 
       - name: Dépendances
