@@ -1,0 +1,122 @@
+name: App iOS Omi pour SideStore
+
+# Compile l'app iOS officielle d'Omi (github.com/BasedHardware/omi) sans signature, en mode « harness local »
+# branché sur un serveur Omi personnel joignable par Tailscale. SideStore signe ensuite l'IPA avec un identifiant
+# Apple gratuit (renouvellement tous les 7 jours sur l'iPhone, sans recompiler).
+# Étapes reprises de app/setup.sh (« ios », flavor dev) et de leur codemagic.yaml (Flutter 3.44.5).
+
+on:
+  workflow_dispatch:
+    inputs:
+      team_id:
+        description: "Team ID Apple (10 caractères, lu dans SideStore). Vide pour un premier essai."
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-ios
+  cancel-in-progress: true
+
+env:
+  OMI_COMMIT: 93b7ac97c4fa4800b2e2299b640309dd8af9feeb   # même version que le serveur
+  OMI_DEV_HOST: 100.80.3.54                             # adresse Tailscale du serveur
+  OMI_DEVICE_SUFFIX: sidestore                          # identifiant : com.friend-app-with-wearable.ios12-sidestore
+  FLUTTER_VERSION: 3.44.5
+
+jobs:
+  ios:
+    runs-on: macos-26
+    timeout-minutes: 120
+    steps:
+      - name: Code d'Omi (version du serveur)
+        uses: actions/checkout@v4
+        with:
+          repository: BasedHardware/omi
+          ref: ${{ env.OMI_COMMIT }}
+          path: omi
+          fetch-depth: 1
+
+      - name: Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: Opus (comme leur intégration continue)
+        run: brew install opus opus-tools
+
+      - name: Préparation (setup.sh ios, harness local)
+        working-directory: omi/app
+        env:
+          TEAM_ID: ${{ inputs.team_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          source setup.sh > /dev/null
+          prepare_mobile_build_env dev
+          setup_firebase
+          bash scripts/generate_ios_dev_info_plist.sh
+          generate_ios_custom_config Dev omi-dev
+          base="com.friend-app-with-wearable.ios12-${OMI_DEVICE_SUFFIX}"
+          if [ -n "${TEAM_ID}" ]; then
+            # SideStore ajoute le Team ID à l'identifiant de l'app ; Firebase exige le même dans sa configuration
+            final="${base}.${TEAM_ID}"
+            for p in ios/Runner/GoogleService-Info.plist ios/Config/Dev/GoogleService-Info.plist; do
+              /usr/libexec/PlistBuddy -c "Set :BUNDLE_ID ${final}" "$p"
+            done
+            echo "Identifiant Firebase : ${final}"
+          else
+            echo "Identifiant Firebase : ${base} (premier essai, sans Team ID)"
+          fi
+          grep API_BASE_URL .dev.env
+
+      - name: Dépendances
+        working-directory: omi/app
+        run: |
+          flutter pub get
+          dart run build_runner build --delete-conflicting-outputs
+          cd ios && pod install --repo-update
+
+      - name: Compilation sans signature
+        working-directory: omi/app
+        shell: bash
+        run: |
+          set -euo pipefail
+          PROV="$(scripts/build_provenance_dart_defines.sh)"
+          flutter build ios --release --no-codesign --flavor dev \
+            --dart-define=OMI_APP_PROFILE=local_dev \
+            --dart-define=OMI_API_BASE_URL=http://${OMI_DEV_HOST}:8000/ \
+            --dart-define=OMI_FIREBASE_AUTH_EMULATOR_HOST=${OMI_DEV_HOST} \
+            $PROV
+
+      - name: IPA pour SideStore (sans app Apple Watch ni extensions)
+        working-directory: omi/app
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP="$(find build/ios/iphoneos -maxdepth 1 -name '*.app' -print -quit)"
+          [ -n "$APP" ] || { echo "aucune app compilée"; exit 1; }
+          # identifiant Apple gratuit : 3 apps et 10 identifiants par semaine ; montre, widget et extension de
+          # notification en consommeraient autant
+          rm -rf "$APP/PlugIns" "$APP/Watch" "$APP/Extensions"
+          rm -rf Payload && mkdir Payload && cp -R "$APP" Payload/
+          zip -qry "$GITHUB_WORKSPACE/Omi-sidestore.ipa" Payload
+          /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP/Info.plist"
+          ls -la "$GITHUB_WORKSPACE/Omi-sidestore.ipa"
+
+      - name: Publication de l'IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: Omi-sidestore
+          path: Omi-sidestore.ipa
+          retention-days: 30
+          if-no-files-found: error
