@@ -78,6 +78,11 @@ jobs:
           echo "Identifiant Firebase : ${final}"
           grep -c "iosBundleId: '${final}'" lib/firebase_options_local.dart
           grep API_BASE_URL .dev.env
+          # test de connexion de l'app (toutes les 10 s) : vers le serveur personnel au lieu d'api.omi.me et de
+          # Cloudflare — rien ne doit partir chez Omi
+          f=lib/services/connectivity_service.dart
+          sed -i '' "s#Uri.parse('https://api.omi.me/v1/health')#Uri.parse('\${Env.apiBaseUrl}v1/health')#; s#Uri.parse('https://one.one.one.one')#Uri.parse('\${Env.apiBaseUrl}v1/health')#" "$f"
+          ! grep -q "api.omi.me\|one.one.one.one" "$f"
 
       - name: Dépendances
         working-directory: omi/app
