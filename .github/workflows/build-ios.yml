@@ -21,7 +21,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  OMI_COMMIT: 93b7ac97c4fa4800b2e2299b640309dd8af9feeb   # même version que le serveur
+  OMI_COMMIT: 98bbb521b1e176a72b7844ae2e5356f989ea9fb3   # même version que le serveur
   OMI_DEV_HOST: 100.80.3.54                             # adresse Tailscale du serveur
   OMI_DEVICE_SUFFIX: sidestore
   FLUTTER_VERSION: 3.44.5
