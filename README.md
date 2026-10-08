@@ -4,9 +4,29 @@ Recette de compilation de l'app iOS **officielle** d'Omi ([BasedHardware/omi](ht
 branchée sur un serveur Omi personnel (mode « harness local » prévu par Omi) et installée avec
 [SideStore](https://sidestore.io) : ni Mac, ni compte développeur payant.
 
-Ce dépôt ne contient que la recette (`.github/workflows/build-ios.yml`) : le code est celui d'Omi, à la même
-version que le serveur ; aucune donnée personnelle, aucun secret. Le serveur n'est joignable que par les appareils de
-son propriétaire sur Tailscale.
+Ce dépôt ne contient que la recette (`.github/workflows/build-ios.yml`) et quelques correctifs (`patches/app/`) :
+le code est celui d'Omi, à la même version que le serveur ; aucune donnée personnelle, aucun secret. Le serveur n'est
+joignable que par les appareils de son propriétaire sur Tailscale.
+
+## Correctifs du clone (`patches/app/`, 2026-10-08)
+
+Appliqués par le flux au code d'Omi intact (`git apply --check`, puis `git apply`), avant la préparation. S'ils ne
+s'appliquent plus (nouvel `OMI_COMMIT`), la compilation s'arrête : les refaire sur la nouvelle version.
+
+- `0001` : plus jamais la commande 30 vers un Plaud (d'après le SDK Plaud décompilé, elle efface un
+  enregistrement) ; un **Plaud NotePin S** (lié à l'app Plaud, Bluetooth chiffré) est reconnu par son nom, sinon par
+  la lecture seule de son modèle (6AA50003), et Omi refuse de s'y connecter : aucune écriture, aucun abonnement.
+  Le NotePin de 1re génération garde son direct en clair.
+- `0002` : pas de mise à jour de firmware d'Omi pour un Plaud.
+- `0003` : message « lié à l'app Plaud » au choix d'un NotePin S, carte correspondante sur la page de l'appareil,
+  modèle « Plaud NotePin S » et firmware inconnu au lieu de « PLAUD NotePin » / « 1.0.0 ».
+- `0004` : tests `test/plaud/` (transport simulé), lancés par le flux avant la compilation.
+
+Après installation, un NotePin S resté appairé n'est plus connecté ; « Oublier l'appareil » dans Omi le retire.
+Le bouton d'enregistrement utilise alors le micro de l'iPhone.
+
+Refaire les correctifs : appliquer `patches/app/*.patch` sur `app/` d'Omi au nouveau commit, corriger, puis
+`git format-patch` (chemins `app/…`, chaque fichier touché par un seul correctif).
 
 ## Compiler
 

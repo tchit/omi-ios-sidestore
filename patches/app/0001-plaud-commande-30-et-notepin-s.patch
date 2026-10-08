@@ -1,0 +1,315 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 8 Oct 2026 15:50:41 +0000
+Subject: [PATCH 1/4] =?UTF-8?q?Plaud=20:=20plus=20de=20commande=2030,=20au?=
+ =?UTF-8?q?cune=20=C3=A9criture=20vers=20un=20NotePin=20S?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- La commande 30 (« _stopSync ») n'est plus envoyée à aucun Plaud : d'après le SDK Plaud décompilé
+  (deleteFile) et deux rétro-ingénieries, elle efface un enregistrement. Rien ne la remplace (la 29 n'a
+  jamais été vérifiée sur le NotePin d'origine).
+- NotePin S reconnu par son nom, sinon par la lecture seule de 6AA50003 (modèle du service Localiser) :
+  connexion refusée (PlaudNotePinSRefuse), sans aucune écriture ni abonnement à 2BB0 ; un appareil reconnu
+  par 6AA50003 est refusé ensuite sans liaison radio (mémoire du processus).
+- Écritures permises seulement vers un NotePin d'origine reconnu ; stopRecord/startRecord et la commande 28
+  restent pour lui (le direct en clair en dépend).
+- Mode NotePin S du connecteur (défense en profondeur) : batterie relevée par lecture de 180F/2A19, sans
+  abonnement (justesse à confirmer), modèle « Plaud NotePin S », firmware inconnu, aucun audio annoncé.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../devices/connectors/plaud_connection.dart  | 111 ++++++++++++++++--
+ .../devices/connectors/plaud_notepin_s.dart   |  77 ++++++++++++
+ 2 files changed, 176 insertions(+), 12 deletions(-)
+ create mode 100644 app/lib/services/devices/connectors/plaud_notepin_s.dart
+
+diff --git a/app/lib/services/devices/connectors/plaud_connection.dart b/app/lib/services/devices/connectors/plaud_connection.dart
+index 304ce57..6214b60 100644
+--- a/app/lib/services/devices/connectors/plaud_connection.dart
++++ b/app/lib/services/devices/connectors/plaud_connection.dart
+@@ -1,40 +1,89 @@
+ import 'dart:async';
++import 'dart:convert';
+ 
+ import 'package:omi/backend/schema/bt_device/bt_device.dart';
+ import 'package:omi/services/devices.dart';
+ import 'package:omi/services/devices/connectors/device_connection.dart';
++import 'package:omi/services/devices/connectors/plaud_notepin_s.dart';
+ import 'package:omi/services/devices/models.dart';
+ import 'package:omi/utils/logger.dart';
+ 
++/// Modèle établi à la connexion (2026-10-08). Tant qu'il n'est pas établi, rien n'est écrit sur l'appareil.
++enum ModelePlaud { aVerifier, ancien, notePinS }
++
++/// Refus volontaire de se connecter à un NotePin S (2026-10-08) : il est lié à l'app Plaud et ignore le
++/// protocole en clair de ce connecteur. DeviceService le traite comme un échec de connexion ordinaire
++/// (déconnexion manuelle, donc sans reconnexion automatique).
++class PlaudNotePinSRefuse extends DeviceConnectionException {
++  PlaudNotePinSRefuse(String origine) : super("Plaud NotePin S lié à l'app Plaud : connexion refusée ($origine)");
++}
++
+ class PlaudDeviceConnection extends DeviceConnection {
+   static const int _cmdGetBattery = 9;
+   static const int _cmdStartRecord = 20;
+   static const int _cmdStopRecord = 23;
+   static const int _cmdSyncFileStart = 28;
+-  static const int _cmdStopSync = 30;
++  // 2026-10-08 : la commande 30 (ancien « _stopSync ») n'est plus jamais envoyée. D'après le SDK Plaud
++  // décompilé (deleteFile) et deux rétro-ingénieries, elle EFFACE un enregistrement. Le vrai arrêt du transfert
++  // serait la 29, jamais vérifiée sur le NotePin d'origine : rien ne la remplace.
+ 
+   final Map<int, StreamController<List<int>>> _commandQueues = {};
+   final StreamController<List<int>> _audioStream = StreamController<List<int>>.broadcast();
+ 
+   StreamSubscription? _notificationSub;
+   int? _sessionId;
++  ModelePlaud _modele = ModelePlaud.aVerifier;
+ 
+   PlaudDeviceConnection(super.device, super.transport);
+ 
++  ModelePlaud get modele => _modele;
++
++  // Le protocole en clair ne part que vers un NotePin d'origine reconnu : jamais avant l'identification,
++  // jamais vers un NotePin S.
++  bool get _ecrituresPermises => _modele == ModelePlaud.ancien;
++
+   @override
+   Future<void> connect({Function(String deviceId, DeviceConnectionState state)? onConnectionStateChanged}) async {
++    // Reconnu au nom (ou déjà reconnu dans ce processus) : aucune liaison, rien n'est envoyé.
++    if (PlaudNotePinS.estNotePinS(device)) {
++      _modele = ModelePlaud.notePinS;
++      throw PlaudNotePinSRefuse('nom');
++    }
+     await super.connect(onConnectionStateChanged: onConnectionStateChanged);
++
++    // Nom muet (« NotePin » de repli, nom en cache) : lecture seule du modèle Localiser avant toute écriture.
++    final modeleLu = await _lireModeleLocaliser();
++    if (PlaudNotePinS.texteDesigne(modeleLu)) {
++      _modele = ModelePlaud.notePinS;
++      PlaudNotePinS.memoriser(device.id);
++      throw PlaudNotePinSRefuse('6AA50003');
++    }
++    // Caractéristique absente ou autre modèle : comportement d'origine, pour le NotePin de 1re génération.
++    _modele = ModelePlaud.ancien;
+     await Future.delayed(const Duration(seconds: 2));
+ 
+     final stream = transport.getCharacteristicStream(plaudServiceUuid, plaudNotifyCharUuid);
+     _notificationSub = stream.listen(_handleNotification);
+   }
+ 
++  Future<String> _lireModeleLocaliser() async {
++    try {
++      final octets = await transport.readCharacteristic(
++        PlaudNotePinS.serviceLocaliserUuid,
++        PlaudNotePinS.caracteristiqueModeleUuid,
++      );
++      return utf8.decode(octets, allowMalformed: true);
++    } catch (e) {
++      Logger.debug('[PLAUD] lecture du modèle Localiser impossible : $e');
++      return '';
++    }
++  }
++
+   @override
+   Future<void> disconnect() async {
+-    if (_sessionId != null) {
++    // Seulement l'arrêt de l'enregistrement que ce connecteur a lancé (NotePin d'origine).
++    if (_sessionId != null && _ecrituresPermises) {
+       try {
+-        await _stopSync();
+         await _stopRecord(_sessionId!);
+       } catch (_) {}
+     }
+@@ -75,6 +124,10 @@ class PlaudDeviceConnection extends DeviceConnection {
+   }
+ 
+   Future<List<int>?> _sendCommand(int cmdId, List<int> payload) async {
++    if (!_ecrituresPermises) {
++      Logger.debug('[PLAUD] commande $cmdId non envoyée (modèle ${_modele.name})');
++      return null;
++    }
+     _commandQueues.putIfAbsent(cmdId, () => StreamController<List<int>>.broadcast());
+ 
+     final command = [1, cmdId & 0xFF, (cmdId >> 8) & 0xFF, ...payload];
+@@ -108,17 +161,9 @@ class PlaudDeviceConnection extends DeviceConnection {
+     return response != null;
+   }
+ 
+-  Future<void> _stopSync() async {
+-    await transport.writeCharacteristic(plaudServiceUuid, plaudWriteCharUuid, [
+-      1,
+-      _cmdStopSync & 0xFF,
+-      (_cmdStopSync >> 8) & 0xFF,
+-      1,
+-    ]);
+-  }
+-
+   @override
+   Future<int> performRetrieveBatteryLevel() async {
++    if (_modele == ModelePlaud.notePinS) return _lireBatterieStandard();
+     try {
+       final response = await _sendCommand(_cmdGetBattery, []);
+       if (response != null && response.length >= 2) {
+@@ -135,6 +180,19 @@ class PlaudDeviceConnection extends DeviceConnection {
+     }
+   }
+ 
++  /// Batterie du service standard 180F/2A19, en lecture : lisible chez Mike sans échange d'ouverture, alors que
++  /// la commande 9 restait sans réponse. Justesse à confirmer : 90 % lus à 18 h 46, « Faible » dans l'app Plaud
++  /// une heure plus tard (2026-10-08).
++  Future<int> _lireBatterieStandard() async {
++    try {
++      final data = await transport.readCharacteristic(batteryServiceUuid, batteryLevelCharacteristicUuid);
++      if (data.isNotEmpty && data[0] <= 100) return data[0];
++    } catch (e) {
++      Logger.debug('[PLAUD] lecture de 2A19 impossible : $e');
++    }
++    return -1;
++  }
++
+   Future<Map<String, dynamic>?> getBatteryState() async {
+     try {
+       final response = await _sendCommand(_cmdGetBattery, []);
+@@ -152,6 +210,10 @@ class PlaudDeviceConnection extends DeviceConnection {
+   Future<StreamSubscription<List<int>>?> performGetBleBatteryLevelListener({
+     void Function(int)? onBatteryLevelChange,
+   }) async {
++    // NotePin S : même relève périodique, par lecture de 2A19 (performRetrieveBatteryLevel), sans l'abonnement de
++    // la classe de base, qui écrirait le descripteur 2902 de l'appareil.
++    if (_modele == ModelePlaud.aVerifier) return null;
++
+     // PLAUD devices use command-based battery retrieval, not automatic notifications
+     // Battery state must be explicitly requested via CMD_GET_BATTERY (command 9)
+     // Therefore we poll periodically rather than relying on unsolicited notifications
+@@ -202,6 +264,8 @@ class PlaudDeviceConnection extends DeviceConnection {
+ 
+   @override
+   Future<BleAudioCodec> performGetAudioCodec() async {
++    // NotePin S : aucun audio annoncé (rien ne sort en clair).
++    if (_modele == ModelePlaud.notePinS) return BleAudioCodec.unknown;
+     return BleAudioCodec.opusFS320;
+   }
+ 
+@@ -209,6 +273,8 @@ class PlaudDeviceConnection extends DeviceConnection {
+   Future<StreamSubscription?> performGetBleAudioBytesListener({
+     required void Function(List<int>) onAudioBytesReceived,
+   }) async {
++    // Ni stopRecord ni startRecord hors NotePin d'origine reconnu.
++    if (!_ecrituresPermises) return null;
+     if (!await _setupRecordingSession()) {
+       Logger.debug('[PLAUD] Failed to setup recording session after retries');
+       return null;
+@@ -307,7 +373,28 @@ class PlaudDeviceConnection extends DeviceConnection {
+   @override
+   Future<int?> performGetMicGain() async => null;
+ 
++  // Écritures de la classe de base (caractéristiques d'Omi, absentes d'un Plaud) : coupées elles aussi.
++  @override
++  Future<bool> performPlayToSpeakerHaptic(int mode) async {
++    if (!_ecrituresPermises) return false;
++    return super.performPlayToSpeakerHaptic(mode);
++  }
++
++  @override
++  Future<bool> performWriteToStorage(int numFile, int command, int offset) async {
++    if (!_ecrituresPermises) return false;
++    return super.performWriteToStorage(numFile, command, offset);
++  }
++
+   Future<Map<String, String>> getDeviceInfo() async {
++    if (_modele == ModelePlaud.notePinS) {
++      return {
++        'modelNumber': PlaudNotePinS.modele,
++        'firmwareRevision': PlaudNotePinS.inconnu,
++        'hardwareRevision': PlaudNotePinS.inconnu,
++        'manufacturerName': PlaudNotePinS.fabricant,
++      };
++    }
+     return {
+       'modelNumber': 'PLAUD NotePin',
+       'firmwareRevision': '1.0.0',
+diff --git a/app/lib/services/devices/connectors/plaud_notepin_s.dart b/app/lib/services/devices/connectors/plaud_notepin_s.dart
+new file mode 100644
+index 0000000..5652ec3
+--- /dev/null
++++ b/app/lib/services/devices/connectors/plaud_notepin_s.dart
+@@ -0,0 +1,77 @@
++import 'package:flutter/foundation.dart';
++
++import 'package:omi/backend/schema/bt_device/bt_device.dart';
++
++/// Plaud NotePin S (série 882) : reconnaissance, fiche et textes (2026-10-08).
++///
++/// Le NotePin S est lié à l'app Plaud. Son protocole (portVersion 20) exige un échange d'ouverture chiffré
++/// dont seuls les serveurs de Plaud délivrent le matériel ; il n'a répondu à aucune commande en clair du
++/// connecteur d'Omi (appareil de Mike, 2026-10-08). Omi ne s'y connecte donc pas et ne lui envoie rien.
++///
++/// Reconnaissance par le nom (« Plaud NotePin S - Find My » relevé sur l'iPhone de Mike) et, si le nom ne
++/// suffit pas, par la caractéristique « modèle » du service Localiser lue à la connexion (6AA50003 =
++/// « Plaud NotePin S » chez Mike). Les données fabricant 0x005D (numéro de série en 882, portVersion ≥ 20)
++/// ne sont pas utilisées : elles ne remontent pas jusqu'à Dart (BlePeripheral ne porte que uuid, nom, rssi et
++/// services) et leur décodage ne repose que sur un relevé tiers, avec deux lectures du numéro qui divergent.
++class PlaudNotePinS {
++  PlaudNotePinS._();
++
++  static const String modele = 'Plaud NotePin S';
++  static const String fabricant = 'PLAUD';
++
++  /// Valeur inconnue selon la convention de BtDevice (affichée « Inconnu » par l'app), plutôt qu'un « 1.0.0 »
++  /// écrit en dur : la version réelle n'est pas lisible sans l'échange chiffré.
++  static const String inconnu = 'Unknown';
++
++  /// Service « informations d'accessoire » du réseau Localiser : lecture seule, sans échange d'ouverture.
++  static const String serviceLocaliserUuid = '87290102-3c51-43b1-a1a9-11b9dc38478b';
++  static const String caracteristiqueModeleUuid = '6aa50003-6352-4d57-a7b4-003a416fbb0b';
++
++  // « NotePin S », « NotePin-S », « NOTEPINS »… mais ni « NotePin », ni « NOTEPIN-S12 » (suffixe d'un autre
++  // appareil), ni « NotePin Smart ».
++  static final RegExp _motif = RegExp(r'notepin[\s_\-]*s(?![a-z0-9])', caseSensitive: false);
++
++  /// Le texte (nom publié, modèle lu) désigne-t-il un NotePin S ?
++  static bool texteDesigne(String? texte) => texte != null && _motif.hasMatch(texte);
++
++  // Appareils reconnus par 6AA50003 alors que leur nom ne le disait pas : la connexion suivante est refusée
++  // sans repasser par une liaison radio (mémoire du processus seulement).
++  static final Set<String> _reconnus = <String>{};
++
++  static void memoriser(String identifiant) {
++    if (identifiant.isNotEmpty) _reconnus.add(identifiant);
++  }
++
++  @visibleForTesting
++  static void oublierTout() => _reconnus.clear();
++
++  static bool estNotePinS(BtDevice? appareil) {
++    if (appareil == null || appareil.type != DeviceType.plaud) return false;
++    return texteDesigne(appareil.name) || texteDesigne(appareil.modelNumber) || _reconnus.contains(appareil.id);
++  }
++
++  /// Fiche d'un NotePin S mémorisé : remplace le modèle et le firmware écrits en dur par l'ancien connecteur
++  /// (« PLAUD NotePin », « 1.0.0 »). Tout autre appareil est rendu tel quel.
++  static BtDevice ficheHonnete(BtDevice appareil) {
++    if (!estNotePinS(appareil)) return appareil;
++    return appareil.copyWith(
++      modelNumber: modele,
++      firmwareRevision: inconnu,
++      hardwareRevision: inconnu,
++      manufacturerName: fabricant,
++    );
++  }
++
++  /// Avertissement montré au choix de l'appareil (aucune connexion n'est tentée).
++  static const String titre = "Plaud NotePin S : lié à l'app Plaud";
++  static const String message = "Ce Plaud NotePin S est lié à l'app Plaud. Son Bluetooth exige un échange chiffré "
++      "propre à Plaud : Omi ne peut ni recevoir son son en direct ni relever ses enregistrements.\n\n"
++      "Omi ne s'y connecte donc pas et ne lui envoie rien.\n\n"
++      "Exportez les enregistrements depuis l'app Plaud. Pour enregistrer dans Omi, utilisez le micro de l'iPhone.";
++
++  /// Carte de la page de l'appareil, à la place de « non connecté ».
++  static const String titreFiche = "Lié à l'app Plaud";
++  static const String messageFiche = "Omi ne se connecte pas au NotePin S : son Bluetooth est chiffré et réservé à "
++      "l'app Plaud. Exportez les enregistrements depuis l'app Plaud ; pour enregistrer dans Omi, utilisez le micro "
++      "de l'iPhone.";
++}

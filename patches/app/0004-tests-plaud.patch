@@ -1,0 +1,381 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 8 Oct 2026 15:50:41 +0000
+Subject: [PATCH 4/4] Tests Plaud hors appareil (test/plaud/)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Transport simulé : un NotePin S (reconnu au nom ou par 6AA50003) ne reçoit aucune écriture ni aucun
+abonnement ; rien ne part avant l'identification ; le NotePin d'origine garde 9, 23, 20, 28 puis 23 à la
+déconnexion, jamais 30. Plus la reconnaissance du nom, la fiche, l'avertissement et l'exclusion de la mise
+à jour de firmware.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ app/test/plaud/plaud_connection_test.dart | 240 ++++++++++++++++++++++
+ app/test/plaud/plaud_notepin_s_test.dart  | 108 ++++++++++
+ 2 files changed, 348 insertions(+)
+ create mode 100644 app/test/plaud/plaud_connection_test.dart
+ create mode 100644 app/test/plaud/plaud_notepin_s_test.dart
+
+diff --git a/app/test/plaud/plaud_connection_test.dart b/app/test/plaud/plaud_connection_test.dart
+new file mode 100644
+index 0000000..bbe62f9
+--- /dev/null
++++ b/app/test/plaud/plaud_connection_test.dart
+@@ -0,0 +1,240 @@
++// Connecteur Plaud sur un transport simulé (correctifs du clone, 2026-10-08) : un NotePin S ne reçoit
++// aucune écriture ni abonnement, la commande 30 ne part plus jamais, et le NotePin d'origine garde son direct
++// en clair.
++// Données fabriquées : aucun appareil, aucun réseau.
++import 'dart:async';
++import 'dart:convert';
++
++import 'package:flutter_test/flutter_test.dart';
++
++import 'package:omi/backend/schema/bt_device/bt_device.dart';
++import 'package:omi/services/devices/connectors/device_connection.dart';
++import 'package:omi/services/devices/connectors/plaud_connection.dart';
++import 'package:omi/services/devices/connectors/plaud_notepin_s.dart';
++import 'package:omi/services/devices/models.dart';
++import 'package:omi/services/devices/transports/device_transport.dart';
++
++/// Transport simulé : note chaque connexion, lecture, abonnement et écriture. Un NotePin d'origine simulé
++/// répond aux commandes en clair sur 2BB0 ; 6AA50003 vaut [modeleLocaliser] (absente si null).
++class _TransportSimule implements DeviceTransport {
++  _TransportSimule({this.modeleLocaliser, this.batterie = 90});
++
++  final List<int>? modeleLocaliser;
++  final int batterie;
++
++  final ecritures = <List<int>>[];
++  final lectures = <String>[];
++  final abonnements = <String>[];
++  int connexions = 0;
++  bool _connecte = false;
++
++  final _etat = StreamController<DeviceTransportState>.broadcast(sync: true);
++  final _flux = <String, StreamController<List<int>>>{};
++
++  StreamController<List<int>> _controleur(String service, String caracteristique) => _flux.putIfAbsent(
++        '${service.toLowerCase()}:${caracteristique.toLowerCase()}',
++        () => StreamController<List<int>>.broadcast(),
++      );
++
++  /// Identifiants des commandes en clair écrites (octets 1 et 2 de chaque trame).
++  List<int> get commandes => [
++        for (final trame in ecritures)
++          if (trame.length >= 3) trame[1] | (trame[2] << 8),
++      ];
++
++  void notifier(String service, String caracteristique, List<int> valeur) =>
++      _controleur(service, caracteristique).add(valeur);
++
++  @override
++  String get deviceId => 'transport-simule';
++
++  @override
++  Future<void> connect() async {
++    connexions++;
++    _connecte = true;
++    _etat.add(DeviceTransportState.connected);
++  }
++
++  @override
++  Future<void> disconnect() async {
++    _connecte = false;
++    _etat.add(DeviceTransportState.disconnected);
++  }
++
++  @override
++  Future<bool> isConnected() async => _connecte;
++
++  @override
++  Future<bool> ping() async => _connecte;
++
++  @override
++  Future<bool> requestBond() async => true;
++
++  @override
++  Stream<DeviceTransportState> get connectionStateStream => _etat.stream;
++
++  @override
++  Future<void> dispose() async {}
++
++  @override
++  Stream<List<int>> getCharacteristicStream(String serviceUuid, String characteristicUuid) {
++    abonnements.add(characteristicUuid.toLowerCase());
++    return _controleur(serviceUuid, characteristicUuid).stream;
++  }
++
++  @override
++  Future<List<int>> readCharacteristic(String serviceUuid, String characteristicUuid) async {
++    final caracteristique = characteristicUuid.toLowerCase();
++    lectures.add(caracteristique);
++    if (caracteristique == PlaudNotePinS.caracteristiqueModeleUuid) return modeleLocaliser ?? <int>[];
++    if (caracteristique == batteryLevelCharacteristicUuid) return [batterie];
++    return <int>[];
++  }
++
++  @override
++  Future<void> writeCharacteristic(String serviceUuid, String characteristicUuid, List<int> data) async {
++    ecritures.add(List<int>.of(data));
++    if (characteristicUuid.toLowerCase() != plaudWriteCharUuid || data.length < 3) return;
++    final commande = data[1] | (data[2] << 8);
++    final charge = switch (commande) {
++      9 => [0, 77], // [en charge, niveau]
++      20 => [0x44, 0x33, 0x22, 0x11, 0x00, 0x10, 0x00, 0x00, 0, 0], // session 0x11223344
++      _ => [0],
++    };
++    // Réponse un peu plus tard : le connecteur n'écoute qu'après l'écriture, et un flux diffusé perd un
++    // évènement sans auditeur.
++    Timer(const Duration(milliseconds: 1), () {
++      notifier(plaudServiceUuid, plaudNotifyCharUuid, [1, commande & 0xFF, commande >> 8, ...charge]);
++    });
++  }
++}
++
++BtDevice _appareil(String nom, {String id = 'plaud-essai'}) =>
++    BtDevice(name: nom, id: id, type: DeviceType.plaud, rssi: -60);
++
++void main() {
++  TestWidgetsFlutterBinding.ensureInitialized();
++  setUp(PlaudNotePinS.oublierTout);
++  tearDown(PlaudNotePinS.oublierTout);
++
++  group('NotePin S', () {
++    test('reconnu au nom : connexion refusée sans liaison, sans lecture ni écriture', () async {
++      final transport = _TransportSimule();
++      final connexion = PlaudDeviceConnection(_appareil('Plaud NotePin S - Find My'), transport);
++
++      await expectLater(
++        connexion.connect(),
++        throwsA(allOf(isA<PlaudNotePinSRefuse>(), isA<DeviceConnectionException>())),
++      );
++      expect(connexion.modele, ModelePlaud.notePinS);
++      expect(transport.connexions, 0);
++      expect(transport.lectures, isEmpty);
++      expect(transport.abonnements, isEmpty);
++      expect(transport.ecritures, isEmpty);
++    });
++
++    test('nom muet, reconnu par 6AA50003 : seule cette lecture, puis refus ; la suite sans liaison', () async {
++      final appareil = _appareil('NotePin', id: 'nom-de-repli');
++      final transport = _TransportSimule(modeleLocaliser: utf8.encode('Plaud NotePin S'));
++      final connexion = PlaudDeviceConnection(appareil, transport);
++
++      await expectLater(connexion.connect(), throwsA(isA<PlaudNotePinSRefuse>()));
++      expect(connexion.modele, ModelePlaud.notePinS);
++      expect(transport.connexions, 1);
++      expect(transport.lectures, [PlaudNotePinS.caracteristiqueModeleUuid]);
++      expect(transport.abonnements, isEmpty, reason: 'pas d\'abonnement à 2BB0');
++      expect(transport.ecritures, isEmpty);
++
++      // Reconnu pour la suite du processus : la connexion suivante est refusée avant toute liaison.
++      expect(PlaudNotePinS.estNotePinS(appareil), isTrue);
++      final suivant = _TransportSimule(modeleLocaliser: utf8.encode('Plaud NotePin S'));
++      await expectLater(PlaudDeviceConnection(appareil, suivant).connect(), throwsA(isA<PlaudNotePinSRefuse>()));
++      expect(suivant.connexions, 0);
++    });
++
++    test('mode NotePin S : batterie 2A19, fiche honnête, pas d\'audio, aucune écriture', () async {
++      final transport = _TransportSimule(batterie: 90);
++      final connexion = PlaudDeviceConnection(_appareil('Plaud NotePin S'), transport);
++      await expectLater(connexion.connect(), throwsA(isA<PlaudNotePinSRefuse>()));
++
++      expect(await connexion.performRetrieveBatteryLevel(), 90);
++
++      final niveaux = <int>[];
++      final releve = await connexion.performGetBleBatteryLevelListener(onBatteryLevelChange: niveaux.add);
++      expect(niveaux, [90], reason: 'première lecture tout de suite');
++      await releve?.cancel();
++      expect(transport.abonnements, isEmpty, reason: 'relève par lecture : descripteur 2902 jamais écrit');
++      expect(transport.lectures, everyElement(batteryLevelCharacteristicUuid));
++
++      expect(await connexion.performGetAudioCodec(), BleAudioCodec.unknown);
++      expect(await connexion.performGetBleAudioBytesListener(onAudioBytesReceived: (_) {}), isNull);
++      expect(await connexion.getBatteryState(), isNull);
++      expect(await connexion.performPlayToSpeakerHaptic(3), isFalse);
++      expect(await connexion.performWriteToStorage(0, 0, 0), isFalse);
++
++      final fiche = await connexion.getDeviceInfo();
++      expect(fiche['modelNumber'], 'Plaud NotePin S');
++      expect(fiche['firmwareRevision'], 'Unknown');
++      expect(fiche['manufacturerName'], 'PLAUD');
++
++      await connexion.disconnect();
++      expect(transport.ecritures, isEmpty);
++    });
++  });
++
++  group('avant identification', () {
++    test('aucune commande ne part tant que le modèle n\'est pas établi', () async {
++      final transport = _TransportSimule();
++      final connexion = PlaudDeviceConnection(_appareil('PLAUD NotePin'), transport);
++      expect(connexion.modele, ModelePlaud.aVerifier);
++
++      expect(await connexion.performRetrieveBatteryLevel(), -1);
++      expect(await connexion.performGetBleBatteryLevelListener(onBatteryLevelChange: (_) {}), isNull);
++      expect(await connexion.performGetBleAudioBytesListener(onAudioBytesReceived: (_) {}), isNull);
++      await connexion.disconnect();
++      expect(transport.ecritures, isEmpty);
++    });
++  });
++
++  group('NotePin d\'origine (1re génération)', () {
++    test(
++      'direct en clair inchangé ; à la déconnexion, arrêt de sa session et jamais la commande 30',
++      () async {
++        final transport = _TransportSimule(); // 6AA50003 absente
++        final connexion = PlaudDeviceConnection(_appareil('PLAUD NotePin'), transport);
++
++        await connexion.connect();
++        expect(connexion.modele, ModelePlaud.ancien);
++        expect(transport.abonnements, [plaudNotifyCharUuid]);
++        expect(await connexion.performGetAudioCodec(), BleAudioCodec.opusFS320);
++        expect(await connexion.performRetrieveBatteryLevel(), 77);
++
++        final audio = await connexion.performGetBleAudioBytesListener(onAudioBytesReceived: (_) {});
++        expect(audio, isNotNull);
++
++        await connexion.disconnect();
++        // 9 batterie ; 23 arrêt (session 0), 20 démarrage, 28 transfert ; 23 arrêt de la session à la fin.
++        expect(transport.commandes, [9, 23, 20, 28, 23]);
++        expect(transport.commandes, isNot(contains(30)));
++        expect(transport.ecritures.last.sublist(3, 7), [0x44, 0x33, 0x22, 0x11]);
++      },
++      timeout: const Timeout(Duration(seconds: 60)),
++    );
++
++    test(
++      '6AA50003 présente mais d\'un autre modèle : comportement d\'origine',
++      () async {
++        final transport = _TransportSimule(modeleLocaliser: utf8.encode('PLAUD NotePin'));
++        final connexion = PlaudDeviceConnection(_appareil('PLAUD NotePin'), transport);
++
++        await connexion.connect();
++        expect(connexion.modele, ModelePlaud.ancien);
++        expect(PlaudNotePinS.estNotePinS(connexion.device), isFalse);
++        expect(transport.abonnements, [plaudNotifyCharUuid]);
++        await connexion.disconnect();
++        expect(transport.ecritures, isEmpty, reason: 'aucune session lancée, rien à arrêter');
++      },
++      timeout: const Timeout(Duration(seconds: 60)),
++    );
++  });
++}
+diff --git a/app/test/plaud/plaud_notepin_s_test.dart b/app/test/plaud/plaud_notepin_s_test.dart
+new file mode 100644
+index 0000000..b42bc71
+--- /dev/null
++++ b/app/test/plaud/plaud_notepin_s_test.dart
+@@ -0,0 +1,108 @@
++// Reconnaissance du NotePin S, fiche honnête et mise à jour de firmware (correctifs du clone, 2026-10-08).
++// Données fabriquées : aucun appareil, aucun réseau.
++import 'package:flutter_test/flutter_test.dart';
++
++import 'package:omi/backend/schema/bt_device/bt_device.dart';
++import 'package:omi/gen/pigeon_communicator.g.dart';
++import 'package:omi/services/devices/connectors/plaud_notepin_s.dart';
++import 'package:omi/services/devices/discovery/native_bluetooth_discoverer.dart';
++import 'package:omi/utils/firmware_update_build_policy.dart';
++
++BtDevice _appareil(String nom, {DeviceType type = DeviceType.plaud, String id = 'plaud-essai'}) =>
++    BtDevice(name: nom, id: id, type: type, rssi: -60);
++
++void main() {
++  setUp(PlaudNotePinS.oublierTout);
++  tearDown(PlaudNotePinS.oublierTout);
++
++  group('nom ou modèle désignant un NotePin S', () {
++    // « Plaud NotePin S - Find My » : nom relevé sur l'iPhone de Mike ; « Plaud NotePin S » : 6AA50003.
++    const reconnus = [
++      'Plaud NotePin S - Find My',
++      'Plaud NotePin S',
++      'NotePin S',
++      'NOTEPIN S',
++      'NotePin-S',
++      'notepins'
++    ];
++    const ecartes = ['NotePin', 'PLAUD NotePin', 'NOTEPIN-B892', 'NOTEPIN-S12', 'NotePin Smart', 'PLAUD NOTE', ''];
++
++    for (final nom in reconnus) {
++      test('reconnaît « $nom »', () => expect(PlaudNotePinS.texteDesigne(nom), isTrue));
++    }
++    for (final nom in ecartes) {
++      test('écarte « $nom »', () => expect(PlaudNotePinS.texteDesigne(nom), isFalse));
++    }
++    test('écarte une valeur absente', () => expect(PlaudNotePinS.texteDesigne(null), isFalse));
++  });
++
++  group('appareil NotePin S', () {
++    test('seulement pour un appareil de type Plaud', () {
++      expect(PlaudNotePinS.estNotePinS(_appareil('Plaud NotePin S')), isTrue);
++      expect(PlaudNotePinS.estNotePinS(_appareil('NotePin S', type: DeviceType.omi)), isFalse);
++      expect(PlaudNotePinS.estNotePinS(_appareil('PLAUD NotePin')), isFalse);
++      expect(PlaudNotePinS.estNotePinS(null), isFalse);
++    });
++
++    test('par le modèle mémorisé, ou par un identifiant reconnu à la connexion', () {
++      final parModele = _appareil('NotePin')..modelNumber = 'Plaud NotePin S';
++      expect(PlaudNotePinS.estNotePinS(parModele), isTrue);
++
++      final muet = _appareil('NotePin', id: 'reconnu-par-6AA50003');
++      expect(PlaudNotePinS.estNotePinS(muet), isFalse);
++      PlaudNotePinS.memoriser(muet.id);
++      expect(PlaudNotePinS.estNotePinS(muet), isTrue);
++    });
++
++    test('découverte : le nom publié chez Mike donne un Plaud reconnu comme NotePin S', () {
++      final appareil = NativeBluetoothDiscoverer.peripheralToDevice(
++        BlePeripheral(uuid: 'uuid-essai', name: 'Plaud NotePin S - Find My', rssi: -60, serviceUuids: []),
++      );
++      expect(appareil.type, DeviceType.plaud);
++      expect(PlaudNotePinS.estNotePinS(appareil), isTrue);
++    });
++  });
++
++  group('fiche', () {
++    test('NotePin S mémorisé par l\'ancien connecteur : vrai modèle, firmware inconnu', () {
++      final memorise = _appareil('Plaud NotePin S - Find My')
++        ..modelNumber = 'PLAUD NotePin'
++        ..firmwareRevision = '1.0.0'
++        ..hardwareRevision = '1.0.0'
++        ..manufacturerName = 'PLAUD';
++      final fiche = PlaudNotePinS.ficheHonnete(memorise);
++      expect(fiche.modelNumber, 'Plaud NotePin S');
++      expect(fiche.firmwareRevision, 'Unknown');
++      expect(fiche.hardwareRevision, 'Unknown');
++      expect(fiche.manufacturerName, 'PLAUD');
++      expect(fiche.id, memorise.id);
++      expect(fiche.name, memorise.name);
++    });
++
++    test('NotePin d\'origine : fiche inchangée', () {
++      final ancien = _appareil('PLAUD NotePin')..firmwareRevision = '1.0.0';
++      expect(identical(PlaudNotePinS.ficheHonnete(ancien), ancien), isTrue);
++    });
++
++    test('avertissement : un refus pour le NotePin S, la note d\'origine pour les autres Plaud', () {
++      final notePinS = _appareil('Plaud NotePin S');
++      expect(notePinS.getFirmwareWarningTitle(), PlaudNotePinS.titre);
++      expect(notePinS.getFirmwareWarningMessage(), PlaudNotePinS.message);
++      expect(PlaudNotePinS.message, contains("lié à l'app Plaud"));
++
++      final ancien = _appareil('PLAUD NotePin');
++      expect(ancien.getFirmwareWarningTitle(), 'Compatibility Note');
++      expect(ancien.getFirmwareWarningMessage(), contains('PLAUD app'));
++    });
++  });
++
++  group('mise à jour de firmware', () {
++    test('jamais pour un Plaud, quel que soit le modèle ; inchangée pour Omi', () {
++      const politique = FirmwareUpdateBuildPolicy(rayBanDat: false);
++      expect(politique.allowsFirmwareUpdateForDevice(_appareil('PLAUD NotePin')), isFalse);
++      expect(politique.allowsFirmwareUpdateForDevice(_appareil('Plaud NotePin S')), isFalse);
++      expect(politique.allowsFirmwareUpdateForDevice(_appareil('PLAUD NOTE')), isFalse);
++      expect(politique.allowsFirmwareUpdateForDevice(_appareil('Omi', type: DeviceType.omi)), isTrue);
++    });
++  });
++}

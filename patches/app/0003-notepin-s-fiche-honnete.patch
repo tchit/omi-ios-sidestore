@@ -1,0 +1,163 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 8 Oct 2026 15:50:41 +0000
+Subject: [PATCH 3/4] =?UTF-8?q?NotePin=20S=20:=20fiche=20honn=C3=AAte=20et?=
+ =?UTF-8?q?=20message=20=C2=AB=20li=C3=A9=20=C3=A0=20l'app=20Plaud=20?=
+ =?UTF-8?q?=C2=BB?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- Liste des appareils trouvés : choisir un NotePin S affiche un avertissement qu'on ne peut pas masquer,
+  sans tenter de connexion (la connexion refusée échouait sans un mot).
+- Page de l'appareil : carte « Lié à l'app Plaud » au lieu de « non connecté ».
+- Fiche mémorisée : modèle « Plaud NotePin S » et firmware inconnu au lieu de « PLAUD NotePin » / « 1.0.0 »,
+  valeurs écrites en dur par l'ancien connecteur.
+
+Pourquoi ne pas se connecter du tout : un appareil connecté devient la source du direct (le bouton
+d'enregistrement ouvre la feuille « le pendentif écoute ») et ouvre une session /v4/listen vide, comme
+observé chez Mike le 2026-10-08 ; sans connexion, le bouton enregistre au micro de l'iPhone.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ app/lib/backend/schema/bt_device/bt_device.dart        |  4 ++++
+ .../pages/onboarding/find_device/found_devices.dart    |  7 ++++++-
+ app/lib/pages/settings/device/device_page_header.dart  | 10 +++++++---
+ app/lib/pages/settings/device_settings.dart            |  3 +++
+ app/lib/providers/device_provider.dart                 |  4 +++-
+ 5 files changed, 23 insertions(+), 5 deletions(-)
+
+diff --git a/app/lib/backend/schema/bt_device/bt_device.dart b/app/lib/backend/schema/bt_device/bt_device.dart
+index eb34c8d..bfacdea 100644
+--- a/app/lib/backend/schema/bt_device/bt_device.dart
++++ b/app/lib/backend/schema/bt_device/bt_device.dart
+@@ -11,6 +11,7 @@ import 'package:omi/services/devices/connectors/limitless_connection.dart';
+ import 'package:omi/services/devices/connectors/omi_connection.dart';
+ import 'package:omi/services/devices/connectors/omiglass_connection.dart';
+ import 'package:omi/services/devices/connectors/plaud_connection.dart';
++import 'package:omi/services/devices/connectors/plaud_notepin_s.dart';
+ import 'package:omi/utils/logger.dart';
+ 
+ enum ImageOrientation {
+@@ -648,6 +649,8 @@ class BtDevice {
+   String getFirmwareWarningTitle() {
+     switch (type) {
+       case DeviceType.plaud:
++        // NotePin S : pas une note de compatibilité, un refus (2026-10-08).
++        return PlaudNotePinS.estNotePinS(this) ? PlaudNotePinS.titre : 'Compatibility Note';
+       case DeviceType.fieldy:
+       case DeviceType.friendPendant:
+       case DeviceType.limitless:
+@@ -667,6 +670,7 @@ class BtDevice {
+   String getFirmwareWarningMessage() {
+     switch (type) {
+       case DeviceType.plaud:
++        if (PlaudNotePinS.estNotePinS(this)) return PlaudNotePinS.message;
+         return 'Your $name\'s current firmware works great with Omi.\n\n'
+             'We recommend keeping your current firmware and not updating through the PLAUD app, as newer versions may affect compatibility.';
+ 
+diff --git a/app/lib/pages/onboarding/find_device/found_devices.dart b/app/lib/pages/onboarding/find_device/found_devices.dart
+index 932cb31..dd59f87 100644
+--- a/app/lib/pages/onboarding/find_device/found_devices.dart
++++ b/app/lib/pages/onboarding/find_device/found_devices.dart
+@@ -13,6 +13,7 @@ import 'package:omi/pages/onboarding/apple_watch_permission_page.dart';
+ import 'package:omi/providers/device_provider.dart';
+ import 'package:omi/providers/onboarding_provider.dart';
+ import 'package:omi/services/devices/connectors/apple_watch_connection.dart';
++import 'package:omi/services/devices/connectors/plaud_notepin_s.dart';
+ import 'package:omi/services/devices/discovery/rayban_meta_discoverer.dart';
+ import 'package:omi/utils/error_message.dart';
+ import 'package:omi/widgets/rayban_meta_setup_sheet.dart';
+@@ -215,7 +216,8 @@ class _FoundDevicesState extends State<FoundDevices> {
+ 
+     // Critical firmware warnings (e.g. unsupported encrypted firmware) always show,
+     // regardless of prior acknowledgment. Only skip for non-critical compatibility notes.
+-    final isCritical = device.type == DeviceType.bee && device.isBeeFirmwareUnsupported;
++    final isCritical =
++        (device.type == DeviceType.bee && device.isBeeFirmwareUnsupported) || PlaudNotePinS.estNotePinS(device);
+ 
+     if (!isCritical) {
+       final prefKey = 'firmware_warning_acknowledged_${device.type.toString()}';
+@@ -378,6 +380,9 @@ class _FoundDevicesState extends State<FoundDevices> {
+                 await _handleAppleWatchOnboarding(device, provider);
+               } else if (device.type == DeviceType.raybanMeta) {
+                 await _handleRayBanMetaOnboarding(device, provider);
++              } else if (PlaudNotePinS.estNotePinS(device)) {
++                // NotePin S : message honnête au lieu d'une connexion qui échouerait sans un mot (2026-10-08).
++                await _showFirmwareWarningIfNeeded(device);
+               } else {
+                 // Handle other devices
+                 await provider.handleTap(
+diff --git a/app/lib/pages/settings/device/device_page_header.dart b/app/lib/pages/settings/device/device_page_header.dart
+index 4b33184..265ff7a 100644
+--- a/app/lib/pages/settings/device/device_page_header.dart
++++ b/app/lib/pages/settings/device/device_page_header.dart
+@@ -112,7 +112,11 @@ class DeviceBatteryGroup extends StatelessWidget {
+ 
+ /// Shown instead of the device controls while the device is not connected.
+ class DeviceDisconnectedCard extends StatelessWidget {
+-  const DeviceDisconnectedCard({super.key});
++  const DeviceDisconnectedCard({super.key, this.titre, this.message});
++
++  /// Textes d'un appareil auquel Omi ne se connecte pas (NotePin S, 2026-10-08) ; sinon ceux d'origine.
++  final String? titre;
++  final String? message;
+ 
+   @override
+   Widget build(BuildContext context) {
+@@ -130,10 +134,10 @@ class DeviceDisconnectedCard extends StatelessWidget {
+             child: Center(child: FaIcon(FontAwesomeIcons.linkSlash, color: OmiColors.textTertiary, size: 24)),
+           ),
+           const SizedBox(height: OmiSpacing.lg),
+-          Text(context.l10n.deviceNotConnected, style: OmiType.headline, textAlign: TextAlign.center),
++          Text(titre ?? context.l10n.deviceNotConnected, style: OmiType.headline, textAlign: TextAlign.center),
+           const SizedBox(height: OmiSpacing.xs),
+           Text(
+-            context.l10n.connectDeviceMessage,
++            message ?? context.l10n.connectDeviceMessage,
+             textAlign: TextAlign.center,
+             style: OmiType.subhead.copyWith(color: OmiColors.textSecondary, height: 1.4),
+           ),
+diff --git a/app/lib/pages/settings/device_settings.dart b/app/lib/pages/settings/device_settings.dart
+index 8d7b00e..de8a9dc 100644
+--- a/app/lib/pages/settings/device_settings.dart
++++ b/app/lib/pages/settings/device_settings.dart
+@@ -22,6 +22,7 @@ import 'package:omi/providers/capture_provider.dart';
+ import 'package:omi/providers/device_provider.dart';
+ import 'package:omi/providers/sync_provider.dart';
+ import 'package:omi/services/devices.dart';
++import 'package:omi/services/devices/connectors/plaud_notepin_s.dart';
+ import 'package:omi/services/devices/connectors/rayban_meta_connection.dart';
+ import 'package:omi/services/services.dart';
+ import 'package:omi/ui/ui.dart';
+@@ -583,6 +584,8 @@ class _DeviceSettingsState extends State<DeviceSettings> {
+           ],
+           if (provider.isConnected)
+             _customizationGroup(paired ?? connected, provider)
++          else if (PlaudNotePinS.estNotePinS(paired))
++            const DeviceDisconnectedCard(titre: PlaudNotePinS.titreFiche, message: PlaudNotePinS.messageFiche)
+           else
+             const DeviceDisconnectedCard(),
+           gap,
+diff --git a/app/lib/providers/device_provider.dart b/app/lib/providers/device_provider.dart
+index d53944d..b51c398 100644
+--- a/app/lib/providers/device_provider.dart
++++ b/app/lib/providers/device_provider.dart
+@@ -21,6 +21,7 @@ import 'package:omi/services/capture/capture_wedge_monitor.dart';
+ import 'package:omi/services/devices.dart';
+ import 'package:omi/services/devices/connectors/device_connection.dart';
+ import 'package:omi/services/devices/connectors/omi_connection.dart';
++import 'package:omi/services/devices/connectors/plaud_notepin_s.dart';
+ import 'package:omi/services/bridges/ble_bridge.dart';
+ import 'package:omi/services/notifications.dart';
+ import 'package:omi/services/services.dart';
+@@ -372,7 +373,8 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
+       if (SharedPreferencesUtil().btDevice.id.isEmpty) {
+         pairedDevice = BtDevice.empty();
+       } else {
+-        pairedDevice = SharedPreferencesUtil().btDevice;
++        // NotePin S mémorisé par l'ancien connecteur : vrai modèle, firmware inconnu, au lieu des valeurs en dur.
++        pairedDevice = PlaudNotePinS.ficheHonnete(SharedPreferencesUtil().btDevice);
+       }
+     }
+     if (!_isCurrent(generation)) return;

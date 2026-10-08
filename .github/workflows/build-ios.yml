@@ -39,6 +39,28 @@ jobs:
           path: omi
           fetch-depth: 1
 
+      - name: Recette (ce dépôt, pour ses correctifs)
+        uses: actions/checkout@v4
+        with:
+          path: recette
+          fetch-depth: 1
+
+      - name: Correctifs du clone (patches/app)
+        working-directory: omi
+        shell: bash
+        run: |
+          set -euo pipefail
+          # 2026-10-08 : appliqués au code d'Omi intact, avant les sed de la préparation (autres fichiers). S'ils ne
+          # s'appliquent plus (OMI_COMMIT changé, amont déplacé), la compilation s'arrête ici au lieu de livrer
+          # une app sans eux : les refaire sur la nouvelle version.
+          shopt -s nullglob
+          correctifs=("$GITHUB_WORKSPACE"/recette/patches/app/*.patch)
+          [ ${#correctifs[@]} -gt 0 ] || { echo "aucun correctif dans recette/patches/app" >&2; exit 1; }
+          git apply --check "${correctifs[@]}"
+          git apply "${correctifs[@]}"
+          printf 'appliqué : %s\n' "${correctifs[@]##*/}"
+          git status --short
+
       - name: Xcode
         uses: maxim-lobanov/setup-xcode@v1
         with:
@@ -90,6 +112,13 @@ jobs:
           flutter pub get
           dart run build_runner build --delete-conflicting-outputs
           cd ios && pod install --repo-update
+
+      - name: Tests des correctifs Plaud (hors appareil)
+        working-directory: omi/app
+        # test/plaud/ vient de patches/app ; les deux autres sont ceux d'Omi sur les fichiers touchés
+        run: >-
+          flutter test test/plaud/ test/unit/firmware_update_build_policy_test.dart
+          test/unit/native_bluetooth_discoverer_plaud_test.dart
 
       - name: Compilation sans signature
         working-directory: omi/app

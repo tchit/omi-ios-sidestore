@@ -1,0 +1,31 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 8 Oct 2026 15:50:41 +0000
+Subject: [PATCH 2/4] =?UTF-8?q?Plaud=20exclu=20de=20la=20mise=20=C3=A0=20j?=
+ =?UTF-8?q?our=20de=20firmware=20d'Omi?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Le chemin de mise à jour d'Omi (DFU de ses pendentifs) n'était évité pour un Plaud que par le 404 du
+serveur ; une mise à jour de firmware Plaud efface les enregistrements (doc Plaud Embedded).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ app/lib/utils/firmware_update_build_policy.dart | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/app/lib/utils/firmware_update_build_policy.dart b/app/lib/utils/firmware_update_build_policy.dart
+index 0d310ab..2f5ae29 100644
+--- a/app/lib/utils/firmware_update_build_policy.dart
++++ b/app/lib/utils/firmware_update_build_policy.dart
+@@ -32,6 +32,9 @@ class FirmwareUpdateBuildPolicy {
+ 
+   bool allowsFirmwareUpdateForDevice(BtDevice? device) {
+     if (device?.type == DeviceType.raybanMeta) return false;
++    // 2026-10-08 : jamais pour un Plaud. Le chemin d'Omi (DFU de ses pendentifs) n'était évité que par le 404
++    // du serveur ; et une mise à jour de firmware Plaud efface les enregistrements (doc Plaud Embedded).
++    if (device?.type == DeviceType.plaud) return false;
+     return allowsFirmwareUpdate(isOpenGlass: isOpenGlassDevice(device));
+   }
+ }
