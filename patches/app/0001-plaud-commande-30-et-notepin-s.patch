@@ -2,7 +2,7 @@ From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Thu, 8 Oct 2026 15:50:41 +0000
 Subject: [PATCH 1/4] =?UTF-8?q?Plaud=20:=20plus=20de=20commande=2030,=20au?=
- =?UTF-8?q?cune=20=C3=A9criture=20vers=20un=20NotePin=20S?=
+ =?UTF-8?q?cune=20=C3=A9criture=20vers=20un=20Plaud=20non=20identifi=C3=A9?=
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
@@ -13,23 +13,28 @@ Content-Transfer-Encoding: 8bit
 - NotePin S reconnu par son nom, sinon par la lecture seule de 6AA50003 (modèle du service Localiser) :
   connexion refusée (PlaudNotePinSRefuse), sans aucune écriture ni abonnement à 2BB0 ; un appareil reconnu
   par 6AA50003 est refusé ensuite sans liaison radio (mémoire du processus).
-- Écritures permises seulement vers un NotePin d'origine reconnu ; stopRecord/startRecord et la commande 28
-  restent pour lui (le direct en clair en dépend).
+- Échec en mode fermé : un Plaud que ni son nom ni 6AA50003 ne désignent comme NotePin S (caractéristique
+  absente, vide, illisible, ou autre modèle) est refusé aussi (PlaudNonIdentifieRefuse), sans abonnement ni
+  commande. NativeBleTransport rend la même liste vide pour une caractéristique absente et pour une lecture
+  en erreur : un NotePin S au nom muet (« NotePin » de repli) ne se distingue pas d'un ancien NotePin.
+- Le direct en clair du NotePin de 1re génération (série 880 : abonnement à 2BB0, commandes 9, 23, 20, 28)
+  ne reste que derrière la constante PlaudDeviceConnection.directNotePinOrigineParDefaut, à false : Mike
+  n'a pas de NotePin 880.
 - Mode NotePin S du connecteur (défense en profondeur) : batterie relevée par lecture de 180F/2A19, sans
   abonnement (justesse à confirmer), modèle « Plaud NotePin S », firmware inconnu, aucun audio annoncé.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
- .../devices/connectors/plaud_connection.dart  | 111 ++++++++++++++++--
- .../devices/connectors/plaud_notepin_s.dart   |  77 ++++++++++++
- 2 files changed, 176 insertions(+), 12 deletions(-)
+ .../devices/connectors/plaud_connection.dart  | 144 ++++++++++++++++--
+ .../devices/connectors/plaud_notepin_s.dart   |  77 ++++++++++
+ 2 files changed, 208 insertions(+), 13 deletions(-)
  create mode 100644 app/lib/services/devices/connectors/plaud_notepin_s.dart
 
 diff --git a/app/lib/services/devices/connectors/plaud_connection.dart b/app/lib/services/devices/connectors/plaud_connection.dart
-index 304ce57..6214b60 100644
+index 304ce57..3666ee1 100644
 --- a/app/lib/services/devices/connectors/plaud_connection.dart
 +++ b/app/lib/services/devices/connectors/plaud_connection.dart
-@@ -1,40 +1,89 @@
+@@ -1,40 +1,111 @@
  import 'dart:async';
 +import 'dart:convert';
  
@@ -40,14 +45,21 @@ index 304ce57..6214b60 100644
  import 'package:omi/services/devices/models.dart';
  import 'package:omi/utils/logger.dart';
  
-+/// Modèle établi à la connexion (2026-10-08). Tant qu'il n'est pas établi, rien n'est écrit sur l'appareil.
-+enum ModelePlaud { aVerifier, ancien, notePinS }
++/// Modèle établi à la connexion (2026-10-08). Seul `ancien` reçoit des écritures ; `nonIdentifie` : refusé faute
++/// d'identification positive.
++enum ModelePlaud { aVerifier, ancien, notePinS, nonIdentifie }
 +
 +/// Refus volontaire de se connecter à un NotePin S (2026-10-08) : il est lié à l'app Plaud et ignore le
 +/// protocole en clair de ce connecteur. DeviceService le traite comme un échec de connexion ordinaire
 +/// (déconnexion manuelle, donc sans reconnexion automatique).
 +class PlaudNotePinSRefuse extends DeviceConnectionException {
 +  PlaudNotePinSRefuse(String origine) : super("Plaud NotePin S lié à l'app Plaud : connexion refusée ($origine)");
++}
++
++/// Refus d'un Plaud que ni son nom ni 6AA50003 ne désignent comme NotePin S, tant que le direct de l'ancien NotePin
++/// est coupé (2026-10-08) : échec en mode fermé, rien n'est envoyé.
++class PlaudNonIdentifieRefuse extends DeviceConnectionException {
++  PlaudNonIdentifieRefuse(String detail) : super('Plaud non identifié : connexion refusée, rien envoyé ($detail)');
 +}
 +
  class PlaudDeviceConnection extends DeviceConnection {
@@ -66,15 +78,25 @@ index 304ce57..6214b60 100644
    StreamSubscription? _notificationSub;
    int? _sessionId;
 +  ModelePlaud _modele = ModelePlaud.aVerifier;
- 
-   PlaudDeviceConnection(super.device, super.transport);
- 
++
++  /// Direct en clair du NotePin de 1re génération (série 880) : COUPÉ dans ce clone (2026-10-08). Mike n'en a pas,
++  /// et rien ne l'identifie positivement : NativeBleTransport rend la même liste vide pour 6AA50003 absente ou en
++  /// erreur, si bien qu'un NotePin S au nom muet passerait pour lui et recevrait l'abonnement à 2BB0 puis les
++  /// commandes 9, 23, 20 et 28. À n'activer que pour un vrai NotePin 880 (README de la recette).
++  static const bool directNotePinOrigineParDefaut = false;
++
++  /// Réglable pour les tests ; DeviceConnectionFactory garde toujours la valeur par défaut.
++  final bool directNotePinOrigine;
++
++  PlaudDeviceConnection(super.device, super.transport, {this.directNotePinOrigine = directNotePinOrigineParDefaut});
++
 +  ModelePlaud get modele => _modele;
-+
-+  // Le protocole en clair ne part que vers un NotePin d'origine reconnu : jamais avant l'identification,
-+  // jamais vers un NotePin S.
+ 
+-  PlaudDeviceConnection(super.device, super.transport);
++  // Le protocole en clair ne part que vers un NotePin d'origine admis (direct activé) : jamais avant
++  // l'identification, jamais vers un NotePin S ni vers un Plaud non identifié.
 +  bool get _ecrituresPermises => _modele == ModelePlaud.ancien;
-+
+ 
    @override
    Future<void> connect({Function(String deviceId, DeviceConnectionState state)? onConnectionStateChanged}) async {
 +    // Reconnu au nom (ou déjà reconnu dans ce processus) : aucune liaison, rien n'est envoyé.
@@ -91,7 +113,13 @@ index 304ce57..6214b60 100644
 +      PlaudNotePinS.memoriser(device.id);
 +      throw PlaudNotePinSRefuse('6AA50003');
 +    }
-+    // Caractéristique absente ou autre modèle : comportement d'origine, pour le NotePin de 1re génération.
++    // Rien ne désigne un NotePin S (6AA50003 absente, vide, illisible, ou autre modèle). Direct de l'ancien NotePin
++    // coupé : refus, sans abonnement ni commande. Activé : comportement d'origine, pour le NotePin 880.
++    if (!directNotePinOrigine) {
++      _modele = ModelePlaud.nonIdentifie;
++      final lu = modeleLu.replaceAll('\u0000', '').trim();
++      throw PlaudNonIdentifieRefuse(lu.isEmpty ? '6AA50003 absente, vide ou illisible' : 'modèle lu « $lu »');
++    }
 +    _modele = ModelePlaud.ancien;
      await Future.delayed(const Duration(seconds: 2));
  
@@ -122,7 +150,7 @@ index 304ce57..6214b60 100644
          await _stopRecord(_sessionId!);
        } catch (_) {}
      }
-@@ -75,6 +124,10 @@ class PlaudDeviceConnection extends DeviceConnection {
+@@ -75,6 +146,10 @@ class PlaudDeviceConnection extends DeviceConnection {
    }
  
    Future<List<int>?> _sendCommand(int cmdId, List<int> payload) async {
@@ -133,7 +161,7 @@ index 304ce57..6214b60 100644
      _commandQueues.putIfAbsent(cmdId, () => StreamController<List<int>>.broadcast());
  
      final command = [1, cmdId & 0xFF, (cmdId >> 8) & 0xFF, ...payload];
-@@ -108,17 +161,9 @@ class PlaudDeviceConnection extends DeviceConnection {
+@@ -108,17 +183,9 @@ class PlaudDeviceConnection extends DeviceConnection {
      return response != null;
    }
  
@@ -152,7 +180,7 @@ index 304ce57..6214b60 100644
      try {
        final response = await _sendCommand(_cmdGetBattery, []);
        if (response != null && response.length >= 2) {
-@@ -135,6 +180,19 @@ class PlaudDeviceConnection extends DeviceConnection {
+@@ -135,6 +202,19 @@ class PlaudDeviceConnection extends DeviceConnection {
      }
    }
  
@@ -172,27 +200,27 @@ index 304ce57..6214b60 100644
    Future<Map<String, dynamic>?> getBatteryState() async {
      try {
        final response = await _sendCommand(_cmdGetBattery, []);
-@@ -152,6 +210,10 @@ class PlaudDeviceConnection extends DeviceConnection {
+@@ -152,6 +232,10 @@ class PlaudDeviceConnection extends DeviceConnection {
    Future<StreamSubscription<List<int>>?> performGetBleBatteryLevelListener({
      void Function(int)? onBatteryLevelChange,
    }) async {
 +    // NotePin S : même relève périodique, par lecture de 2A19 (performRetrieveBatteryLevel), sans l'abonnement de
-+    // la classe de base, qui écrirait le descripteur 2902 de l'appareil.
-+    if (_modele == ModelePlaud.aVerifier) return null;
++    // la classe de base, qui écrirait le descripteur 2902 de l'appareil. Non identifié : rien à relever.
++    if (_modele == ModelePlaud.aVerifier || _modele == ModelePlaud.nonIdentifie) return null;
 +
      // PLAUD devices use command-based battery retrieval, not automatic notifications
      // Battery state must be explicitly requested via CMD_GET_BATTERY (command 9)
      // Therefore we poll periodically rather than relying on unsolicited notifications
-@@ -202,6 +264,8 @@ class PlaudDeviceConnection extends DeviceConnection {
+@@ -202,6 +286,8 @@ class PlaudDeviceConnection extends DeviceConnection {
  
    @override
    Future<BleAudioCodec> performGetAudioCodec() async {
-+    // NotePin S : aucun audio annoncé (rien ne sort en clair).
-+    if (_modele == ModelePlaud.notePinS) return BleAudioCodec.unknown;
++    // NotePin S ou Plaud non identifié (refusés) : aucun audio annoncé.
++    if (_modele == ModelePlaud.notePinS || _modele == ModelePlaud.nonIdentifie) return BleAudioCodec.unknown;
      return BleAudioCodec.opusFS320;
    }
  
-@@ -209,6 +273,8 @@ class PlaudDeviceConnection extends DeviceConnection {
+@@ -209,6 +295,8 @@ class PlaudDeviceConnection extends DeviceConnection {
    Future<StreamSubscription?> performGetBleAudioBytesListener({
      required void Function(List<int>) onAudioBytesReceived,
    }) async {
@@ -201,7 +229,7 @@ index 304ce57..6214b60 100644
      if (!await _setupRecordingSession()) {
        Logger.debug('[PLAUD] Failed to setup recording session after retries');
        return null;
-@@ -307,7 +373,28 @@ class PlaudDeviceConnection extends DeviceConnection {
+@@ -307,7 +395,37 @@ class PlaudDeviceConnection extends DeviceConnection {
    @override
    Future<int?> performGetMicGain() async => null;
  
@@ -222,6 +250,15 @@ index 304ce57..6214b60 100644
 +    if (_modele == ModelePlaud.notePinS) {
 +      return {
 +        'modelNumber': PlaudNotePinS.modele,
++        'firmwareRevision': PlaudNotePinS.inconnu,
++        'hardwareRevision': PlaudNotePinS.inconnu,
++        'manufacturerName': PlaudNotePinS.fabricant,
++      };
++    }
++    // Non identifié : modèle et firmware inconnus, plutôt que les valeurs écrites en dur pour l'ancien NotePin.
++    if (_modele == ModelePlaud.nonIdentifie) {
++      return {
++        'modelNumber': PlaudNotePinS.fabricant,
 +        'firmwareRevision': PlaudNotePinS.inconnu,
 +        'hardwareRevision': PlaudNotePinS.inconnu,
 +        'manufacturerName': PlaudNotePinS.fabricant,

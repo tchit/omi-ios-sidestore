@@ -15,15 +15,23 @@ s'appliquent plus (nouvel `OMI_COMMIT`), la compilation s'arrête : les refaire 
 
 - `0001` : plus jamais la commande 30 vers un Plaud (d'après le SDK Plaud décompilé, elle efface un
   enregistrement) ; un **Plaud NotePin S** (lié à l'app Plaud, Bluetooth chiffré) est reconnu par son nom, sinon par
-  la lecture seule de son modèle (6AA50003), et Omi refuse de s'y connecter : aucune écriture, aucun abonnement.
-  Le NotePin de 1re génération garde son direct en clair.
+  la lecture seule de son modèle (6AA50003), et Omi refuse de s'y connecter. Échec en mode fermé : un Plaud que ni
+  son nom ni 6AA50003 n'identifient (caractéristique absente, vide, illisible, ou autre modèle) est refusé aussi.
+  Par défaut, Omi n'écrit donc rien sur aucun Plaud et ne s'abonne à rien : quand le nom ne suffit pas, il se
+  connecte le temps de lire 6AA50003, puis refuse.
+  Le direct en clair du NotePin de 1re génération (série 880) n'existe plus que derrière la constante
+  `PlaudDeviceConnection.directNotePinOrigineParDefaut`, à `false` : Mike n'a pas ce modèle. La passer à `true`
+  rouvre le risque. Un NotePin S au nom muet (« NotePin », nom de repli d'Omi) dont 6AA50003 est absente ou illisible
+  recevrait alors l'abonnement à 2BB0 puis les commandes 9, 23, 20 et 28 : Omi rend la même réponse vide pour une
+  caractéristique absente et pour une lecture en erreur.
 - `0002` : pas de mise à jour de firmware d'Omi pour un Plaud.
 - `0003` : message « lié à l'app Plaud » au choix d'un NotePin S, carte correspondante sur la page de l'appareil,
   modèle « Plaud NotePin S » et firmware inconnu au lieu de « PLAUD NotePin » / « 1.0.0 ».
 - `0004` : tests `test/plaud/` (transport simulé), lancés par le flux avant la compilation.
 
 Après installation, un NotePin S resté appairé n'est plus connecté ; « Oublier l'appareil » dans Omi le retire.
-Le bouton d'enregistrement utilise alors le micro de l'iPhone.
+Le bouton d'enregistrement utilise alors le micro de l'iPhone. Un Plaud non identifié n'est pas connecté non plus :
+choisi dans la liste des appareils, il en disparaît sans message (il revient au scan suivant).
 
 Refaire les correctifs : appliquer `patches/app/*.patch` sur `app/` d'Omi au nouveau commit, corriger, puis
 `git format-patch` (chemins `app/…`, chaque fichier touché par un seul correctif).

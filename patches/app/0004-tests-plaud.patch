@@ -7,27 +7,29 @@ Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
 Transport simulé : un NotePin S (reconnu au nom ou par 6AA50003) ne reçoit aucune écriture ni aucun
-abonnement ; rien ne part avant l'identification ; le NotePin d'origine garde 9, 23, 20, 28 puis 23 à la
-déconnexion, jamais 30. Plus la reconnaissance du nom, la fiche, l'avertissement et l'exclusion de la mise
-à jour de firmware.
+abonnement ; par défaut, un Plaud non identifié (nom de repli « NotePin » avec 6AA50003 absente, lecture en
+erreur, valeur faite de zéros, autre modèle) est refusé sans abonnement ni écriture ; le direct de l'ancien
+NotePin est coupé par défaut ; rien ne part avant l'identification ; direct activé, le NotePin S reste refusé
+et le NotePin d'origine garde 9, 23, 20, 28 puis 23 à la déconnexion, jamais 30. Plus la reconnaissance du
+nom, la fiche, l'avertissement et l'exclusion de la mise à jour de firmware.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
- app/test/plaud/plaud_connection_test.dart | 240 ++++++++++++++++++++++
- app/test/plaud/plaud_notepin_s_test.dart  | 108 ++++++++++
- 2 files changed, 348 insertions(+)
+ app/test/plaud/plaud_connection_test.dart | 324 ++++++++++++++++++++++
+ app/test/plaud/plaud_notepin_s_test.dart  | 108 ++++++++
+ 2 files changed, 432 insertions(+)
  create mode 100644 app/test/plaud/plaud_connection_test.dart
  create mode 100644 app/test/plaud/plaud_notepin_s_test.dart
 
 diff --git a/app/test/plaud/plaud_connection_test.dart b/app/test/plaud/plaud_connection_test.dart
 new file mode 100644
-index 0000000..bbe62f9
+index 0000000..2222f6e
 --- /dev/null
 +++ b/app/test/plaud/plaud_connection_test.dart
-@@ -0,0 +1,240 @@
+@@ -0,0 +1,324 @@
 +// Connecteur Plaud sur un transport simulé (correctifs du clone, 2026-10-08) : un NotePin S ne reçoit
-+// aucune écriture ni abonnement, la commande 30 ne part plus jamais, et le NotePin d'origine garde son direct
-+// en clair.
++// aucune écriture ni abonnement, un Plaud non identifié est refusé (échec en mode fermé), la commande 30 ne
++// part plus jamais, et le NotePin d'origine garde son direct en clair quand ce direct est activé.
 +// Données fabriquées : aucun appareil, aucun réseau.
 +import 'dart:async';
 +import 'dart:convert';
@@ -42,12 +44,14 @@ index 0000000..bbe62f9
 +import 'package:omi/services/devices/transports/device_transport.dart';
 +
 +/// Transport simulé : note chaque connexion, lecture, abonnement et écriture. Un NotePin d'origine simulé
-+/// répond aux commandes en clair sur 2BB0 ; 6AA50003 vaut [modeleLocaliser] (absente si null).
++/// répond aux commandes en clair sur 2BB0 ; 6AA50003 vaut [modeleLocaliser] (absente si null) et sa lecture
++/// lève si [lectureEchoue].
 +class _TransportSimule implements DeviceTransport {
-+  _TransportSimule({this.modeleLocaliser, this.batterie = 90});
++  _TransportSimule({this.modeleLocaliser, this.batterie = 90, this.lectureEchoue = false});
 +
 +  final List<int>? modeleLocaliser;
 +  final int batterie;
++  final bool lectureEchoue;
 +
 +  final ecritures = <List<int>>[];
 +  final lectures = <String>[];
@@ -113,7 +117,10 @@ index 0000000..bbe62f9
 +  Future<List<int>> readCharacteristic(String serviceUuid, String characteristicUuid) async {
 +    final caracteristique = characteristicUuid.toLowerCase();
 +    lectures.add(caracteristique);
-+    if (caracteristique == PlaudNotePinS.caracteristiqueModeleUuid) return modeleLocaliser ?? <int>[];
++    if (caracteristique == PlaudNotePinS.caracteristiqueModeleUuid) {
++      if (lectureEchoue) throw StateError('lecture refusée (simulée)');
++      return modeleLocaliser ?? <int>[];
++    }
 +    if (caracteristique == batteryLevelCharacteristicUuid) return [batterie];
 +    return <int>[];
 +  }
@@ -138,6 +145,38 @@ index 0000000..bbe62f9
 +
 +BtDevice _appareil(String nom, {String id = 'plaud-essai'}) =>
 +    BtDevice(name: nom, id: id, type: DeviceType.plaud, rssi: -60);
++
++/// Connecteur avec le direct de l'ancien NotePin activé (coupé par défaut dans le clone).
++PlaudDeviceConnection _avecDirect(BtDevice appareil, DeviceTransport transport) =>
++    PlaudDeviceConnection(appareil, transport, directNotePinOrigine: true);
++
++/// Refusé sans rien envoyer : seule la lecture de 6AA50003, ni abonnement, ni écriture, ni audio, ni relève.
++Future<void> _attendreRefusMuet(PlaudDeviceConnection connexion, _TransportSimule transport) async {
++  await expectLater(
++    connexion.connect(),
++    throwsA(allOf(isA<PlaudNonIdentifieRefuse>(), isA<DeviceConnectionException>())),
++  );
++  expect(connexion.modele, ModelePlaud.nonIdentifie);
++  expect(transport.lectures, [PlaudNotePinS.caracteristiqueModeleUuid]);
++  expect(transport.abonnements, isEmpty, reason: "pas d'abonnement à 2BB0 (descripteur 2902 jamais écrit)");
++
++  expect(await connexion.performRetrieveBatteryLevel(), -1);
++  expect(await connexion.performGetBleBatteryLevelListener(onBatteryLevelChange: (_) {}), isNull);
++  expect(await connexion.performGetBleAudioBytesListener(onAudioBytesReceived: (_) {}), isNull);
++  expect(await connexion.performGetAudioCodec(), BleAudioCodec.unknown);
++  expect(await connexion.getBatteryState(), isNull);
++  expect(await connexion.performPlayToSpeakerHaptic(3), isFalse);
++  expect(await connexion.performWriteToStorage(0, 0, 0), isFalse);
++  final fiche = await connexion.getDeviceInfo();
++  expect(fiche['modelNumber'], 'PLAUD');
++  expect(fiche['firmwareRevision'], 'Unknown');
++  await connexion.disconnect();
++
++  expect(transport.ecritures, isEmpty);
++  expect(transport.abonnements, isEmpty);
++  // Pas mémorisé comme NotePin S : la fiche et les messages restent ceux d'un Plaud quelconque.
++  expect(PlaudNotePinS.estNotePinS(connexion.device), isFalse);
++}
 +
 +void main() {
 +  TestWidgetsFlutterBinding.ensureInitialized();
@@ -209,6 +248,53 @@ index 0000000..bbe62f9
 +    });
 +  });
 +
++  group('échec en mode fermé (défaut du clone)', () {
++    test('le direct de l\'ancien NotePin est coupé par défaut', () {
++      expect(PlaudDeviceConnection.directNotePinOrigineParDefaut, isFalse);
++      final connexion = PlaudDeviceConnection(_appareil('PLAUD NotePin'), _TransportSimule());
++      expect(connexion.directNotePinOrigine, isFalse);
++    });
++
++    test('nom de repli « NotePin », 6AA50003 absente : refus, rien envoyé', () async {
++      final transport = _TransportSimule();
++      await _attendreRefusMuet(PlaudDeviceConnection(_appareil('NotePin'), transport), transport);
++    });
++
++    test('lecture de 6AA50003 en erreur : refus, rien envoyé', () async {
++      final transport = _TransportSimule(modeleLocaliser: utf8.encode('Plaud NotePin S'), lectureEchoue: true);
++      await _attendreRefusMuet(PlaudDeviceConnection(_appareil('NotePin'), transport), transport);
++    });
++
++    test('6AA50003 faite de zéros : refus, rien envoyé', () async {
++      final transport = _TransportSimule(modeleLocaliser: List.filled(16, 0));
++      await _attendreRefusMuet(PlaudDeviceConnection(_appareil('NotePin'), transport), transport);
++    });
++
++    test('6AA50003 d\'un autre modèle, nom d\'un ancien NotePin : refus, rien envoyé', () async {
++      final transport = _TransportSimule(modeleLocaliser: utf8.encode('PLAUD NotePin'));
++      await _attendreRefusMuet(PlaudDeviceConnection(_appareil('PLAUD NotePin'), transport), transport);
++    });
++  });
++
++  group('direct de l\'ancien NotePin activé : le NotePin S reste refusé', () {
++    test('reconnu au nom : aucune liaison', () async {
++      final transport = _TransportSimule();
++      final connexion = _avecDirect(_appareil('Plaud NotePin S - Find My'), transport);
++      await expectLater(connexion.connect(), throwsA(isA<PlaudNotePinSRefuse>()));
++      expect(transport.connexions, 0);
++      expect(transport.ecritures, isEmpty);
++    });
++
++    test('nom muet, reconnu par 6AA50003 : refus sans abonnement ni écriture', () async {
++      final transport = _TransportSimule(modeleLocaliser: utf8.encode('Plaud NotePin S'));
++      final connexion = _avecDirect(_appareil('NotePin'), transport);
++      await expectLater(connexion.connect(), throwsA(isA<PlaudNotePinSRefuse>()));
++      expect(connexion.modele, ModelePlaud.notePinS);
++      expect(transport.abonnements, isEmpty);
++      expect(transport.ecritures, isEmpty);
++    });
++  });
++
 +  group('avant identification', () {
 +    test('aucune commande ne part tant que le modèle n\'est pas établi', () async {
 +      final transport = _TransportSimule();
@@ -223,12 +309,12 @@ index 0000000..bbe62f9
 +    });
 +  });
 +
-+  group('NotePin d\'origine (1re génération)', () {
++  group('NotePin d\'origine (1re génération), direct activé', () {
 +    test(
 +      'direct en clair inchangé ; à la déconnexion, arrêt de sa session et jamais la commande 30',
 +      () async {
 +        final transport = _TransportSimule(); // 6AA50003 absente
-+        final connexion = PlaudDeviceConnection(_appareil('PLAUD NotePin'), transport);
++        final connexion = _avecDirect(_appareil('PLAUD NotePin'), transport);
 +
 +        await connexion.connect();
 +        expect(connexion.modele, ModelePlaud.ancien);
@@ -252,7 +338,7 @@ index 0000000..bbe62f9
 +      '6AA50003 présente mais d\'un autre modèle : comportement d\'origine',
 +      () async {
 +        final transport = _TransportSimule(modeleLocaliser: utf8.encode('PLAUD NotePin'));
-+        final connexion = PlaudDeviceConnection(_appareil('PLAUD NotePin'), transport);
++        final connexion = _avecDirect(_appareil('PLAUD NotePin'), transport);
 +
 +        await connexion.connect();
 +        expect(connexion.modele, ModelePlaud.ancien);
