@@ -1,0 +1,55 @@
+From 0d9859e051d18dddf9e882450097e4e10f518be8 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 9 Oct 2026 12:47:33 +0000
+Subject: [PATCH] =?UTF-8?q?Nommer=20un=20locuteur=20:=20champ=20lisible=20?=
+ =?UTF-8?q?en=20th=C3=A8me=20clair?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Le champ du nom et celui de la recherche de personnes avaient un fond gris très foncé codé en
+dur (Colors.grey[900]), prévu pour le thème sombre ; en thème clair, le texte noir y était
+invisible (vu par Mike le 2026-10-09). Fond et texte suivent désormais la palette du thème.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../conversation_detail/widgets/name_speaker_sheet.dart     | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/app/lib/pages/conversation_detail/widgets/name_speaker_sheet.dart b/app/lib/pages/conversation_detail/widgets/name_speaker_sheet.dart
+index 16ee40e49f..ec3f32cfec 100644
+--- a/app/lib/pages/conversation_detail/widgets/name_speaker_sheet.dart
++++ b/app/lib/pages/conversation_detail/widgets/name_speaker_sheet.dart
+@@ -474,12 +474,13 @@ class _NameSpeakerBottomSheetState extends State<NameSpeakerBottomSheet> {
+         TextField(
+           controller: _controller,
+           autofocus: true,
++          style: TextStyle(color: OmiColors.textPrimary),
+           onChanged: (value) => setState(() => _validateNewPersonName(value, people, userName)),
+           decoration: InputDecoration(
+             hintText: context.l10n.enterPersonsName,
+             filled: true,
+             contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+-            fillColor: Colors.grey[900],
++            fillColor: OmiColors.surface2,
+             border: const OutlineInputBorder(borderRadius: OmiRadius.smAll, borderSide: BorderSide.none),
+             hintStyle: const TextStyle(color: Colors.grey),
+             errorText: _duplicateNameError,
+@@ -503,12 +504,13 @@ class _NameSpeakerBottomSheetState extends State<NameSpeakerBottomSheet> {
+   Widget _buildPersonSearchField() {
+     return TextField(
+       controller: _searchController,
++      style: TextStyle(color: OmiColors.textPrimary),
+       onChanged: (value) => setState(() => _personSearchQuery = value),
+       decoration: InputDecoration(
+         hintText: context.l10n.searchPeople,
+         filled: true,
+         contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+-        fillColor: Colors.grey[900],
++        fillColor: OmiColors.surface2,
+         border: const OutlineInputBorder(borderRadius: OmiRadius.smAll, borderSide: BorderSide.none),
+         hintStyle: const TextStyle(color: Colors.grey),
+         prefixIcon: const Icon(Icons.search, size: 18, color: Colors.grey),
+-- 
+2.43.0
+
