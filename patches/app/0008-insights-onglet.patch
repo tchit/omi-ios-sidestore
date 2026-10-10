@@ -1,0 +1,2322 @@
+From 5020d495f1baafdf4612a9ac4bc8602098539aef Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 10 Oct 2026 17:35:13 +0000
+Subject: [PATCH] =?UTF-8?q?Insights=20:=20troisi=C3=A8me=20onglet=20de=20l?=
+ =?UTF-8?q?'accueil=20(dossiers=20tir=C3=A9s=20des=20discussions=20du=20ch?=
+ =?UTF-8?q?at)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+L'accueil passe de deux à trois onglets : Accueil, Tâches, Insights. Insights montre les dossiers vivants
+qu'Omi tient à partir des discussions du chat (un par personne, relation ou thème), lus sur les quatre
+routes du serveur du clone (/v1/insights/dossiers…). L'app ne crée rien : Omi décide seul de ce qui entre,
+il n'y a aucun bouton « Garder ».
+
+- Liste : chaque dossier avec son titre, son gabarit (icône et libellé : Pro, Proche, Soin, Thème), son
+  nombre de notes et sa date de mise à jour, le plus récent d'abord (ordre du serveur). Vide, en panne
+  (avec Réessayer) et chargement ont chacun leur état. Tirer pour rafraîchir ; l'onglet rouvert et le retour
+  d'un dossier relisent la liste.
+- Détail : les sections du gabarit dans l'ordre, même vides (« Rien pour l'instant »). Chaque élément montre
+  son texte, la citation exacte du message d'où il vient (en retrait derrière un filet) et ses sources : la
+  discussion du chat (rouverte dans le chat comme depuis « Discussions passées ») et les conversations
+  citées (ouvertes). Une source supprimée reste listée avec « N'est plus disponible » et ne s'ouvre pas.
+- « piste d'Omi » : un élément venu d'une réponse d'Omi porte une étiquette avec icône et libellé, jamais
+  la seule couleur (Mike est daltonien).
+- Appui long sur un élément, ou sur un dossier (ligne de la liste ou en-tête du dossier) : « Retirer »,
+  puis confirmation. Un élément retiré n'est plus réécrit ; un dossier retiré quitte la liste et son sujet
+  n'est plus recréé (c'est le serveur qui inscrit les refus). Rien n'est détruit côté serveur.
+- Thème clair : toutes les couleurs viennent d'OmiColors (texte noir sur cartes blanches).
+- Les trois mots du sélecteur rétrécissent ensemble sur un iPhone étroit ou en grand texte au lieu de
+  pousser les actions de Tâches hors de l'écran. Les actions de Tâches et la barre de sélection des tâches
+  restent propres à Tâches ; retour Android sur Insights ramène à l'Accueil. Lien interne /insights.
+- Textes en anglais et en français (app_en.arb, app_fr.arb ; les app_localizations*.dart sont régénérés par
+  flutter pub get, comme pour 0006 et 0007).
+
+Correction de la relecture (2026-10-10) : retirer une note que le serveur n'a déjà plus (404) affiche
+« Cette note n'est plus là » (au lieu de l'erreur générique) et relit le dossier.
+
+Tests : test/unit/insights_test.dart (lecture des formes du serveur, API : liste, dossier, retraits),
+test/widgets/insights_pages_test.dart (liste, détail, piste d'Omi, sources, retraits confirmés, note déjà disparue, anglais,
+troisième onglet sur un écran étroit) ; test/widgets/home_bottom_bar_test.dart passe à trois onglets.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ app/lib/backend/http/api/insights.dart        |  99 ++++
+ app/lib/backend/schema/insight_dossier.dart   | 232 ++++++++++
+ app/lib/l10n/app_en.arb                       | 146 ++++++
+ app/lib/l10n/app_fr.arb                       |  34 ++
+ app/lib/pages/home/home_deep_links.dart       |   4 +
+ app/lib/pages/home/page.dart                  |  19 +-
+ .../pages/home/widgets/home_tab_switcher.dart |  39 +-
+ .../pages/insights/insight_dossier_page.dart  | 433 ++++++++++++++++++
+ app/lib/pages/insights/insight_labels.dart    |  52 +++
+ app/lib/pages/insights/insight_sources.dart   |  80 ++++
+ app/lib/pages/insights/insights_page.dart     | 227 +++++++++
+ app/lib/providers/home_provider.dart          |   7 +-
+ app/test/unit/insights_test.dart              | 246 ++++++++++
+ app/test/widgets/home_bottom_bar_test.dart    |   6 +-
+ app/test/widgets/insights_pages_test.dart     | 426 +++++++++++++++++
+ 15 files changed, 2033 insertions(+), 17 deletions(-)
+ create mode 100644 app/lib/backend/http/api/insights.dart
+ create mode 100644 app/lib/backend/schema/insight_dossier.dart
+ create mode 100644 app/lib/pages/insights/insight_dossier_page.dart
+ create mode 100644 app/lib/pages/insights/insight_labels.dart
+ create mode 100644 app/lib/pages/insights/insight_sources.dart
+ create mode 100644 app/lib/pages/insights/insights_page.dart
+ create mode 100644 app/test/unit/insights_test.dart
+ create mode 100644 app/test/widgets/insights_pages_test.dart
+
+diff --git a/app/lib/backend/http/api/insights.dart b/app/lib/backend/http/api/insights.dart
+new file mode 100644
+index 0000000000..4da924bd92
+--- /dev/null
++++ b/app/lib/backend/http/api/insights.dart
+@@ -0,0 +1,99 @@
++import 'dart:convert';
++
++import 'package:omi/backend/http/api_result.dart';
++import 'package:omi/backend/schema/insight_dossier.dart';
++import 'package:omi/env/env.dart';
++
++/// Clone local : les quatre routes Insights du serveur du clone (lire, retirer). Aucune création : les
++/// dossiers sont écrits par le traitement du clone. Les erreurs restent distinctes d'une liste vide.
++class InsightsApi {
++  InsightsApi({this.send, String? baseUrl}) : _baseUrl = baseUrl;
++  final ApiSend? send;
++  final String? _baseUrl;
++
++  String _url(String path, [Map<String, String> query = const {}]) =>
++      Uri.parse('${_baseUrl ?? Env.apiBaseUrl}$path').replace(queryParameters: query.isEmpty ? null : query).toString();
++
++  String _dossier(String id) => 'v1/insights/dossiers/${Uri.encodeComponent(id)}';
++
++  static Map<String, dynamic> _object(String body) {
++    final decoded = jsonDecode(body);
++    if (decoded is! Map<String, dynamic>) throw const FormatException('Invalid insights answer');
++    return decoded;
++  }
++
++  static Map<String, dynamic> _field(Map<String, dynamic> json, String key) {
++    final value = json[key];
++    if (value is! Map<String, dynamic>) throw const FormatException('Invalid insights answer');
++    return value;
++  }
++
++  /// Les dossiers actifs, le plus récemment mis à jour d'abord. Une ligne illisible est écartée et comptée
++  /// dans [ApiSuccess.rejectedRows].
++  Future<ApiResult<List<InsightDossierSummary>>> list() async {
++    final response = await executeApi<String>(
++      request: ApiRequest(url: _url('v1/insights/dossiers', {'statut': 'actif'}), method: 'GET'),
++      send: send,
++      decode: (body) => body,
++    );
++    switch (response) {
++      case ApiFailure(:final problem):
++        return ApiFailure(problem);
++      case ApiSuccess(:final data):
++        try {
++          final rows = _object(data)['dossiers'];
++          if (rows is! List) return const ApiFailure(ApiProblem(ApiProblemKind.decode));
++          final kept = <InsightDossierSummary>[];
++          var rejected = 0;
++          for (final row in rows) {
++            try {
++              if (row is! Map<String, dynamic>) throw const FormatException('Invalid insight folder');
++              kept.add(InsightDossierSummary.fromJson(row));
++            } on FormatException {
++              rejected++;
++            }
++          }
++          if (kept.isEmpty && rejected > 0) return const ApiFailure(ApiProblem(ApiProblemKind.decode));
++          return ApiSuccess(kept, rejectedRows: rejected);
++        } on FormatException {
++          return const ApiFailure(ApiProblem(ApiProblemKind.decode));
++        }
++    }
++  }
++
++  /// Un dossier en entier ; 404 ([ApiProblemKind.notFound]) s'il n'existe plus.
++  Future<ApiResult<InsightDossier>> get(String id) => executeApi(
++        request: ApiRequest(url: _url(_dossier(id)), method: 'GET'),
++        send: send,
++        decode: (body) => InsightDossier.fromJson(_object(body)),
++      );
++
++  /// Retire un élément (statut « retiré », texte refusé à l'avenir). Rend le dossier à jour.
++  Future<ApiResult<InsightRemoval<InsightDossier>>> removeElement(String dossierId, String elementId) => executeApi(
++        request: ApiRequest(
++          url: _url('${_dossier(dossierId)}/elements/${Uri.encodeComponent(elementId)}'),
++          method: 'DELETE',
++        ),
++        send: send,
++        decode: (body) {
++          final json = _object(body);
++          return InsightRemoval(
++            alreadyRemoved: json['deja_retire'] == true,
++            dossier: InsightDossier.fromJson(_field(json, 'dossier')),
++          );
++        },
++      );
++
++  /// Retire (archive) un dossier : il quitte la liste et son sujet ne sera plus recréé.
++  Future<ApiResult<InsightRemoval<InsightDossierSummary>>> removeDossier(String id) => executeApi(
++        request: ApiRequest(url: _url(_dossier(id)), method: 'DELETE'),
++        send: send,
++        decode: (body) {
++          final json = _object(body);
++          return InsightRemoval(
++            alreadyRemoved: json['deja_retire'] == true,
++            dossier: InsightDossierSummary.fromJson(_field(json, 'dossier')),
++          );
++        },
++      );
++}
+diff --git a/app/lib/backend/schema/insight_dossier.dart b/app/lib/backend/schema/insight_dossier.dart
+new file mode 100644
+index 0000000000..e8b189e04a
+--- /dev/null
++++ b/app/lib/backend/schema/insight_dossier.dart
+@@ -0,0 +1,232 @@
++/// Clone local : Insights v1, les dossiers vivants qu'Omi tient à partir des discussions du chat.
++///
++/// Formes rendues par les routes du serveur du clone (`/v1/insights/dossiers…`). Les dossiers sont écrits par
++/// le traitement du clone ; l'app les lit et ne peut que retirer (un élément ou un dossier). Dart pur (sans
++/// Flutter) pour être testé seul. Lecture tolérante : un élément, une section ou une source illisible est
++/// écarté sans cacher le reste ; seul un dossier sans id ni titre est refusé ([FormatException]).
++library;
++
++/// Les gabarits connus ; un autre nom reste affiché tel quel.
++const insightTemplates = ['pro', 'proche', 'soin', 'theme'];
++
++class InsightSessionSource {
++  const InsightSessionSource({required this.id, this.title, required this.available});
++
++  final String id;
++  final String? title;
++
++  /// False : la discussion a été supprimée ou ne se lit plus.
++  final bool available;
++
++  static InsightSessionSource? tryParse(Object? json) {
++    if (json is! Map) return null;
++    final id = _string(json['id']);
++    if (id == null) return null;
++    return InsightSessionSource(id: id, title: _string(json['titre']), available: json['disponible'] == true);
++  }
++}
++
++class InsightConversationSource {
++  const InsightConversationSource({required this.id, this.title, this.date, required this.available});
++
++  final String id;
++  final String? title;
++  final DateTime? date;
++
++  /// False : la conversation a été supprimée ou ne se lit plus.
++  final bool available;
++
++  static InsightConversationSource? tryParse(Object? json) {
++    if (json is! Map) return null;
++    final id = _string(json['id']);
++    if (id == null) return null;
++    return InsightConversationSource(
++      id: id,
++      title: _string(json['titre']),
++      date: _date(json['date']),
++      available: json['disponible'] == true,
++    );
++  }
++}
++
++class InsightSources {
++  const InsightSources({this.messages = const [], this.session, this.conversations = const []});
++
++  /// Le champ `id` des messages du chat d'où vient l'élément.
++  final List<String> messages;
++  final InsightSessionSource? session;
++  final List<InsightConversationSource> conversations;
++
++  static InsightSources parse(Object? json) {
++    if (json is! Map) return const InsightSources();
++    final messages = json['messages'];
++    final conversations = json['conversations'];
++    return InsightSources(
++      messages: messages is List ? messages.whereType<String>().toList() : const [],
++      session: InsightSessionSource.tryParse(json['session']),
++      conversations: conversations is List
++          ? conversations.map(InsightConversationSource.tryParse).whereType<InsightConversationSource>().toList()
++          : const [],
++    );
++  }
++}
++
++class InsightElement {
++  const InsightElement({
++    required this.id,
++    required this.text,
++    this.type,
++    required this.origin,
++    required this.omiLead,
++    this.quote,
++    required this.status,
++    this.createdAt,
++    this.revisedAt,
++    this.sources = const InsightSources(),
++  });
++
++  final String id;
++  final String text;
++  final String? type;
++
++  /// `mike` (dit par lui) ou `omi` (venu d'une réponse d'Omi).
++  final String origin;
++
++  /// Une idée venue d'Omi que Mike n'a pas contestée : affichée « piste d'Omi ».
++  final bool omiLead;
++
++  /// Extrait exact du message cité.
++  final String? quote;
++  final String status;
++  final DateTime? createdAt;
++  final DateTime? revisedAt;
++  final InsightSources sources;
++
++  static InsightElement? tryParse(Object? json) {
++    if (json is! Map) return null;
++    final id = _string(json['id']);
++    final text = _string(json['texte']);
++    if (id == null || text == null) return null;
++    final origin = _string(json['origine']) ?? 'mike';
++    return InsightElement(
++      id: id,
++      text: text,
++      type: _string(json['type']),
++      origin: origin,
++      omiLead: json['piste_omi'] is bool ? json['piste_omi'] as bool : origin == 'omi',
++      quote: _string(json['citation']),
++      status: _string(json['statut']) ?? 'actif',
++      createdAt: _date(json['cree']),
++      revisedAt: _date(json['revise']),
++      sources: InsightSources.parse(json['sources']),
++    );
++  }
++}
++
++class InsightSection {
++  const InsightSection({required this.key, required this.name, required this.elements});
++
++  /// Clé fixe (`angles`, `besoins`, …) pour traduire ; [name] est le libellé français du serveur.
++  final String key;
++  final String name;
++  final List<InsightElement> elements;
++
++  static InsightSection? tryParse(Object? json) {
++    if (json is! Map) return null;
++    final name = _string(json['nom']);
++    final key = _string(json['cle']) ?? name;
++    if (key == null) return null;
++    final elements = json['elements'];
++    return InsightSection(
++      key: key,
++      name: name ?? key,
++      elements:
++          elements is List ? elements.map(InsightElement.tryParse).whereType<InsightElement>().toList() : const [],
++    );
++  }
++}
++
++/// Une ligne de la liste (`Resume` côté serveur).
++class InsightDossierSummary {
++  const InsightDossierSummary({
++    required this.id,
++    required this.title,
++    required this.template,
++    this.aliases = const [],
++    required this.status,
++    required this.version,
++    this.updatedAt,
++    required this.elementCount,
++  });
++
++  final String id;
++  final String title;
++
++  /// `pro`, `proche`, `soin` ou `theme`.
++  final String template;
++  final List<String> aliases;
++  final String status;
++  final int version;
++  final DateTime? updatedAt;
++  final int elementCount;
++
++  bool get isActive => status == 'actif';
++
++  /// Throws [FormatException] for a row without id or title.
++  factory InsightDossierSummary.fromJson(Map<String, dynamic> json) {
++    final id = _string(json['id']);
++    final title = _string(json['titre']);
++    if (id == null || title == null) throw const FormatException('Invalid insight folder');
++    final aliases = json['alias'];
++    return InsightDossierSummary(
++      id: id,
++      title: title,
++      template: _string(json['gabarit']) ?? 'theme',
++      aliases: aliases is List ? aliases.whereType<String>().toList() : const [],
++      status: _string(json['statut']) ?? 'actif',
++      version: json['version'] is num ? (json['version'] as num).toInt() : 0,
++      updatedAt: _date(json['maj']),
++      elementCount: json['nb_elements'] is num ? (json['nb_elements'] as num).toInt() : 0,
++    );
++  }
++}
++
++/// Un dossier lu en entier (`Dossier` côté serveur) : sections du gabarit dans l'ordre, même vides.
++class InsightDossier {
++  const InsightDossier({required this.summary, required this.sections});
++
++  final InsightDossierSummary summary;
++  final List<InsightSection> sections;
++
++  String get id => summary.id;
++
++  factory InsightDossier.fromJson(Map<String, dynamic> json) {
++    final sections = json['sections'];
++    return InsightDossier(
++      summary: InsightDossierSummary.fromJson(json),
++      sections:
++          sections is List ? sections.map(InsightSection.tryParse).whereType<InsightSection>().toList() : const [],
++    );
++  }
++
++  /// Seuls les éléments actifs se montrent (le serveur n'envoie déjà qu'eux).
++  List<InsightSection> get visibleSections => [
++        for (final section in sections)
++          InsightSection(
++            key: section.key,
++            name: section.name,
++            elements: section.elements.where((element) => element.status == 'actif').toList(),
++          ),
++      ];
++}
++
++/// Réponse d'un retrait : `deja_retire` quand c'était déjà fait.
++class InsightRemoval<T> {
++  const InsightRemoval({required this.alreadyRemoved, required this.dossier});
++  final bool alreadyRemoved;
++  final T dossier;
++}
++
++String? _string(Object? value) => value is String && value.trim().isNotEmpty ? value : null;
++
++DateTime? _date(Object? value) => value is String ? DateTime.tryParse(value) : null;
+diff --git a/app/lib/l10n/app_en.arb b/app/lib/l10n/app_en.arb
+index 2f32a46d31..3ec0229768 100644
+--- a/app/lib/l10n/app_en.arb
++++ b/app/lib/l10n/app_en.arb
+@@ -3045,6 +3045,152 @@
+     "@tasks": {
+         "description": "Title for the tasks page"
+     },
++    "insightsTab": "Insights",
++    "@insightsTab": {
++        "description": "Home: the third tab, folders Omi keeps from your chats (by person, relationship or topic)"
++    },
++    "insightsEmptyTitle": "No Insights Yet",
++    "@insightsEmptyTitle": {
++        "description": "Insights tab: empty state title"
++    },
++    "insightsEmptyMessage": "When you think something through with Omi in chat, Omi keeps what matters here, by person or topic.",
++    "@insightsEmptyMessage": {
++        "description": "Insights tab: empty state message"
++    },
++    "insightsLoadError": "Couldn’t load your insights.",
++    "@insightsLoadError": {
++        "description": "Insights tab: the list or a folder failed to load"
++    },
++    "insightDossierGone": "This folder no longer exists.",
++    "@insightDossierGone": {
++        "description": "Insights: the opened folder was removed in the meantime"
++    },
++    "insightUpdated": "Updated {date}",
++    "@insightUpdated": {
++        "description": "Insights: when a folder last changed",
++        "placeholders": {
++            "date": {
++                "type": "String"
++            }
++        }
++    },
++    "insightElementCount": "{count, plural, =0{no notes} =1{1 note} other{{count} notes}}",
++    "@insightElementCount": {
++        "description": "Insights: number of notes in a folder",
++        "placeholders": {
++            "count": {
++                "type": "int"
++            }
++        }
++    },
++    "insightOmiLead": "Omi’s lead",
++    "@insightOmiLead": {
++        "description": "Insights: marks a note that came from one of Omi's answers, not from you"
++    },
++    "insightSectionEmpty": "Nothing yet",
++    "@insightSectionEmpty": {
++        "description": "Insights: a folder section with no notes"
++    },
++    "insightSources": "From",
++    "@insightSources": {
++        "description": "Insights: label before the chat and conversations a note comes from"
++    },
++    "insightSourceUnavailable": "No longer available",
++    "@insightSourceUnavailable": {
++        "description": "Insights: a source chat or conversation was deleted"
++    },
++    "insightRemove": "Remove",
++    "@insightRemove": {
++        "description": "Insights: long-press action removing a note or a folder"
++    },
++    "insightRemoveElementQuestion": "Remove this note?",
++    "@insightRemoveElementQuestion": {
++        "description": "Insights: confirm removing a note"
++    },
++    "insightRemoveElementMessage": "Omi will not write it again.",
++    "@insightRemoveElementMessage": {
++        "description": "Insights: what removing a note does"
++    },
++    "insightRemoveDossierQuestion": "Remove this folder?",
++    "@insightRemoveDossierQuestion": {
++        "description": "Insights: confirm removing a folder"
++    },
++    "insightRemoveDossierMessage": "It leaves Insights, and Omi will not start a folder on this subject again.",
++    "@insightRemoveDossierMessage": {
++        "description": "Insights: what removing a folder does"
++    },
++    "insightRemoved": "Removed",
++    "@insightRemoved": {
++        "description": "Insights: toast after removing a note or a folder"
++    },
++    "insightElementGone": "This note is no longer there.",
++    "@insightElementGone": {
++        "description": "Insights: removing a note the server no longer has (already gone, 404); the folder is read again"
++    },
++    "insightTemplatePro": "Work",
++    "@insightTemplatePro": {
++        "description": "Insights folder kind: work, a client or a partner"
++    },
++    "insightTemplateProche": "Close ones",
++    "@insightTemplateProche": {
++        "description": "Insights folder kind: family, friends, a relationship"
++    },
++    "insightTemplateSoin": "Care",
++    "@insightTemplateSoin": {
++        "description": "Insights folder kind: therapy, health"
++    },
++    "insightTemplateTheme": "Topic",
++    "@insightTemplateTheme": {
++        "description": "Insights folder kind: a project or an idea followed over time"
++    },
++    "insightSectionAngles": "Angles",
++    "@insightSectionAngles": {
++        "description": "Insights work folder section"
++    },
++    "insightSectionNeeds": "Needs",
++    "@insightSectionNeeds": {
++        "description": "Insights work folder section"
++    },
++    "insightSectionProposals": "Possible proposals",
++    "@insightSectionProposals": {
++        "description": "Insights work folder section"
++    },
++    "insightSectionFollowUp": "To follow up",
++    "@insightSectionFollowUp": {
++        "description": "Insights work folder section"
++    },
++    "insightSectionWhatHappened": "What happened",
++    "@insightSectionWhatHappened": {
++        "description": "Insights close-ones folder section"
++    },
++    "insightSectionWhatWorked": "What worked",
++    "@insightSectionWhatWorked": {
++        "description": "Insights close-ones folder section"
++    },
++    "insightSectionNextTime": "Next time",
++    "@insightSectionNextTime": {
++        "description": "Insights close-ones folder section"
++    },
++    "insightSectionWhatMattered": "What mattered",
++    "@insightSectionWhatMattered": {
++        "description": "Insights care folder section"
++    },
++    "insightSectionUnderstanding": "Understanding",
++    "@insightSectionUnderstanding": {
++        "description": "Insights care folder section"
++    },
++    "insightSectionWhatHelps": "What helps me",
++    "@insightSectionWhatHelps": {
++        "description": "Insights care folder section"
++    },
++    "insightSectionIdeas": "Ideas",
++    "@insightSectionIdeas": {
++        "description": "Insights topic folder section"
++    },
++    "insightSectionOpenQuestions": "Open questions",
++    "@insightSectionOpenQuestions": {
++        "description": "Insights topic folder section"
++    },
+     "swipeTasksToIndent": "Swipe tasks to indent, drag between categories",
+     "@swipeTasksToIndent": {
+         "description": "Instructions for task management gestures"
+diff --git a/app/lib/l10n/app_fr.arb b/app/lib/l10n/app_fr.arb
+index c49649f20e..befbaa1d37 100644
+--- a/app/lib/l10n/app_fr.arb
++++ b/app/lib/l10n/app_fr.arb
+@@ -806,6 +806,40 @@
+     "tasksLater": "Plus tard",
+     "loadingTasks": "Chargement des tâches…",
+     "tasks": "Tâches",
++    "insightsTab": "Insights",
++    "insightsEmptyTitle": "Pas encore d’insights",
++    "insightsEmptyMessage": "Quand vous réfléchissez à quelque chose avec Omi dans le chat, il garde ici ce qui compte, par personne ou par sujet.",
++    "insightsLoadError": "Impossible de charger vos insights.",
++    "insightDossierGone": "Ce dossier n’existe plus.",
++    "insightUpdated": "Mis à jour le {date}",
++    "insightElementCount": "{count, plural, =0{aucune note} =1{1 note} other{{count} notes}}",
++    "insightOmiLead": "piste d’Omi",
++    "insightSectionEmpty": "Rien pour l’instant",
++    "insightSources": "Sources",
++    "insightSourceUnavailable": "N’est plus disponible",
++    "insightRemove": "Retirer",
++    "insightRemoveElementQuestion": "Retirer cette note ?",
++    "insightRemoveElementMessage": "Omi ne la réécrira plus.",
++    "insightRemoveDossierQuestion": "Retirer ce dossier ?",
++    "insightRemoveDossierMessage": "Il quitte Insights, et Omi ne recréera plus de dossier sur ce sujet.",
++    "insightRemoved": "Retiré",
++    "insightElementGone": "Cette note n’est plus là.",
++    "insightTemplatePro": "Pro",
++    "insightTemplateProche": "Proche",
++    "insightTemplateSoin": "Soin",
++    "insightTemplateTheme": "Thème",
++    "insightSectionAngles": "Angles",
++    "insightSectionNeeds": "Besoins",
++    "insightSectionProposals": "Propositions possibles",
++    "insightSectionFollowUp": "À suivre",
++    "insightSectionWhatHappened": "Ce qui s’est passé",
++    "insightSectionWhatWorked": "Ce qui a marché",
++    "insightSectionNextTime": "La prochaine fois",
++    "insightSectionWhatMattered": "Ce qui a compté",
++    "insightSectionUnderstanding": "Comprendre",
++    "insightSectionWhatHelps": "Ce qui m’aide",
++    "insightSectionIdeas": "Idées",
++    "insightSectionOpenQuestions": "Questions ouvertes",
+     "swipeTasksToIndent": "Balayez les tâches pour indenter, faites glisser entre les catégories",
+     "create": "Créer",
+     "noTasksYet": "Aucune tâche pour l'instant",
+diff --git a/app/lib/pages/home/home_deep_links.dart b/app/lib/pages/home/home_deep_links.dart
+index e5f527d35b..8d8445fa43 100644
+--- a/app/lib/pages/home/home_deep_links.dart
++++ b/app/lib/pages/home/home_deep_links.dart
+@@ -66,6 +66,8 @@ class HomeDeepLink {
+   /// pushed over it). Null keeps the current tab.
+   int? get tabIndex => switch (alias) {
+         'action-items' || 'task' => HomeProvider.tasksTab,
++        // Clone local : l'onglet Insights.
++        'insights' => HomeProvider.insightsTab,
+         'capture' ||
+         'memories' ||
+         'facts' ||
+@@ -108,6 +110,8 @@ Future<bool> openHomeDeepLink(
+       context.read<HomeProvider>().setIndex(HomeProvider.homeTab);
+     case 'action-items':
+       context.read<HomeProvider>().setIndex(HomeProvider.tasksTab);
++    case 'insights':
++      context.read<HomeProvider>().setIndex(HomeProvider.insightsTab);
+     case 'memory':
+       if (id == null) return false;
+       final provider = context.read<MemoriesProvider>();
+diff --git a/app/lib/pages/home/page.dart b/app/lib/pages/home/page.dart
+index 78665064bb..eafda93468 100644
+--- a/app/lib/pages/home/page.dart
++++ b/app/lib/pages/home/page.dart
+@@ -26,6 +26,7 @@ import 'package:omi/pages/home/home_content.dart';
+ import 'package:omi/pages/home/widgets/header_sync_button.dart';
+ import 'package:omi/pages/home/widgets/home_tab_switcher.dart';
+ import 'package:omi/pages/home/home_widgets_publisher.dart';
++import 'package:omi/pages/insights/insights_page.dart';
+ import 'package:omi/pages/phone_calls/active_call_banner.dart';
+ import 'package:omi/pages/settings/settings_drawer.dart';
+ import 'package:omi/pages/search/global_search.dart';
+@@ -147,6 +148,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
+ 
+   final GlobalKey<HomeContentPageState> _homeContentPageKey = GlobalKey<HomeContentPageState>();
+   final GlobalKey<State<ActionItemsPage>> _actionItemsPageKey = GlobalKey<State<ActionItemsPage>>();
++  final GlobalKey<InsightsPageState> _insightsPageKey = GlobalKey<InsightsPageState>();
+   // Keep the IndexedStack slots stable, but defer constructing non-selected
+   // tabs until the user visits them. Once created, a tab remains in the stack
+   // so its scroll position and other state are preserved.
+@@ -183,6 +185,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
+       case HomeProvider.tasksTab:
+         _pages[pageIndex] = ActionItemsPage(key: _actionItemsPageKey);
+         break;
++      case HomeProvider.insightsTab:
++        _pages[pageIndex] = InsightsPage(key: _insightsPageKey);
++        break;
+     }
+   }
+ 
+@@ -240,6 +245,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
+           (actionItemsState as dynamic).scrollToTop();
+         }
+         break;
++      case HomeProvider.insightsTab:
++        _insightsPageKey.currentState?.scrollToTop();
++        break;
+     }
+   }
+ 
+@@ -756,7 +764,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
+           selector: (_, homeProvider) => homeProvider.selectedIndex,
+           builder: (context, selectedIndex, _) {
+             final onHome = selectedIndex == HomeProvider.homeTab;
+-            // D6: Android back on Tasks returns to Home before it leaves the app.
++            final onTasks = selectedIndex == HomeProvider.tasksTab;
++            // D6: Android back on Tasks (or Insights) returns to Home before it leaves the app.
+             return PopScope(
+               canPop: onHome,
+               onPopInvokedWithResult: (didPop, _) {
+@@ -776,7 +785,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
+                       Column(
+                         children: [
+                           HomeTabSwitcher(
+-                            trailing: onHome ? null : _buildTasksActions(context),
++                            trailing: onTasks ? _buildTasksActions(context) : null,
+                             onTabTap: (index, isRepeat) {
+                               if (isRepeat) {
+                                 _scrollToTop(index);
+@@ -785,6 +794,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
+                                 // finished, the destination paints a skeleton for one frame.
+                                 context.read<HomeProvider>().setIndex(index);
+                                 _schedulePageInitialization(index);
++                                // Clone local : Omi met ses dossiers à jour en arrière-plan ; l'onglet rouvert les relit.
++                                if (index == HomeProvider.insightsTab) _insightsPageKey.currentState?.refresh();
+                               }
+                             },
+                           ),
+@@ -809,7 +820,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
+                                 );
+                               },
+                             ),
+-                          // Home shows an active call in its capture row; Tasks gets the slim bar.
++                          // Home shows an active call in its capture row; Tasks and Insights get the slim bar.
+                           if (!onHome) const ActiveCallTopBar(),
+                           Expanded(
+                             child: IndexedStack(index: selectedIndex, children: _buildPages(selectedIndex)),
+@@ -845,7 +856,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
+                       // Merge action bar - replaces the chat bar while conversations are selected
+                       if (onHome) const Positioned(left: 0, right: 0, bottom: 0, child: MergeActionBar()),
+                       // Task selection action bar - at the bottom of Tasks while tasks are selected.
+-                      if (!onHome) const Positioned(left: 0, right: 0, bottom: 0, child: TaskSelectionActionBar()),
++                      if (onTasks) const Positioned(left: 0, right: 0, bottom: 0, child: TaskSelectionActionBar()),
+                     ],
+                   ),
+                 ),
+diff --git a/app/lib/pages/home/widgets/home_tab_switcher.dart b/app/lib/pages/home/widgets/home_tab_switcher.dart
+index 89a02be1c8..b9350a0e14 100644
+--- a/app/lib/pages/home/widgets/home_tab_switcher.dart
++++ b/app/lib/pages/home/widgets/home_tab_switcher.dart
+@@ -9,8 +9,11 @@ import 'package:omi/ui/ui.dart';
+ import 'package:omi/utils/l10n_extensions.dart';
+ import 'package:omi/utils/platform/platform_manager.dart';
+ 
+-/// Home and Tasks as two large words at the top of the shell; the selected one is in full ink, the
+-/// other muted. It replaces the bottom tab bar. [trailing] holds the selected page's own actions.
++/// Clone local : la clé de l'onglet Insights (hors du catalogue généré `OmiKeys`, propre au clone).
++const kHomeTabInsightsKey = ValueKey<String>('home_tab_insights');
++
++/// Home, Tasks and Insights as large words at the top of the shell; the selected one is in full ink,
++/// the others muted. It replaces the bottom tab bar. [trailing] holds the selected page's own actions.
+ class HomeTabSwitcher extends StatelessWidget {
+   const HomeTabSwitcher({super.key, required this.onTabTap, this.trailing});
+ 
+@@ -26,14 +29,32 @@ class HomeTabSwitcher extends StatelessWidget {
+       padding: const EdgeInsets.fromLTRB(OmiSpacing.md, 0, OmiSpacing.sm, OmiSpacing.xxs),
+       child: Row(
+         children: [
+-          // Conversations live in Home now, so the catalogued Conversations control is the Home tab.
+-          KeyedSubtree(
+-            key: OmiKeys.homeTabConversations,
+-            child: _tab(context, selected, HomeProvider.homeTab, l10n.home, 'Home', OmiKeys.homeTabHome),
++          // Clone local : trois mots (Accueil, Tâches, Insights). Sur un iPhone étroit ou en grand texte, ils
++          // rétrécissent ensemble au lieu de pousser les actions de Tâches hors de l'écran.
++          Expanded(
++            child: Align(
++              alignment: Alignment.centerLeft,
++              child: FittedBox(
++                fit: BoxFit.scaleDown,
++                alignment: Alignment.centerLeft,
++                child: Row(
++                  mainAxisSize: MainAxisSize.min,
++                  children: [
++                    // Conversations live in Home now, so the catalogued Conversations control is the Home tab.
++                    KeyedSubtree(
++                      key: OmiKeys.homeTabConversations,
++                      child: _tab(context, selected, HomeProvider.homeTab, l10n.home, 'Home', OmiKeys.homeTabHome),
++                    ),
++                    const SizedBox(width: OmiSpacing.sm),
++                    _tab(context, selected, HomeProvider.tasksTab, l10n.tasks, 'Tasks', OmiKeys.homeTabTasks),
++                    const SizedBox(width: OmiSpacing.sm),
++                    _tab(
++                        context, selected, HomeProvider.insightsTab, l10n.insightsTab, 'Insights', kHomeTabInsightsKey),
++                  ],
++                ),
++              ),
++            ),
+           ),
+-          const SizedBox(width: OmiSpacing.sm),
+-          _tab(context, selected, HomeProvider.tasksTab, l10n.tasks, 'Tasks', OmiKeys.homeTabTasks),
+-          const Spacer(),
+           if (trailing != null) trailing!,
+         ],
+       ),
+diff --git a/app/lib/pages/insights/insight_dossier_page.dart b/app/lib/pages/insights/insight_dossier_page.dart
+new file mode 100644
+index 0000000000..f7b0d2d475
+--- /dev/null
++++ b/app/lib/pages/insights/insight_dossier_page.dart
+@@ -0,0 +1,433 @@
++import 'dart:async';
++
++import 'package:flutter/material.dart';
++
++import 'package:omi/backend/http/api/insights.dart';
++import 'package:omi/backend/http/api_result.dart';
++import 'package:omi/backend/schema/insight_dossier.dart';
++import 'package:omi/pages/insights/insight_labels.dart';
++import 'package:omi/pages/insights/insight_sources.dart';
++import 'package:omi/ui/ui.dart';
++import 'package:omi/utils/l10n_extensions.dart';
++
++/// Clone local : appui long sur un dossier (ligne de la liste ou en-tête du dossier) : « Retirer », confirmé,
++/// puis retiré sur le serveur (archivé, sujet refusé). Vrai quand le dossier est retiré.
++Future<bool> showInsightDossierMenu(BuildContext context, InsightsApi api, InsightDossierSummary dossier) async {
++  final removed = Completer<bool>();
++  await showOmiRowMenu(context, title: dossier.title, actions: [
++    OmiMenuAction(
++      icon: Icons.remove_circle_outline_rounded,
++      label: context.l10n.insightRemove,
++      isDestructive: true,
++      onSelected: () => removed.complete(_confirmRemoveDossier(context, api, dossier)),
++    ),
++  ]);
++  return removed.isCompleted ? await removed.future : false;
++}
++
++Future<bool> _confirmRemoveDossier(BuildContext context, InsightsApi api, InsightDossierSummary dossier) async {
++  final l10n = context.l10n;
++  final confirmed = await showOmiConfirm(
++    context,
++    title: l10n.insightRemoveDossierQuestion,
++    message: l10n.insightRemoveDossierMessage,
++    confirmLabel: l10n.insightRemove,
++    destructive: true,
++  );
++  if (!confirmed || !context.mounted) return false;
++  final result = await api.removeDossier(dossier.id);
++  if (!context.mounted) return false;
++  // Déjà retiré ailleurs (404 ou deja_retire) : il n'a plus sa place dans la liste non plus.
++  final removed = switch (result) {
++    ApiSuccess() => true,
++    ApiFailure(:final problem) => problem.kind == ApiProblemKind.notFound,
++  };
++  if (removed) {
++    OmiHaptics.success();
++    OmiFeedback.confirm(context, l10n.insightRemoved);
++  } else {
++    OmiFeedback.error(context, l10n.somethingWentWrong);
++  }
++  return removed;
++}
++
++/// Clone local : un dossier d'Insights en entier. Les sections du gabarit dans l'ordre (même vides), chaque
++/// élément avec sa citation exacte, la « piste d'Omi » marquée par un libellé, et ses sources (la discussion du
++/// chat, les conversations citées) ouvrables. Appui long : retirer un élément ou le dossier. Aucun bouton
++/// « Garder » : Omi décide seul de ce qui entre.
++class InsightDossierPage extends StatefulWidget {
++  const InsightDossierPage({super.key, required this.summary, this.api, this.sources = const InsightSourceOpener()});
++
++  /// La ligne de la liste : titre affiché pendant le chargement.
++  final InsightDossierSummary summary;
++  final InsightsApi? api;
++  final InsightSourceOpener sources;
++
++  @override
++  State<InsightDossierPage> createState() => _InsightDossierPageState();
++}
++
++class _InsightDossierPageState extends State<InsightDossierPage> {
++  late final InsightsApi _api = widget.api ?? InsightsApi();
++  InsightDossier? _dossier;
++  ApiProblem? _problem;
++
++  @override
++  void initState() {
++    super.initState();
++    unawaited(_load());
++  }
++
++  /// [reportFailure] : tirer pour rafraîchir dit qu'une relecture a échoué (le dossier affiché reste).
++  Future<void> _load({bool reportFailure = false}) async {
++    final result = await _api.get(widget.summary.id);
++    if (!mounted) return;
++    final shown = _dossier != null;
++    setState(() {
++      switch (result) {
++        case ApiSuccess(:final data):
++          _dossier = data;
++          _problem = null;
++        case ApiFailure(:final problem):
++          // Un dossier retiré entre-temps ne se montre plus ; une autre panne garde ce qui est affiché.
++          if (problem.kind == ApiProblemKind.notFound) _dossier = null;
++          _problem = problem;
++      }
++    });
++    if (reportFailure && shown && _dossier != null && result is ApiFailure) {
++      OmiFeedback.error(context, context.l10n.insightsLoadError);
++    }
++  }
++
++  Future<void> _showElementMenu(InsightElement element) => showOmiRowMenu(context, title: element.text, actions: [
++        OmiMenuAction(
++          icon: Icons.remove_circle_outline_rounded,
++          label: context.l10n.insightRemove,
++          isDestructive: true,
++          onSelected: () => unawaited(_removeElement(element)),
++        ),
++      ]);
++
++  Future<void> _removeElement(InsightElement element) async {
++    final dossier = _dossier;
++    if (dossier == null) return;
++    final l10n = context.l10n;
++    final confirmed = await showOmiConfirm(
++      context,
++      title: l10n.insightRemoveElementQuestion,
++      message: l10n.insightRemoveElementMessage,
++      confirmLabel: l10n.insightRemove,
++      destructive: true,
++    );
++    if (!confirmed || !mounted) return;
++    final result = await _api.removeElement(dossier.id, element.id);
++    if (!mounted) return;
++    switch (result) {
++      case ApiSuccess(:final data):
++        OmiHaptics.success();
++        setState(() => _dossier = data.dossier);
++        OmiFeedback.confirm(context, l10n.insightRemoved);
++      case ApiFailure(:final problem) when problem.kind == ApiProblemKind.notFound:
++        // L'élément (ou son dossier) n'existe déjà plus : rien à retirer, ce n'est pas une panne ; relire
++        // montre l'état réel.
++        OmiFeedback.info(context, l10n.insightElementGone);
++        unawaited(_load());
++      case ApiFailure():
++        OmiFeedback.error(context, l10n.somethingWentWrong);
++    }
++  }
++
++  Future<void> _showDossierMenu(InsightDossierSummary summary) async {
++    final removed = await showInsightDossierMenu(context, _api, summary);
++    if (removed && mounted) Navigator.of(context).pop(true);
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    final title = _dossier?.summary.title ?? widget.summary.title;
++    return Scaffold(
++      backgroundColor: OmiColors.surface0,
++      appBar: AppBar(
++        backgroundColor: OmiColors.surface0,
++        leading: const OmiBackButton(),
++        title: Text(title, style: OmiType.headline, overflow: TextOverflow.ellipsis),
++      ),
++      body: _body(context),
++    );
++  }
++
++  Widget _body(BuildContext context) {
++    final l10n = context.l10n;
++    final dossier = _dossier;
++    if (dossier == null) {
++      final problem = _problem;
++      if (problem == null) return const OmiLoadingState();
++      if (problem.kind == ApiProblemKind.notFound) {
++        return OmiEmptyState(icon: Icons.folder_off_outlined, title: l10n.insightDossierGone);
++      }
++      return OmiErrorState(message: l10n.insightsLoadError, onRetry: _load);
++    }
++    final dates = OmiDateFormat.of(context);
++    final summary = dossier.summary;
++    final children = <Widget>[
++      _InsightDossierHeader(
++        summary: summary,
++        meta:
++            insightDossierMeta(l10n, template: summary.template, updatedAt: summary.updatedAt, formatDate: dates.date),
++        onLongPress: () => unawaited(_showDossierMenu(summary)),
++      ),
++    ];
++    for (final section in dossier.visibleSections) {
++      children
++        ..add(const SizedBox(height: OmiSpacing.xl))
++        ..add(OmiSectionHeader(insightSectionLabel(l10n, section.key, section.name)));
++      if (section.elements.isEmpty) {
++        children.add(Padding(
++          padding: const EdgeInsets.symmetric(horizontal: OmiSpacing.xxs),
++          child: Text(l10n.insightSectionEmpty, style: OmiType.subhead.copyWith(color: OmiColors.textTertiary)),
++        ));
++      }
++      for (final (index, element) in section.elements.indexed) {
++        if (index > 0) children.add(const SizedBox(height: OmiSpacing.xs));
++        children.add(InsightElementCard(
++          element: element,
++          onLongPress: () => unawaited(_showElementMenu(element)),
++          onOpenChat: (id) => unawaited(widget.sources.openChat(context, id)),
++          onOpenConversation: (id) => unawaited(widget.sources.openConversation(context, id)),
++        ));
++      }
++    }
++    return RefreshIndicator(
++      onRefresh: () => _load(reportFailure: true),
++      child: ListView(
++        key: ValueKey('insight_dossier_${dossier.id}'),
++        physics: const AlwaysScrollableScrollPhysics(),
++        padding: EdgeInsets.fromLTRB(
++            OmiSpacing.md, OmiSpacing.xs, OmiSpacing.md, OmiSpacing.xxl + MediaQuery.viewPaddingOf(context).bottom),
++        children: children,
++      ),
++    );
++  }
++}
++
++class _InsightDossierHeader extends StatelessWidget {
++  const _InsightDossierHeader({required this.summary, required this.meta, required this.onLongPress});
++
++  final InsightDossierSummary summary;
++  final String meta;
++  final VoidCallback onLongPress;
++
++  @override
++  Widget build(BuildContext context) {
++    return GestureDetector(
++      key: const ValueKey('insight_dossier_header'),
++      behavior: HitTestBehavior.opaque,
++      onLongPress: onLongPress,
++      child: Padding(
++        padding: const EdgeInsets.symmetric(horizontal: OmiSpacing.xxs),
++        child: Column(
++          crossAxisAlignment: CrossAxisAlignment.start,
++          children: [
++            Semantics(header: true, child: Text(summary.title, style: OmiType.title2)),
++            const SizedBox(height: OmiSpacing.xxs),
++            Row(
++              children: [
++                ExcludeSemantics(
++                  child: Icon(insightTemplateIcon(summary.template), size: 16, color: OmiColors.textSecondary),
++                ),
++                const SizedBox(width: OmiSpacing.xxs + 2),
++                Expanded(child: Text(meta, style: OmiType.footnote.copyWith(color: OmiColors.textSecondary))),
++              ],
++            ),
++          ],
++        ),
++      ),
++    );
++  }
++}
++
++/// Un élément d'un dossier : son texte, la citation exacte du message d'où il vient, la « piste d'Omi » quand
++/// l'idée vient d'Omi, et ses sources. Appui long : le retirer.
++class InsightElementCard extends StatelessWidget {
++  const InsightElementCard({
++    super.key,
++    required this.element,
++    required this.onLongPress,
++    required this.onOpenChat,
++    required this.onOpenConversation,
++  });
++
++  final InsightElement element;
++  final VoidCallback onLongPress;
++  final ValueChanged<String> onOpenChat;
++  final ValueChanged<String> onOpenConversation;
++
++  @override
++  Widget build(BuildContext context) {
++    final quote = element.quote;
++    return Material(
++      color: OmiColors.surface1,
++      borderRadius: OmiRadius.mdAll,
++      child: InkWell(
++        key: ValueKey('insight_element_${element.id}'),
++        borderRadius: OmiRadius.mdAll,
++        onLongPress: onLongPress,
++        child: Padding(
++          padding: const EdgeInsets.all(OmiSpacing.md),
++          child: Column(
++            crossAxisAlignment: CrossAxisAlignment.start,
++            children: [
++              if (element.omiLead) ...[const InsightOmiLeadTag(), const SizedBox(height: OmiSpacing.xs)],
++              Text(element.text, style: OmiType.body),
++              if (quote != null) ...[const SizedBox(height: OmiSpacing.xs), _InsightQuote(quote)],
++              _InsightSourceList(
++                sources: element.sources,
++                onOpenChat: onOpenChat,
++                onOpenConversation: onOpenConversation,
++              ),
++            ],
++          ),
++        ),
++      ),
++    );
++  }
++}
++
++/// « piste d'Omi » : une idée venue d'une réponse d'Omi, pas de Mike. Marquée par une icône et un libellé
++/// (jamais par la seule couleur).
++class InsightOmiLeadTag extends StatelessWidget {
++  const InsightOmiLeadTag({super.key});
++
++  @override
++  Widget build(BuildContext context) {
++    final ink = OmiColors.textTertiary;
++    return Container(
++      key: const ValueKey('insight_omi_lead'),
++      padding: const EdgeInsets.symmetric(horizontal: OmiSpacing.xs, vertical: 3),
++      decoration: BoxDecoration(color: OmiColors.chipSurface, borderRadius: OmiRadius.smAll),
++      child: Row(
++        mainAxisSize: MainAxisSize.min,
++        children: [
++          ExcludeSemantics(child: Icon(Icons.auto_awesome_outlined, size: 14, color: ink)),
++          const SizedBox(width: OmiSpacing.xxs),
++          Text(context.l10n.insightOmiLead, style: OmiType.footnote.copyWith(color: ink, fontWeight: FontWeight.w600)),
++        ],
++      ),
++    );
++  }
++}
++
++/// La citation exacte, en retrait derrière un filet.
++class _InsightQuote extends StatelessWidget {
++  const _InsightQuote(this.quote);
++
++  final String quote;
++
++  @override
++  Widget build(BuildContext context) {
++    return Container(
++      padding: const EdgeInsets.only(left: OmiSpacing.sm),
++      decoration: BoxDecoration(border: Border(left: BorderSide(color: OmiColors.border, width: 3))),
++      child: Text(
++        quote,
++        style: OmiType.subhead.copyWith(color: OmiColors.textTertiary, fontStyle: FontStyle.italic),
++      ),
++    );
++  }
++}
++
++class _InsightSourceList extends StatelessWidget {
++  const _InsightSourceList({required this.sources, required this.onOpenChat, required this.onOpenConversation});
++
++  final InsightSources sources;
++  final ValueChanged<String> onOpenChat;
++  final ValueChanged<String> onOpenConversation;
++
++  @override
++  Widget build(BuildContext context) {
++    final l10n = context.l10n;
++    final dates = OmiDateFormat.of(context);
++    final session = sources.session;
++    final chips = <Widget>[
++      if (session != null)
++        _InsightSourceChip(
++          key: ValueKey('insight_source_chat_${session.id}'),
++          icon: Icons.chat_bubble_outline_rounded,
++          label: session.title ?? l10n.untitledChat,
++          available: session.available,
++          onTap: () => onOpenChat(session.id),
++        ),
++      for (final conversation in sources.conversations)
++        _InsightSourceChip(
++          key: ValueKey('insight_source_conversation_${conversation.id}'),
++          icon: Icons.graphic_eq_rounded,
++          label: conversation.title ??
++              (conversation.date != null ? dates.date(conversation.date!.toLocal()) : l10n.untitledConversation),
++          available: conversation.available,
++          onTap: () => onOpenConversation(conversation.id),
++        ),
++    ];
++    if (chips.isEmpty) return const SizedBox.shrink();
++    return Padding(
++      padding: const EdgeInsets.only(top: OmiSpacing.sm),
++      child: Column(
++        crossAxisAlignment: CrossAxisAlignment.start,
++        children: [
++          Text(l10n.insightSources, style: OmiType.footnote.copyWith(color: OmiColors.textTertiary)),
++          const SizedBox(height: OmiSpacing.xxs),
++          Wrap(spacing: OmiSpacing.xs, runSpacing: OmiSpacing.xs, children: chips),
++        ],
++      ),
++    );
++  }
++}
++
++/// Une source : touchée, elle ouvre la discussion ou la conversation. Supprimée depuis, elle reste listée (on
++/// voit d'où venait l'élément) avec « N'est plus disponible », et ne s'ouvre pas.
++class _InsightSourceChip extends StatelessWidget {
++  const _InsightSourceChip({
++    super.key,
++    required this.icon,
++    required this.label,
++    required this.available,
++    required this.onTap,
++  });
++
++  final IconData icon;
++  final String label;
++  final bool available;
++  final VoidCallback onTap;
++
++  @override
++  Widget build(BuildContext context) {
++    final ink = available ? OmiColors.textPrimary : OmiColors.textTertiary;
++    final text = available ? label : '$label · ${context.l10n.insightSourceUnavailable}';
++    final content = ConstrainedBox(
++      constraints: const BoxConstraints(minHeight: 36, maxWidth: 280),
++      child: Padding(
++        padding: const EdgeInsets.symmetric(horizontal: OmiSpacing.sm, vertical: OmiSpacing.xxs),
++        child: Row(
++          mainAxisSize: MainAxisSize.min,
++          children: [
++            ExcludeSemantics(child: Icon(available ? icon : Icons.link_off_rounded, size: 16, color: ink)),
++            const SizedBox(width: 6),
++            Flexible(
++              child: Text(text,
++                  maxLines: 1, overflow: TextOverflow.ellipsis, style: OmiType.footnote.copyWith(color: ink)),
++            ),
++          ],
++        ),
++      ),
++    );
++    return Semantics(
++      button: available,
++      enabled: available,
++      child: Material(
++        color: OmiColors.chipSurface,
++        shape: const StadiumBorder(),
++        clipBehavior: Clip.antiAlias,
++        child: available ? InkWell(onTap: onTap, child: content) : content,
++      ),
++    );
++  }
++}
+diff --git a/app/lib/pages/insights/insight_labels.dart b/app/lib/pages/insights/insight_labels.dart
+new file mode 100644
+index 0000000000..1cde508a65
+--- /dev/null
++++ b/app/lib/pages/insights/insight_labels.dart
+@@ -0,0 +1,52 @@
++import 'package:flutter/material.dart';
++
++import 'package:omi/l10n/app_localizations.dart';
++
++/// Clone local : libellés traduits des gabarits et des sections d'Insights. Le serveur envoie une clé fixe
++/// (`gabarit`, `cle`) et un nom français ; une clé inconnue garde ce nom.
++String insightTemplateLabel(AppLocalizations l10n, String template) => switch (template) {
++      'pro' => l10n.insightTemplatePro,
++      'proche' => l10n.insightTemplateProche,
++      'soin' => l10n.insightTemplateSoin,
++      'theme' => l10n.insightTemplateTheme,
++      _ => template,
++    };
++
++/// L'icône d'un gabarit ; toujours montrée avec son libellé, jamais seule porteuse du sens.
++IconData insightTemplateIcon(String template) => switch (template) {
++      'pro' => Icons.work_outline_rounded,
++      'proche' => Icons.people_outline_rounded,
++      'soin' => Icons.spa_outlined,
++      _ => Icons.lightbulb_outline_rounded,
++    };
++
++String insightSectionLabel(AppLocalizations l10n, String key, String fallback) => switch (key) {
++      'angles' => l10n.insightSectionAngles,
++      'besoins' => l10n.insightSectionNeeds,
++      'propositions_possibles' => l10n.insightSectionProposals,
++      'a_suivre' => l10n.insightSectionFollowUp,
++      'ce_qui_s_est_passe' => l10n.insightSectionWhatHappened,
++      'ce_qui_a_marche' => l10n.insightSectionWhatWorked,
++      'la_prochaine_fois' => l10n.insightSectionNextTime,
++      'ce_qui_a_compte' => l10n.insightSectionWhatMattered,
++      'comprendre' => l10n.insightSectionUnderstanding,
++      'ce_qui_m_aide' => l10n.insightSectionWhatHelps,
++      'idees' => l10n.insightSectionIdeas,
++      'questions_ouvertes' => l10n.insightSectionOpenQuestions,
++      _ => fallback,
++    };
++
++/// La ligne sous le titre d'un dossier : « Pro · 3 notes · Mis à jour le 9 oct. 2026 ». Sans [count] (en-tête
++/// du dossier, où les notes se voient), le nombre de notes est omis.
++String insightDossierMeta(
++  AppLocalizations l10n, {
++  required String template,
++  required String Function(DateTime) formatDate,
++  DateTime? updatedAt,
++  int? count,
++}) =>
++    [
++      insightTemplateLabel(l10n, template),
++      if (count != null) l10n.insightElementCount(count),
++      if (updatedAt != null) l10n.insightUpdated(formatDate(updatedAt.toLocal())),
++    ].join(' · ');
+diff --git a/app/lib/pages/insights/insight_sources.dart b/app/lib/pages/insights/insight_sources.dart
+new file mode 100644
+index 0000000000..286e857a1a
+--- /dev/null
++++ b/app/lib/pages/insights/insight_sources.dart
+@@ -0,0 +1,80 @@
++import 'dart:async';
++
++import 'package:flutter/material.dart';
++
++import 'package:provider/provider.dart';
++
++import 'package:omi/backend/http/api/conversations.dart';
++import 'package:omi/backend/http/api_result.dart';
++import 'package:omi/backend/schema/chat_session.dart';
++import 'package:omi/pages/chat/chat_route.dart';
++import 'package:omi/pages/chat/page.dart';
++import 'package:omi/pages/conversation_detail/page.dart';
++import 'package:omi/providers/message_provider.dart';
++import 'package:omi/ui/ui.dart';
++import 'package:omi/utils/l10n_extensions.dart';
++import 'package:omi/utils/other/temp.dart';
++
++/// Clone local : ouvre la source d'un élément d'Insights (la discussion du chat d'où il vient, ou une
++/// conversation citée). Remplaçable dans les tests.
++class InsightSourceOpener {
++  const InsightSourceOpener({this.openChat = openInsightChat, this.openConversation = openInsightConversation});
++
++  final Future<void> Function(BuildContext context, String sessionId) openChat;
++  final Future<void> Function(BuildContext context, String conversationId) openConversation;
++}
++
++/// Rouvre la discussion [sessionId] dans le chat, comme un choix de « Discussions passées ». Refusé pendant une
++/// réponse en cours ; une discussion supprimée depuis le dit.
++Future<void> openInsightChat(BuildContext context, String sessionId) async {
++  final provider = context.read<MessageProvider>();
++  final l10n = context.l10n;
++  if (!provider.canSwitchChat) {
++    OmiFeedback.info(context, l10n.chatSwitchBusy);
++    return;
++  }
++  // La discussion est lue avant d'ouvrir le chat : à l'ouverture, un chat vide relirait l'ancien fil.
++  final found = await _whileLoading<ApiResult<ChatSessionSummary>>(context, () async {
++    final result = await provider.chatSessionsApi.get(sessionId);
++    if (result is! ApiSuccess<ChatSessionSummary>) return result;
++    final opened = await provider.openChatSession(result.data);
++    return opened ? result : const ApiFailure(ApiProblem(ApiProblemKind.rejected));
++  });
++  if (!context.mounted) return;
++  switch (found) {
++    case ApiSuccess():
++      unawaited(openChatSheet(context, const ChatPage(isPivotBottom: false)));
++    case ApiFailure(:final problem):
++      OmiFeedback.error(
++          context, problem.kind == ApiProblemKind.notFound ? l10n.insightSourceUnavailable : l10n.somethingWentWrong);
++  }
++}
++
++/// Ouvre la conversation [conversationId] ; supprimée ou verrouillée, le dit.
++Future<void> openInsightConversation(BuildContext context, String conversationId) async {
++  final l10n = context.l10n;
++  final found = await _whileLoading(context, () => getConversationByIdResult(conversationId));
++  if (!context.mounted) return;
++  final conversation = found.item;
++  if (conversation != null) {
++    unawaited(routeToPage(context, ConversationDetailPage(conversation: conversation)));
++  } else {
++    OmiFeedback.error(context, found.ok ? l10n.conversationNotFoundOrDeleted : l10n.somethingWentWrong);
++  }
++}
++
++/// Un indicateur d'attente au-dessus de la page pendant [work] (comme l'ouverture d'une conversation depuis un
++/// récap).
++Future<T> _whileLoading<T>(BuildContext context, Future<T> Function() work) async {
++  final navigator = Navigator.of(context);
++  unawaited(showDialog<void>(
++    context: context,
++    barrierDismissible: false,
++    builder: (_) => const Center(child: OmiSpinner(size: OmiSpinnerSize.large)),
++  ));
++  try {
++    return await work();
++  } finally {
++    navigator.pop();
++  }
++}
+diff --git a/app/lib/pages/insights/insights_page.dart b/app/lib/pages/insights/insights_page.dart
+new file mode 100644
+index 0000000000..a07a26a6c8
+--- /dev/null
++++ b/app/lib/pages/insights/insights_page.dart
+@@ -0,0 +1,227 @@
++import 'dart:async';
++
++import 'package:flutter/material.dart';
++
++import 'package:omi/backend/http/api/insights.dart';
++import 'package:omi/backend/http/api_result.dart';
++import 'package:omi/backend/schema/insight_dossier.dart';
++import 'package:omi/pages/insights/insight_dossier_page.dart';
++import 'package:omi/pages/insights/insight_labels.dart';
++import 'package:omi/pages/insights/insight_sources.dart';
++import 'package:omi/ui/ui.dart';
++import 'package:omi/utils/l10n_extensions.dart';
++import 'package:omi/utils/other/temp.dart';
++import 'package:omi/widgets/home_bottom_bar.dart';
++
++/// Clone local : le troisième onglet de l'accueil (Accueil, Tâches, Insights). Les dossiers vivants qu'Omi tient
++/// à partir des discussions du chat, un par personne, relation ou thème, le plus récemment mis à jour d'abord.
++/// Toucher un dossier l'ouvre ; appui long : le retirer. Lecture seule sinon : Omi décide seul de ce qui entre.
++class InsightsPage extends StatefulWidget {
++  const InsightsPage({super.key, this.api, this.sources = const InsightSourceOpener()});
++
++  final InsightsApi? api;
++  final InsightSourceOpener sources;
++
++  @override
++  State<InsightsPage> createState() => InsightsPageState();
++}
++
++class InsightsPageState extends State<InsightsPage> with AutomaticKeepAliveClientMixin {
++  late final InsightsApi _api = widget.api ?? InsightsApi();
++  final ScrollController _scrollController = ScrollController();
++
++  /// Null tant que rien n'a été lu.
++  List<InsightDossierSummary>? _dossiers;
++  ApiProblem? _problem;
++  Future<void>? _loading;
++
++  @override
++  bool get wantKeepAlive => true;
++
++  @override
++  void initState() {
++    super.initState();
++    unawaited(refresh());
++  }
++
++  @override
++  void dispose() {
++    _scrollController.dispose();
++    super.dispose();
++  }
++
++  void scrollToTop() {
++    if (_scrollController.hasClients) {
++      _scrollController.animateTo(0, duration: const Duration(milliseconds: 300), curve: Curves.easeOut);
++    }
++  }
++
++  /// Relit la liste (onglet rouvert, retour d'un dossier, tirer pour rafraîchir). Un échec garde ce qui est
++  /// affiché ; [reportFailure] le dit alors par un message.
++  Future<void> refresh({bool reportFailure = false}) {
++    final running = _loading;
++    if (running != null) return running;
++    final future = _load(reportFailure: reportFailure).whenComplete(() => _loading = null);
++    _loading = future;
++    return future;
++  }
++
++  Future<void> _load({required bool reportFailure}) async {
++    final result = await _api.list();
++    if (!mounted) return;
++    final hadRows = _dossiers != null;
++    setState(() {
++      switch (result) {
++        case ApiSuccess(:final data):
++          _dossiers = data;
++          _problem = null;
++        case ApiFailure(:final problem):
++          _problem = problem;
++      }
++    });
++    if (reportFailure && hadRows && result is ApiFailure) OmiFeedback.error(context, context.l10n.insightsLoadError);
++  }
++
++  Future<void> _open(InsightDossierSummary dossier) async {
++    OmiHaptics.selection();
++    await routeToInsightDossier(context, dossier, api: _api, sources: widget.sources);
++    // Des éléments ont pu être retirés, ou le dossier lui-même.
++    if (mounted) unawaited(refresh());
++  }
++
++  Future<void> _showMenu(InsightDossierSummary dossier) async {
++    final removed = await showInsightDossierMenu(context, _api, dossier);
++    if (!removed || !mounted) return;
++    setState(() => _dossiers = _dossiers?.where((row) => row.id != dossier.id).toList());
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    super.build(context);
++    final l10n = context.l10n;
++    final dossiers = _dossiers;
++    final Widget body;
++    if (dossiers == null) {
++      body = SliverFillRemaining(
++        hasScrollBody: false,
++        child: _problem == null
++            ? const OmiLoadingState()
++            : OmiErrorState(message: l10n.insightsLoadError, onRetry: () => refresh()),
++      );
++    } else if (dossiers.isEmpty) {
++      body = SliverFillRemaining(
++        hasScrollBody: false,
++        child: Padding(
++          padding: const EdgeInsets.only(bottom: 120),
++          child: OmiEmptyState(
++            icon: Icons.lightbulb_outline_rounded,
++            title: l10n.insightsEmptyTitle,
++            message: l10n.insightsEmptyMessage,
++          ),
++        ),
++      );
++    } else {
++      body = SliverPadding(
++        padding: const EdgeInsets.symmetric(horizontal: OmiSpacing.md),
++        sliver: SliverList.separated(
++          itemCount: dossiers.length,
++          separatorBuilder: (_, __) => const SizedBox(height: OmiSpacing.xs),
++          itemBuilder: (context, index) {
++            final dossier = dossiers[index];
++            return InsightDossierRow(
++              dossier: dossier,
++              onTap: () => unawaited(_open(dossier)),
++              onLongPress: () => unawaited(_showMenu(dossier)),
++            );
++          },
++        ),
++      );
++    }
++    return RefreshIndicator(
++      onRefresh: () {
++        OmiHaptics.medium();
++        return refresh(reportFailure: true);
++      },
++      child: CustomScrollView(
++        key: const ValueKey('insights_list'),
++        controller: _scrollController,
++        physics: const AlwaysScrollableScrollPhysics(),
++        slivers: [
++          const SliverPadding(padding: EdgeInsets.only(top: OmiSpacing.xs)),
++          body,
++          SliverPadding(padding: EdgeInsets.only(bottom: homeBottomClearance(context))),
++        ],
++      ),
++    );
++  }
++}
++
++/// Ouvre un dossier par-dessus l'accueil ; se termine quand on en revient.
++Future<void> routeToInsightDossier(
++  BuildContext context,
++  InsightDossierSummary dossier, {
++  InsightsApi? api,
++  InsightSourceOpener sources = const InsightSourceOpener(),
++}) {
++  return routeToPage(context, InsightDossierPage(summary: dossier, api: api, sources: sources));
++}
++
++/// Une ligne de la liste : titre, gabarit (icône et libellé), nombre de notes et date de mise à jour.
++class InsightDossierRow extends StatelessWidget {
++  const InsightDossierRow({super.key, required this.dossier, required this.onTap, required this.onLongPress});
++
++  final InsightDossierSummary dossier;
++  final VoidCallback onTap;
++  final VoidCallback onLongPress;
++
++  @override
++  Widget build(BuildContext context) {
++    final meta = insightDossierMeta(
++      context.l10n,
++      template: dossier.template,
++      count: dossier.elementCount,
++      updatedAt: dossier.updatedAt,
++      formatDate: OmiDateFormat.of(context).date,
++    );
++    return Semantics(
++      button: true,
++      child: Material(
++        color: OmiColors.surface1,
++        borderRadius: OmiRadius.mdAll,
++        child: InkWell(
++          key: ValueKey('insight_dossier_${dossier.id}'),
++          borderRadius: OmiRadius.mdAll,
++          onTap: onTap,
++          onLongPress: onLongPress,
++          child: ConstrainedBox(
++            constraints: const BoxConstraints(minHeight: 64),
++            child: Padding(
++              padding: const EdgeInsets.symmetric(horizontal: OmiSpacing.md, vertical: OmiSpacing.sm),
++              child: Row(
++                children: [
++                  ExcludeSemantics(
++                    child: Icon(insightTemplateIcon(dossier.template), size: 22, color: OmiColors.textSecondary),
++                  ),
++                  const SizedBox(width: OmiSpacing.sm),
++                  Expanded(
++                    child: Column(
++                      crossAxisAlignment: CrossAxisAlignment.start,
++                      mainAxisSize: MainAxisSize.min,
++                      children: [
++                        Text(dossier.title, maxLines: 2, overflow: TextOverflow.ellipsis, style: OmiType.headline),
++                        const SizedBox(height: 2),
++                        Text(meta, style: OmiType.footnote.copyWith(color: OmiColors.textSecondary)),
++                      ],
++                    ),
++                  ),
++                  const SizedBox(width: OmiSpacing.xs),
++                  ExcludeSemantics(child: Icon(Icons.chevron_right_rounded, size: 20, color: OmiColors.textTertiary)),
++                ],
++              ),
++            ),
++          ),
++        ),
++      ),
++    );
++  }
++}
+diff --git a/app/lib/providers/home_provider.dart b/app/lib/providers/home_provider.dart
+index fa9530e39c..5176c173aa 100644
+--- a/app/lib/providers/home_provider.dart
++++ b/app/lib/providers/home_provider.dart
+@@ -13,10 +13,13 @@ import 'package:omi/providers/user_provider.dart';
+ import 'package:omi/utils/logger.dart';
+ 
+ class HomeProvider extends ChangeNotifier {
+-  /// The two pages of the Home shell, switched at the top of the screen.
++  /// The pages of the Home shell, switched at the top of the screen.
+   static const int homeTab = 0;
+   static const int tasksTab = 1;
+-  static const int tabCount = 2;
++
++  /// Clone local : Insights, les dossiers qu'Omi tient à partir des discussions du chat.
++  static const int insightsTab = 2;
++  static const int tabCount = 3;
+ 
+   int _sessionGeneration = 0;
+   bool _languageDialogOffered = false;
+diff --git a/app/test/unit/insights_test.dart b/app/test/unit/insights_test.dart
+new file mode 100644
+index 0000000000..b48fdcdb4c
+--- /dev/null
++++ b/app/test/unit/insights_test.dart
+@@ -0,0 +1,246 @@
++// Clone local : Insights v1 (0008) — lecture des formes rendues par les routes du serveur du clone
++// (backend/routers/insights.py, utils/insights_dossiers.py : dossier_resume, dossier_detail) et appels de l'API.
++import 'dart:convert';
++
++import 'package:flutter_test/flutter_test.dart';
++import 'package:http/http.dart' as http;
++
++import 'package:omi/backend/http/api/insights.dart';
++import 'package:omi/backend/http/api_result.dart';
++import 'package:omi/backend/schema/insight_dossier.dart';
++
++/// Un dossier tel que `dossier_detail` le rend : sections du gabarit dans l'ordre, même vides.
++Map<String, dynamic> _detail() => {
++      'id': 'arnaud',
++      'titre': 'Arnaud',
++      'gabarit': 'pro',
++      'alias': ['Arnaud D.'],
++      'statut': 'actif',
++      'version': 4,
++      'maj': '2026-10-09T18:30:00+00:00',
++      'nb_elements': 2,
++      'sections': [
++        {
++          'cle': 'angles',
++          'nom': 'angles',
++          'elements': [
++            {
++              'id': 'e1',
++              'texte': 'Lui parler du budget avant la démo.',
++              'type': 'angle',
++              'origine': 'mike',
++              'piste_omi': false,
++              'citation': 'parler du budget avant',
++              'statut': 'actif',
++              'cree': '2026-10-08T10:00:00+00:00',
++              'revise': null,
++              'sources': {
++                'messages': ['m-1'],
++                'session': {'id': 's-1', 'titre': 'Point Arnaud', 'disponible': true},
++                'conversations': [
++                  {
++                    'id': 'c-1',
++                    'titre': 'Réunion avec Arnaud',
++                    'date': '2026-10-07T09:00:00+00:00',
++                    'disponible': true
++                  },
++                  {'id': 'c-2', 'titre': null, 'date': null, 'disponible': false},
++                ],
++              },
++            },
++          ],
++        },
++        {'cle': 'besoins', 'nom': 'besoins', 'elements': []},
++        {
++          'cle': 'propositions_possibles',
++          'nom': 'propositions possibles',
++          'elements': [
++            {
++              'id': 'e2',
++              'texte': 'Proposer un essai de deux semaines.',
++              'origine': 'omi',
++              'piste_omi': true,
++              'citation': 'un essai de deux semaines',
++              'statut': 'actif',
++              'sources': {
++                'messages': ['m-2'],
++                'session': null,
++                'conversations': []
++              },
++            },
++            // Illisibles : écartés sans cacher le reste.
++            {'texte': 'sans id'},
++            'pas un objet',
++          ],
++        },
++        {'cle': 'a_suivre', 'nom': 'à suivre', 'elements': []},
++        {'nom': null, 'cle': null, 'elements': []},
++      ],
++    };
++
++http.Response _json(Object body, [int status = 200]) =>
++    http.Response(jsonEncode(body), status, headers: {'content-type': 'application/json; charset=utf-8'});
++
++void main() {
++  group('lecture d’un dossier', () {
++    test('sections du gabarit dans l’ordre, éléments, citation, piste d’Omi et sources', () {
++      final dossier = InsightDossier.fromJson(_detail());
++      expect(dossier.id, 'arnaud');
++      expect(dossier.summary.title, 'Arnaud');
++      expect(dossier.summary.template, 'pro');
++      expect(dossier.summary.aliases, ['Arnaud D.']);
++      expect(dossier.summary.version, 4);
++      expect(dossier.summary.updatedAt, DateTime.utc(2026, 10, 9, 18, 30));
++      expect(dossier.summary.elementCount, 2);
++      expect(dossier.sections.map((s) => s.key), ['angles', 'besoins', 'propositions_possibles', 'a_suivre']);
++
++      final angle = dossier.sections.first.elements.single;
++      expect(angle.text, 'Lui parler du budget avant la démo.');
++      expect(angle.quote, 'parler du budget avant');
++      expect(angle.origin, 'mike');
++      expect(angle.omiLead, isFalse);
++      expect(angle.revisedAt, isNull);
++      expect(angle.sources.messages, ['m-1']);
++      expect(angle.sources.session?.id, 's-1');
++      expect(angle.sources.session?.title, 'Point Arnaud');
++      expect(angle.sources.session?.available, isTrue);
++      expect(angle.sources.conversations.map((c) => (c.id, c.available)), [('c-1', true), ('c-2', false)]);
++      expect(angle.sources.conversations.first.date, DateTime.utc(2026, 10, 7, 9));
++      expect(angle.sources.conversations.last.title, isNull);
++
++      final proposals = dossier.sections[2].elements;
++      expect(proposals.map((e) => e.id), ['e2'], reason: 'un élément sans id ou illisible est écarté');
++      expect(proposals.single.omiLead, isTrue);
++      expect(proposals.single.sources.session, isNull);
++    });
++
++    test('sans piste_omi, l’origine décide ; un statut retiré ne se montre pas', () {
++      final element = InsightElement.tryParse({'id': 'x', 'texte': 'Idée', 'origine': 'omi'})!;
++      expect(element.omiLead, isTrue);
++      expect(element.status, 'actif');
++      final json = _detail();
++      ((json['sections'] as List).first['elements'] as List).first['statut'] = 'retire';
++      final dossier = InsightDossier.fromJson(json);
++      expect(dossier.visibleSections.first.elements, isEmpty);
++      expect(dossier.visibleSections.length, dossier.sections.length, reason: 'les sections restent, même vides');
++    });
++
++    test('une ligne de liste sans id ni titre est refusée', () {
++      expect(() => InsightDossierSummary.fromJson({'id': 'a', 'titre': ''}), throwsFormatException);
++      expect(() => InsightDossierSummary.fromJson({'titre': 'Arnaud'}), throwsFormatException);
++      final minimal = InsightDossierSummary.fromJson({'id': 'a', 'titre': 'Arnaud'});
++      expect(minimal.template, 'theme');
++      expect(minimal.isActive, isTrue);
++      expect(minimal.updatedAt, isNull);
++    });
++  });
++
++  group('API', () {
++    test('liste : dossiers actifs, une ligne illisible écartée et comptée', () async {
++      final requests = <ApiRequest>[];
++      final api = InsightsApi(
++        baseUrl: 'https://example.invalid/',
++        send: (request) async {
++          requests.add(request);
++          return _json({
++            'dossiers': [
++              {'id': 'arnaud', 'titre': 'Arnaud', 'gabarit': 'pro', 'statut': 'actif', 'version': 1, 'nb_elements': 3},
++              {'id': 'sans-titre', 'titre': ''},
++            ],
++          });
++        },
++      );
++      final result = await api.list() as ApiSuccess<List<InsightDossierSummary>>;
++      expect(result.data.single.title, 'Arnaud');
++      expect(result.data.single.elementCount, 3);
++      expect(result.rejectedRows, 1);
++      expect(requests.single.method, 'GET');
++      expect(Uri.parse(requests.single.url).path, '/v1/insights/dossiers');
++      expect(Uri.parse(requests.single.url).queryParameters, {'statut': 'actif'});
++    });
++
++    test('liste : vide, illisible et panne restent distincts', () async {
++      Future<ApiResult<List<InsightDossierSummary>>> list(http.Response response) =>
++          InsightsApi(baseUrl: 'https://example.invalid/', send: (_) async => response).list();
++
++      final empty = await list(_json({'dossiers': []}));
++      expect(empty, isA<ApiSuccess<List<InsightDossierSummary>>>());
++      expect((empty as ApiSuccess<List<InsightDossierSummary>>).data, isEmpty);
++      for (final (response, kind) in [
++        (_json([]), ApiProblemKind.decode),
++        (_json({'dossiers': {}}), ApiProblemKind.decode),
++        (
++          _json({
++            'dossiers': [
++              {'id': 7}
++            ]
++          }),
++          ApiProblemKind.decode
++        ),
++        (_json({'detail': 'boom'}, 500), ApiProblemKind.server),
++        (_json({'detail': 'Not Found'}, 404), ApiProblemKind.notFound),
++      ]) {
++        final result = await list(response);
++        expect(result, isA<ApiFailure<List<InsightDossierSummary>>>());
++        expect((result as ApiFailure).problem.kind, kind);
++      }
++    });
++
++    test('un dossier : lu en entier ; 404 quand il n’existe plus', () async {
++      final requests = <ApiRequest>[];
++      final api = InsightsApi(
++        baseUrl: 'https://example.invalid/',
++        send: (request) async {
++          requests.add(request);
++          return request.url.contains('disparu') ? _json({'detail': 'Dossier not found'}, 404) : _json(_detail());
++        },
++      );
++      final found = await api.get('arnaud') as ApiSuccess<InsightDossier>;
++      expect(found.data.sections, hasLength(4));
++      final gone = await api.get('disparu') as ApiFailure<InsightDossier>;
++      expect(gone.problem.kind, ApiProblemKind.notFound);
++      expect(Uri.parse(requests.first.url).path, '/v1/insights/dossiers/arnaud');
++    });
++
++    test('retirer un élément : DELETE sur l’élément, rend le dossier à jour', () async {
++      final requests = <ApiRequest>[];
++      final api = InsightsApi(
++        baseUrl: 'https://example.invalid/',
++        send: (request) async {
++          requests.add(request);
++          return _json({'status': 'ok', 'deja_retire': false, 'dossier': _detail()});
++        },
++      );
++      final result = await api.removeElement('dossier/1', 'e 2') as ApiSuccess<InsightRemoval<InsightDossier>>;
++      expect(result.data.alreadyRemoved, isFalse);
++      expect(result.data.dossier.id, 'arnaud');
++      expect(requests.single.method, 'DELETE');
++      expect(requests.single.url, 'https://example.invalid/v1/insights/dossiers/dossier%2F1/elements/e%202');
++    });
++
++    test('retirer un dossier : DELETE sur le dossier ; « déjà retiré » se lit ; réponse illisible = échec', () async {
++      var body = <String, dynamic>{
++        'status': 'ok',
++        'deja_retire': true,
++        'dossier': {'id': 'arnaud', 'titre': 'Arnaud', 'gabarit': 'pro', 'statut': 'archive', 'version': 5},
++      };
++      final requests = <ApiRequest>[];
++      final api = InsightsApi(
++        baseUrl: 'https://example.invalid/',
++        send: (request) async {
++          requests.add(request);
++          return _json(body);
++        },
++      );
++      final result = await api.removeDossier('arnaud') as ApiSuccess<InsightRemoval<InsightDossierSummary>>;
++      expect(result.data.alreadyRemoved, isTrue);
++      expect(result.data.dossier.isActive, isFalse);
++      expect(requests.single.method, 'DELETE');
++      expect(Uri.parse(requests.single.url).path, '/v1/insights/dossiers/arnaud');
++
++      body = {'status': 'ok'};
++      final broken = await api.removeDossier('arnaud');
++      expect((broken as ApiFailure).problem.kind, ApiProblemKind.decode);
++    });
++  });
++}
+diff --git a/app/test/widgets/home_bottom_bar_test.dart b/app/test/widgets/home_bottom_bar_test.dart
+index ecade79e8e..fac6e13caa 100644
+--- a/app/test/widgets/home_bottom_bar_test.dart
++++ b/app/test/widgets/home_bottom_bar_test.dart
+@@ -40,10 +40,12 @@ void main() {
+     expect(notificationCount, 2);
+   });
+ 
+-  test('the shell has exactly two pages: Home and Tasks', () {
++  // Clone local : un troisième onglet, Insights.
++  test('the shell has exactly three pages: Home, Tasks and Insights', () {
+     expect(HomeProvider.homeTab, 0);
+     expect(HomeProvider.tasksTab, 1);
+-    expect(HomeProvider.tabCount, 2);
++    expect(HomeProvider.insightsTab, 2);
++    expect(HomeProvider.tabCount, 3);
+   });
+ 
+   testWidgets('the switcher reports a tap and a repeat tap', (tester) async {
+diff --git a/app/test/widgets/insights_pages_test.dart b/app/test/widgets/insights_pages_test.dart
+new file mode 100644
+index 0000000000..fc9afca00c
+--- /dev/null
++++ b/app/test/widgets/insights_pages_test.dart
+@@ -0,0 +1,426 @@
++// Clone local : onglet Insights (0008) — liste des dossiers, détail par sections, citation, « piste d'Omi »,
++// sources ouvrables, appui long → Retirer (élément ou dossier), troisième onglet de l'accueil.
++import 'dart:convert';
++
++import 'package:flutter/material.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:http/http.dart' as http;
++import 'package:provider/provider.dart';
++
++import 'package:omi/backend/http/api/insights.dart';
++import 'package:omi/backend/http/api_result.dart';
++import 'package:omi/l10n/app_localizations.dart';
++import 'package:omi/pages/home/home_deep_links.dart';
++import 'package:omi/pages/home/widgets/home_tab_switcher.dart';
++import 'package:omi/pages/insights/insight_dossier_page.dart';
++import 'package:omi/pages/insights/insight_sources.dart';
++import 'package:omi/pages/insights/insights_page.dart';
++import 'package:omi/providers/home_provider.dart';
++import 'package:omi/ui/ui.dart';
++
++/// Un faux serveur du clone : mêmes formes que backend/routers/insights.py, retraits compris.
++class _FakeServer {
++  _FakeServer({this.failList = false});
++
++  bool failList;
++  final requests = <ApiRequest>[];
++  final archived = <String>{};
++  final removedElements = <String>{};
++  final goneElements = <String>{};
++
++  static Map<String, dynamic> _element(
++    String id,
++    String text, {
++    String origin = 'mike',
++    String? quote,
++    Map<String, dynamic>? session,
++    List<Map<String, dynamic>> conversations = const [],
++  }) =>
++      {
++        'id': id,
++        'texte': text,
++        'type': null,
++        'origine': origin,
++        'piste_omi': origin == 'omi',
++        'citation': quote,
++        'statut': 'actif',
++        'cree': '2026-10-08T10:00:00+00:00',
++        'revise': null,
++        'sources': {
++          'messages': ['m-$id'],
++          'session': session,
++          'conversations': conversations
++        },
++      };
++
++  Map<String, List<Map<String, dynamic>>> _sections(String id) => switch (id) {
++        'arnaud' => {
++            'angles': [
++              _element(
++                'e1',
++                'Lui parler du budget avant la démo.',
++                quote: 'parler du budget avant la démo',
++                session: {'id': 's-1', 'titre': 'Point Arnaud', 'disponible': true},
++                conversations: [
++                  {
++                    'id': 'c-1',
++                    'titre': 'Réunion avec Arnaud',
++                    'date': '2026-10-07T09:00:00+00:00',
++                    'disponible': true
++                  },
++                  {'id': 'c-2', 'titre': 'Appel supprimé', 'date': null, 'disponible': false},
++                ],
++              ),
++            ],
++            'besoins': [],
++            'propositions_possibles': [
++              _element('e2', 'Proposer un essai de deux semaines.', origin: 'omi', quote: 'un essai de deux semaines'),
++            ],
++            'a_suivre': [],
++          },
++        _ => {
++            'ce_qui_s_est_passe': [_element('f1', 'On a parlé de l’école calmement.')],
++            'ce_qui_a_marche': [],
++            'la_prochaine_fois': [],
++          },
++      };
++
++  static const _labels = {
++    'angles': 'angles',
++    'besoins': 'besoins',
++    'propositions_possibles': 'propositions possibles',
++    'a_suivre': 'à suivre',
++    'ce_qui_s_est_passe': "ce qui s'est passé",
++    'ce_qui_a_marche': 'ce qui a marché',
++    'la_prochaine_fois': 'la prochaine fois',
++  };
++
++  Map<String, dynamic> _resume(String id) {
++    final count = _sections(id).values.expand((e) => e).where((e) => !removedElements.contains(e['id'])).length;
++    return {
++      'id': id,
++      'titre': id == 'arnaud' ? 'Arnaud' : 'Mon fils',
++      'gabarit': id == 'arnaud' ? 'pro' : 'proche',
++      'alias': [],
++      'statut': archived.contains(id) ? 'archive' : 'actif',
++      'version': 3,
++      'maj': id == 'arnaud' ? '2026-10-09T18:30:00+00:00' : '2026-10-02T08:00:00+00:00',
++      'nb_elements': count,
++    };
++  }
++
++  Map<String, dynamic> _detail(String id) => {
++        ..._resume(id),
++        'sections': [
++          for (final entry in _sections(id).entries)
++            {
++              'cle': entry.key,
++              'nom': _labels[entry.key],
++              'elements': entry.value.where((e) => !removedElements.contains(e['id'])).toList(),
++            },
++        ],
++      };
++
++  static http.Response _json(Object body, [int status = 200]) =>
++      http.Response(jsonEncode(body), status, headers: {'content-type': 'application/json; charset=utf-8'});
++
++  Future<http.Response> send(ApiRequest request) async {
++    requests.add(request);
++    final segments = Uri.parse(request.url).pathSegments;
++    if (request.method == 'GET' && segments.length == 3) {
++      if (failList) return _json({'detail': 'boom'}, 500);
++      return _json({
++        'dossiers': [
++          for (final id in ['arnaud', 'fils'])
++            if (!archived.contains(id)) _resume(id)
++        ],
++      });
++    }
++    final id = segments[3];
++    if (request.method == 'GET') return _json(_detail(id));
++    if (request.method == 'DELETE' && segments.length == 6) {
++      if (goneElements.contains(segments[5])) return _json({'detail': 'Element not found'}, 404);
++      removedElements.add(segments[5]);
++      return _json({'status': 'ok', 'deja_retire': false, 'dossier': _detail(id)});
++    }
++    if (request.method == 'DELETE') {
++      archived.add(id);
++      return _json({'status': 'ok', 'deja_retire': false, 'dossier': _resume(id)});
++    }
++    return _json({'detail': 'Not Found'}, 404);
++  }
++}
++
++class _Opened {
++  final chats = <String>[];
++  final conversations = <String>[];
++
++  InsightSourceOpener get opener => InsightSourceOpener(
++        openChat: (_, id) async => chats.add(id),
++        openConversation: (_, id) async => conversations.add(id),
++      );
++}
++
++Future<void> _pump(WidgetTester tester, Widget body, {Locale locale = const Locale('fr')}) async {
++  // Largeur d'iPhone, assez haut pour que tout le dossier soit construit (la liste est paresseuse).
++  tester.view.physicalSize = const Size(390, 2400);
++  tester.view.devicePixelRatio = 1;
++  addTearDown(tester.view.reset);
++  await tester.pumpWidget(MaterialApp(
++    localizationsDelegates: AppLocalizations.localizationsDelegates,
++    supportedLocales: AppLocalizations.supportedLocales,
++    locale: locale,
++    home: Scaffold(body: body),
++  ));
++  await tester.pumpAndSettle();
++}
++
++InsightsPage _page(_FakeServer server, _Opened opened) => InsightsPage(
++      api: InsightsApi(baseUrl: 'https://example.invalid/', send: server.send),
++      sources: opened.opener,
++    );
++
++void main() {
++  setUp(() => OmiColors.active = OmiPalette.light);
++
++  testWidgets('la liste montre chaque dossier : titre, gabarit, nombre de notes, date', (tester) async {
++    final server = _FakeServer();
++    await _pump(tester, _page(server, _Opened()));
++
++    expect(find.text('Arnaud'), findsOneWidget);
++    expect(find.text('Mon fils'), findsOneWidget);
++    expect(find.textContaining('Pro · 2 notes · Mis à jour le'), findsOneWidget);
++    expect(find.textContaining('Proche · 1 note · Mis à jour le'), findsOneWidget);
++    // L'ordre du serveur (le plus récemment mis à jour d'abord) est gardé.
++    expect(tester.getTopLeft(find.text('Arnaud')).dy, lessThan(tester.getTopLeft(find.text('Mon fils')).dy));
++    expect(Uri.parse(server.requests.single.url).queryParameters['statut'], 'actif');
++    // Thème clair : texte noir sur carte blanche, jamais blanc sur blanc.
++    final title = tester.widget<Text>(find.text('Arnaud'));
++    expect(title.style?.color, OmiPalette.light.textPrimary);
++    final card = tester.widget<Material>(find.ancestor(of: find.text('Arnaud'), matching: find.byType(Material)).first);
++    expect(card.color, OmiPalette.light.surface1);
++    expect(card.color, isNot(title.style?.color));
++  });
++
++  testWidgets('le détail : sections du gabarit dans l’ordre, citation, piste d’Omi marquée, aucun « Garder »',
++      (tester) async {
++    final server = _FakeServer();
++    await _pump(tester, _page(server, _Opened()));
++    await tester.tap(find.text('Arnaud'));
++    await tester.pumpAndSettle();
++
++    final sections = ['Angles', 'Besoins', 'Propositions possibles', 'À suivre'];
++    for (final name in sections) {
++      expect(find.text(name), findsOneWidget, reason: name);
++    }
++    for (var i = 1; i < sections.length; i++) {
++      expect(tester.getTopLeft(find.text(sections[i - 1])).dy, lessThan(tester.getTopLeft(find.text(sections[i])).dy));
++    }
++    expect(find.text('Rien pour l’instant'), findsNWidgets(2));
++    expect(find.text('Lui parler du budget avant la démo.'), findsOneWidget);
++    expect(find.text('parler du budget avant la démo'), findsOneWidget);
++    expect(find.text('un essai de deux semaines'), findsOneWidget);
++
++    // La piste d'Omi : un libellé et une icône sur l'élément venu d'Omi seulement.
++    expect(find.text('piste d’Omi'), findsOneWidget);
++    expect(
++      find.descendant(of: find.byKey(const ValueKey('insight_element_e2')), matching: find.text('piste d’Omi')),
++      findsOneWidget,
++    );
++    expect(
++      find.descendant(
++          of: find.byKey(const ValueKey('insight_omi_lead')), matching: find.byIcon(Icons.auto_awesome_outlined)),
++      findsOneWidget,
++    );
++    expect(
++      find.descendant(of: find.byKey(const ValueKey('insight_element_e1')), matching: find.text('piste d’Omi')),
++      findsNothing,
++    );
++    expect(find.textContaining('Garder'), findsNothing);
++    expect(find.textContaining('Keep'), findsNothing);
++  });
++
++  testWidgets('les sources s’ouvrent : la discussion, la conversation ; une source supprimée ne s’ouvre pas',
++      (tester) async {
++    final server = _FakeServer();
++    final opened = _Opened();
++    await _pump(tester, _page(server, opened));
++    await tester.tap(find.text('Arnaud'));
++    await tester.pumpAndSettle();
++
++    expect(find.text('Sources'), findsOneWidget);
++    await tester.tap(find.byKey(const ValueKey('insight_source_chat_s-1')));
++    await tester.tap(find.byKey(const ValueKey('insight_source_conversation_c-1')));
++    await tester.tap(find.byKey(const ValueKey('insight_source_conversation_c-2')));
++    await tester.pumpAndSettle();
++    expect(opened.chats, ['s-1']);
++    expect(opened.conversations, ['c-1']);
++    expect(find.text('Point Arnaud'), findsOneWidget);
++    expect(find.text('Réunion avec Arnaud'), findsOneWidget);
++    expect(find.text('Appel supprimé · N’est plus disponible'), findsOneWidget);
++  });
++
++  testWidgets('appui long sur un élément → Retirer, confirmé, retiré sur le serveur', (tester) async {
++    final server = _FakeServer();
++    await _pump(tester, _page(server, _Opened()));
++    await tester.tap(find.text('Arnaud'));
++    await tester.pumpAndSettle();
++
++    await tester.longPress(find.byKey(const ValueKey('insight_element_e2')));
++    await tester.pumpAndSettle();
++    await tester.tap(find.text('Retirer'));
++    await tester.pumpAndSettle();
++    expect(find.text('Retirer cette note ?'), findsOneWidget);
++    expect(find.text('Omi ne la réécrira plus.'), findsOneWidget);
++
++    // Annuler ne retire rien.
++    await tester.tap(find.text('Annuler'));
++    await tester.pumpAndSettle();
++    expect(server.requests.where((r) => r.method == 'DELETE'), isEmpty);
++    expect(find.text('Proposer un essai de deux semaines.'), findsOneWidget);
++
++    await tester.longPress(find.byKey(const ValueKey('insight_element_e2')));
++    await tester.pumpAndSettle();
++    await tester.tap(find.text('Retirer'));
++    await tester.pumpAndSettle();
++    await tester.tap(find.text('Retirer'));
++    await tester.pumpAndSettle();
++
++    final delete = server.requests.singleWhere((r) => r.method == 'DELETE');
++    expect(Uri.parse(delete.url).path, '/v1/insights/dossiers/arnaud/elements/e2');
++    expect(find.text('Proposer un essai de deux semaines.'), findsNothing);
++    expect(find.text('Rien pour l’instant'), findsNWidgets(3));
++    expect(find.text('Retiré'), findsOneWidget);
++
++    // De retour sur la liste, le nombre de notes est relu.
++    await tester.tap(find.byType(OmiBackButton));
++    await tester.pumpAndSettle();
++    expect(find.textContaining('Pro · 1 note'), findsOneWidget);
++  });
++
++  testWidgets('retirer une note qui n’existe déjà plus (404) : « Cette note n’est plus là », pas une panne',
++      (tester) async {
++    final server = _FakeServer()..goneElements.add('e2');
++    await _pump(tester, _page(server, _Opened()));
++    await tester.tap(find.text('Arnaud'));
++    await tester.pumpAndSettle();
++    final readsBefore = server.requests.where((r) => r.method == 'GET').length;
++
++    await tester.longPress(find.byKey(const ValueKey('insight_element_e2')));
++    await tester.pumpAndSettle();
++    await tester.tap(find.text('Retirer'));
++    await tester.pumpAndSettle();
++    await tester.tap(find.text('Retirer'));
++    await tester.pump();
++
++    expect(find.text('Cette note n’est plus là.'), findsOneWidget);
++    expect(find.text("Une erreur s'est produite ! Veuillez réessayer plus tard."), findsNothing);
++    await tester.pumpAndSettle();
++    expect(server.requests.where((r) => r.method == 'GET').length, readsBefore + 1, reason: 'le dossier est relu');
++  });
++
++  testWidgets('appui long sur un dossier de la liste → Retirer, confirmé, il quitte la liste', (tester) async {
++    final server = _FakeServer();
++    await _pump(tester, _page(server, _Opened()));
++
++    await tester.longPress(find.text('Mon fils'));
++    await tester.pumpAndSettle();
++    await tester.tap(find.text('Retirer'));
++    await tester.pumpAndSettle();
++    expect(find.text('Retirer ce dossier ?'), findsOneWidget);
++    await tester.tap(find.text('Retirer'));
++    await tester.pumpAndSettle();
++
++    final delete = server.requests.singleWhere((r) => r.method == 'DELETE');
++    expect(Uri.parse(delete.url).path, '/v1/insights/dossiers/fils');
++    expect(find.text('Mon fils'), findsNothing);
++    expect(find.text('Arnaud'), findsOneWidget);
++  });
++
++  testWidgets('appui long sur l’en-tête du dossier → Retirer le dossier, retour à la liste', (tester) async {
++    final server = _FakeServer();
++    await _pump(tester, _page(server, _Opened()));
++    await tester.tap(find.text('Arnaud'));
++    await tester.pumpAndSettle();
++
++    await tester.longPress(find.byKey(const ValueKey('insight_dossier_header')));
++    await tester.pumpAndSettle();
++    await tester.tap(find.text('Retirer'));
++    await tester.pumpAndSettle();
++    await tester.tap(find.text('Retirer'));
++    await tester.pumpAndSettle();
++
++    expect(server.archived, {'arnaud'});
++    expect(find.byType(InsightDossierPage), findsNothing);
++    expect(find.text('Arnaud'), findsNothing);
++    expect(find.text('Mon fils'), findsOneWidget);
++  });
++
++  testWidgets('liste vide, panne puis Réessayer', (tester) async {
++    final server = _FakeServer(failList: true);
++    await _pump(tester, _page(server, _Opened()));
++    expect(find.text('Impossible de charger vos insights.'), findsOneWidget);
++
++    server
++      ..failList = false
++      ..archived.addAll(['arnaud', 'fils']);
++    await tester.tap(find.text('Réessayer'));
++    await tester.pumpAndSettle();
++    expect(find.text('Pas encore d’insights'), findsOneWidget);
++  });
++
++  testWidgets('en anglais aussi', (tester) async {
++    final server = _FakeServer();
++    await _pump(tester, _page(server, _Opened()), locale: const Locale('en'));
++    expect(find.textContaining('Work · 2 notes · Updated'), findsOneWidget);
++    await tester.tap(find.text('Arnaud'));
++    await tester.pumpAndSettle();
++    expect(find.text('Possible proposals'), findsOneWidget);
++    expect(find.text('Omi’s lead'), findsOneWidget);
++  });
++
++  group('troisième onglet', () {
++    test('Accueil, Tâches, Insights', () {
++      expect(HomeProvider.insightsTab, 2);
++      expect(HomeProvider.tabCount, 3);
++      expect(HomeDeepLink.parse('/insights')!.tabIndex, HomeProvider.insightsTab);
++    });
++
++    testWidgets('le sélecteur montre Insights et le signale ; il tient sur un iPhone étroit avec les actions de Tâches',
++        (tester) async {
++      final home = HomeProvider();
++      addTearDown(home.dispose);
++      final taps = <(int, bool)>[];
++      tester.view.physicalSize = const Size(320, 640);
++      tester.view.devicePixelRatio = 1;
++      addTearDown(tester.view.reset);
++      await tester.pumpWidget(ChangeNotifierProvider<HomeProvider>.value(
++        value: home,
++        child: MaterialApp(
++          localizationsDelegates: AppLocalizations.localizationsDelegates,
++          supportedLocales: AppLocalizations.supportedLocales,
++          locale: const Locale('fr'),
++          home: Scaffold(
++            body: HomeTabSwitcher(
++              trailing: const SizedBox(width: 88, height: 44),
++              onTabTap: (index, isRepeat) {
++                taps.add((index, isRepeat));
++                home.setIndex(index);
++              },
++            ),
++          ),
++        ),
++      ));
++      expect(tester.takeException(), isNull, reason: 'pas de débordement');
++      expect(find.text('Accueil'), findsOneWidget);
++      expect(find.text('Tâches'), findsOneWidget);
++      expect(find.text('Insights'), findsOneWidget);
++      await tester.tap(find.byKey(kHomeTabInsightsKey));
++      await tester.pump();
++      await tester.tap(find.byKey(kHomeTabInsightsKey));
++      await tester.pump();
++      expect(taps, [(HomeProvider.insightsTab, false), (HomeProvider.insightsTab, true)]);
++      expect(home.selectedIndex, HomeProvider.insightsTab);
++    });
++  });
++}
+-- 
+2.43.0
+

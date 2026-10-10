@@ -1,0 +1,1426 @@
+From fd18aca3ef41346a04954517b5788d38fdadf1dc Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 10 Oct 2026 19:26:50 +0000
+Subject: [PATCH] =?UTF-8?q?R=C3=A9sum=C3=A9=20:=20=C2=AB=20Corriger=20le?=
+ =?UTF-8?q?=20r=C3=A9sum=C3=A9=20=C2=BB=20(ce=20qui=20est=20faux,=20en=20u?=
+ =?UTF-8?q?ne=20phrase=20;=20Omi=20corrige=20cette=20conversation)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Mike a trouvé des erreurs de fait dans un résumé (« Thomas Pascal » au lieu de « Pascal » ; « la
+grand-mère de Hadrien » au lieu de « la grand-mère d'Éloïse et Tristan ») et veut pouvoir les corriger.
+
+- Onglet Résumé : un bouton discret « Corriger le résumé » sous le résumé actuel d'une conversation
+  traitée (ni sous une ancienne version lue depuis la flèche des résumés, ni pendant l'édition du texte).
+  Il ouvre une feuille d'édition (fermeture protégée dès qu'un texte est tapé) : « Qu'est-ce qui est
+  faux ? », exemple en indication « C'est Pascal, pas Thomas Pascal. », 1000 caractères au plus,
+  compteur ; texte, fond et indication viennent d'OmiColors (lisibles en thème clair).
+- Envoyer → « Omi relit la conversation… » → POST /v1/conversations/{id}/corrections (serveur du
+  clone). La conversation rendue remplace celle de la page et de la liste, le résumé actuel corrigé
+  s'affiche, et une ligne dit ce qui a changé : « Corrigé : résumé, titre, 1 souvenir », ou « Correction
+  enregistrée ; aucun passage à remplacer trouvé » (elle servira aux prochains résumés).
+- L'ancienne version reste atteignable par la flèche des résumés (0007) : la version produite par une
+  correction est marquée « corrigé par vous » ; une version dont seul le titre a été corrigé reste une
+  version à part (les notes d'Omi montrent leur titre dans le menu et dans le bandeau d'une ancienne
+  version) ; un titre écrit à la main ne crée jamais de doublon.
+- Échec : la feuille reste ouverte avec le texte, et dit pourquoi en mots, avec une icône (jamais par la
+  seule couleur) : modèle indisponible (rien n'a été modifié), conversation en cours de changement,
+  connexion, conversation supprimée. Renvoyer le même texte garde le même identifiant d'envoi : le
+  serveur ne l'applique jamais deux fois ; un texte changé est une autre correction.
+- Relecture du 2026-10-10 : « rien n'a été modifié » est réservé au 502 (le modèle n'a pas répondu) ;
+  toute autre erreur serveur peut suivre des écritures validées et dit « Réessayez : la correction ne
+  sera pas appliquée deux fois ». Les souvenirs non relus (au-delà des 30 plus récents) sont dits
+  après la ligne de bilan.
+- Textes en anglais et en français (app_en.arb, app_fr.arb ; les app_localizations*.dart sont régénérés
+  par flutter pub get).
+
+Tests : test/unit/summary_correction_test.dart (API, bilan en une ligne, messages d'échec, fournisseur,
+versions gardées après une correction), test/widgets/summary_correction_sheet_test.dart (bouton,
+feuille, indicateur, ligne de bilan, échec puis renvoi, ancienne version par la flèche, thème clair,
+anglais).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../http/api/conversation_corrections.dart    | 102 +++++++
+ app/lib/backend/schema/summary_version.dart   |  51 +++-
+ app/lib/l10n/app_en.arb                       | 109 +++++++
+ app/lib/l10n/app_fr.arb                       |  21 ++
+ .../conversation_detail_provider.dart         |  40 ++-
+ .../widgets/summary_correction_sheet.dart     | 271 +++++++++++++++++
+ .../widgets/summary_tab.dart                  |   5 +
+ .../widgets/summary_versions_sheet.dart       |  19 +-
+ app/test/unit/summary_correction_test.dart    | 268 +++++++++++++++++
+ .../summary_correction_sheet_test.dart        | 275 ++++++++++++++++++
+ 10 files changed, 1145 insertions(+), 16 deletions(-)
+ create mode 100644 app/lib/backend/http/api/conversation_corrections.dart
+ create mode 100644 app/lib/pages/conversation_detail/widgets/summary_correction_sheet.dart
+ create mode 100644 app/test/unit/summary_correction_test.dart
+ create mode 100644 app/test/widgets/summary_correction_sheet_test.dart
+
+diff --git a/app/lib/backend/http/api/conversation_corrections.dart b/app/lib/backend/http/api/conversation_corrections.dart
+new file mode 100644
+index 0000000000..faf1c8690d
+--- /dev/null
++++ b/app/lib/backend/http/api/conversation_corrections.dart
+@@ -0,0 +1,102 @@
++import 'dart:convert';
++
++import 'package:omi/backend/http/api_result.dart';
++import 'package:omi/backend/schema/conversation.dart';
++import 'package:omi/env/env.dart';
++
++/// Clone local : « Corriger le résumé » — POST /v1/conversations/{id}/corrections.
++///
++/// L'utilisateur écrit ce qui est faux ; le serveur corrige, dans cette conversation seulement, le titre, les notes
++/// d'Omi, les résumés d'apps et les souvenirs qui en sont tirés, garde chaque ancienne version (flèche des résumés)
++/// et rend ce qu'il a réellement changé. [id] rend l'envoi rejouable sans rien refaire (même id → même résultat).
++class ConversationCorrectionsApi {
++  ConversationCorrectionsApi({this.send, String? baseUrl}) : _baseUrl = baseUrl;
++  final ApiSend? send;
++  final String? _baseUrl;
++
++  /// Même limite que le serveur.
++  static const int maxLength = 1000;
++
++  Future<ApiResult<ConversationCorrectionResult>> correct(String conversationId,
++          {required String id, required String text}) =>
++      executeApi(
++        request: ApiRequest(
++          url: '${_baseUrl ?? Env.apiBaseUrl}v1/conversations/${Uri.encodeComponent(conversationId)}/corrections',
++          method: 'POST',
++          body: jsonEncode({'id': id, 'texte': text}),
++        ),
++        send: send,
++        decode: ConversationCorrectionResult.decode,
++      );
++}
++
++/// Ce que la correction a réellement changé (écritures validées par le serveur).
++class ConversationCorrectionSummary {
++  const ConversationCorrectionSummary({
++    this.title = false,
++    this.notes = false,
++    this.appSummaries = 0,
++    this.memories = 0,
++    this.facts = 0,
++    this.refused = 0,
++    this.memoriesSkipped = 0,
++  });
++
++  final bool title;
++  final bool notes;
++  final int appSummaries;
++  final int memories;
++  final int facts;
++
++  /// Passages proposés mais pas trouvés tels quels (rien n'a été réécrit à leur place).
++  final int refused;
++
++  /// Souvenirs de la conversation au-delà des 30 plus récents : pas relus par Omi.
++  final int memoriesSkipped;
++
++  /// Rien n'a été remplacé : la correction est seulement enregistrée (elle servira aux prochains résumés).
++  bool get nothingReplaced => !title && !notes && appSummaries == 0 && memories == 0 && facts == 0;
++
++  static int _count(Object? value) => value is int && value > 0 ? value : 0;
++
++  factory ConversationCorrectionSummary.fromJson(Map<String, dynamic> json) => ConversationCorrectionSummary(
++        title: json['titre'] == true,
++        notes: json['notes'] == true,
++        appSummaries: _count(json['resumes_apps']),
++        memories: _count(json['souvenirs']),
++        facts: _count(json['faits']),
++        refused: _count(json['refuses']),
++        memoriesSkipped: _count(json['souvenirs_ignores']),
++      );
++}
++
++class ConversationCorrectionResult {
++  const ConversationCorrectionResult({required this.conversation, required this.summary, this.alreadyApplied = false});
++
++  final ServerConversation conversation;
++  final ConversationCorrectionSummary summary;
++
++  /// Le même envoi avait déjà été appliqué (réseau coupé puis renvoyé) : rien n'a été refait.
++  final bool alreadyApplied;
++
++  static ConversationCorrectionResult decode(String body) {
++    final json = jsonDecode(body);
++    if (json is! Map<String, dynamic>) throw const FormatException('Invalid correction answer');
++    final conversation = json['conversation'];
++    final summary = json['bilan'];
++    if (conversation is! Map<String, dynamic> || summary is! Map<String, dynamic>) {
++      throw const FormatException('Invalid correction answer');
++    }
++    try {
++      return ConversationCorrectionResult(
++        conversation: ServerConversation.fromJson(conversation),
++        summary: ConversationCorrectionSummary.fromJson(summary),
++        alreadyApplied: json['deja_appliquee'] == true,
++      );
++    } on FormatException {
++      rethrow;
++    } catch (_) {
++      throw const FormatException('Invalid conversation in correction answer');
++    }
++  }
++}
+diff --git a/app/lib/backend/schema/summary_version.dart b/app/lib/backend/schema/summary_version.dart
+index c2d946d13d..14b2b8d2d1 100644
+--- a/app/lib/backend/schema/summary_version.dart
++++ b/app/lib/backend/schema/summary_version.dart
+@@ -17,6 +17,9 @@ class SummaryVersion {
+   final DateTime? createdAt;
+   final DateTime recordedAt;
+ 
++  /// Version produite par une correction de l'utilisateur (« Corriger le résumé »), sinon null.
++  final String? correctionId;
++
+   const SummaryVersion({
+     required this.id,
+     required this.kind,
+@@ -26,6 +29,7 @@ class SummaryVersion {
+     this.appName,
+     this.title,
+     this.createdAt,
++    this.correctionId,
+   });
+ 
+   /// Null pour une entrée illisible : un historique abîmé ne doit jamais empêcher d'ouvrir la conversation.
+@@ -47,6 +51,7 @@ class SummaryVersion {
+       appName: json['app_name'] is String ? json['app_name'] as String : null,
+       title: json['title'] is String ? json['title'] as String : null,
+       createdAt: _date(json['created_at']),
++      correctionId: json['correction_id'] is String ? json['correction_id'] as String : null,
+     );
+   }
+ 
+@@ -56,15 +61,16 @@ class SummaryVersion {
+   }
+ 
+   Map<String, dynamic> toJson() => {
+-    'id': id,
+-    'kind': kind,
+-    'app_id': appId,
+-    'app_name': appName,
+-    'title': title,
+-    'content': content,
+-    'created_at': createdAt?.toUtc().toIso8601String(),
+-    'recorded_at': recordedAt.toUtc().toIso8601String(),
+-  };
++        'id': id,
++        'kind': kind,
++        'app_id': appId,
++        'app_name': appName,
++        'title': title,
++        'content': content,
++        'created_at': createdAt?.toUtc().toIso8601String(),
++        'recorded_at': recordedAt.toUtc().toIso8601String(),
++        if (correctionId != null) 'correction_id': correctionId,
++      };
+ 
+   static DateTime? _date(Object? value) => value is String ? DateTime.tryParse(value) : null;
+ }
+@@ -92,6 +98,9 @@ class SummaryChoice {
+   /// Pour un résultat d'app actuel : sa place dans `apps_results`.
+   final int? resultIndex;
+ 
++  /// Produit par une correction de l'utilisateur (« corrigé par vous »).
++  final String? correctionId;
++
+   const SummaryChoice({
+     required this.key,
+     required this.source,
+@@ -103,6 +112,7 @@ class SummaryChoice {
+     this.createdAt,
+     this.recordedAt,
+     this.resultIndex,
++    this.correctionId,
+   });
+ 
+   bool get isCurrent => source != SummaryChoiceSource.history;
+@@ -122,9 +132,14 @@ List<SummaryChoice> buildSummaryChoices({
+   required List<SummaryVersion> history,
+ }) {
+   String id(String kind, String? appId, String content) => '$kind\u0000${appId ?? ''}\u0000${content.trim()}';
++  // La version gardée la plus récente au même texte qu'un résumé actuel, c'est lui (heure, correction).
+   final historyById = <String, SummaryVersion>{};
+-  for (final version in history) {
+-    historyById.putIfAbsent(id(version.kind, version.appId, version.content), () => version);
++  final newestOrder = <String, int>{};
++  for (var order = 0; order < history.length; order++) {
++    final version = history[order];
++    final key = id(version.kind, version.appId, version.content);
++    historyById[key] = version;
++    newestOrder[key] = order;
+   }
+ 
+   final choices = <SummaryChoice>[];
+@@ -146,6 +161,7 @@ List<SummaryChoice> buildSummaryChoices({
+         content: content,
+         createdAt: known?.createdAt,
+         resultIndex: index,
++        correctionId: known?.correctionId,
+       ),
+     );
+   }
+@@ -161,17 +177,27 @@ List<SummaryChoice> buildSummaryChoices({
+         title: currentTitle,
+         content: notes,
+         createdAt: historyById[key]?.createdAt,
++        correctionId: historyById[key]?.correctionId,
+       ),
+     );
+   }
+ 
+   // Le serveur range l'historique du plus ancien au plus récent ; à heure égale (un résumé archivé et celui qui
+   // le remplace sont inscrits ensemble), cet ordre départage.
++  // Notes d'Omi : le serveur garde aussi une version dont seul le titre a changé (titre corrigé). Au même texte
++  // qu'un résumé actuel, une version plus ancienne d'un autre titre reste donc une version à part.
+   final kept = <({int order, SummaryVersion version})>[];
++  final seen = <String>{};
+   for (var order = 0; order < history.length; order++) {
+     final version = history[order];
++    if (version.content.trim().isEmpty) continue;
+     final key = id(version.kind, version.appId, version.content);
+-    if (version.content.trim().isNotEmpty && currentIds.add(key)) kept.add((order: order, version: version));
++    if (currentIds.contains(key)) {
++      final sameTitle = (version.title ?? '').trim() == (currentTitle ?? '').trim();
++      if (version.kind != 'omi' || newestOrder[key] == order || sameTitle) continue;
++    }
++    if (!seen.add(version.kind == 'omi' ? '$key\u0000${(version.title ?? '').trim()}' : key)) continue;
++    kept.add((order: order, version: version));
+   }
+   kept.sort((a, b) {
+     final byTime = (b.version.createdAt ?? b.version.recordedAt).compareTo(a.version.createdAt ?? a.version.recordedAt);
+@@ -190,6 +216,7 @@ List<SummaryChoice> buildSummaryChoices({
+         content: version.content.trim(),
+         createdAt: version.createdAt,
+         recordedAt: version.recordedAt,
++        correctionId: version.correctionId,
+       ),
+     );
+   }
+diff --git a/app/lib/l10n/app_en.arb b/app/lib/l10n/app_en.arb
+index 3ec0229768..f5c3bd84a0 100644
+--- a/app/lib/l10n/app_en.arb
++++ b/app/lib/l10n/app_en.arb
+@@ -4230,6 +4230,115 @@
+             }
+         }
+     },
++    "summaryVersionsCorrected": "corrected by you",
++    "@summaryVersionsCorrected": {
++        "description": "Summaries menu: this version was produced by the user's correction (Correct the summary)"
++    },
++    "summaryCorrect": "Correct the summary",
++    "@summaryCorrect": {
++        "description": "Conversation summary tab: discreet button under the summary, and title of the correction sheet"
++    },
++    "summaryCorrectIntro": "Omi rereads this conversation and fixes its title, summaries and the memories it gave. The previous version stays in the summaries menu.",
++    "@summaryCorrectIntro": {
++        "description": "Correction sheet: what sending a correction does"
++    },
++    "summaryCorrectLabel": "What’s wrong?",
++    "@summaryCorrectLabel": {
++        "description": "Correction sheet: label of the multi-line field"
++    },
++    "summaryCorrectHint": "It’s Pascal, not Thomas Pascal.",
++    "@summaryCorrectHint": {
++        "description": "Correction sheet: example shown in the empty field"
++    },
++    "summaryCorrectSend": "Send",
++    "@summaryCorrectSend": {
++        "description": "Correction sheet: send button"
++    },
++    "summaryCorrectSending": "Omi is rereading the conversation…",
++    "@summaryCorrectSending": {
++        "description": "Correction sheet: while the server applies the correction"
++    },
++    "summaryCorrectDone": "Corrected: {parts}",
++    "@summaryCorrectDone": {
++        "description": "Toast after a correction: what was changed, e.g. 'summary, title, 1 memory'",
++        "placeholders": {
++            "parts": {
++                "type": "String"
++            }
++        }
++    },
++    "summaryCorrectPartNotes": "summary",
++    "@summaryCorrectPartNotes": {
++        "description": "Correction toast part: Omi's notes were corrected"
++    },
++    "summaryCorrectPartTitle": "title",
++    "@summaryCorrectPartTitle": {
++        "description": "Correction toast part: the title was corrected"
++    },
++    "summaryCorrectPartApps": "{count, plural, =1{1 app summary} other{{count} app summaries}}",
++    "@summaryCorrectPartApps": {
++        "description": "Correction toast part: summaries written by summary templates that were corrected",
++        "placeholders": {
++            "count": {
++                "type": "int"
++            }
++        }
++    },
++    "summaryCorrectPartMemories": "{count, plural, =1{1 memory} other{{count} memories}}",
++    "@summaryCorrectPartMemories": {
++        "description": "Correction toast part: memories from this conversation that were corrected",
++        "placeholders": {
++            "count": {
++                "type": "int"
++            }
++        }
++    },
++    "summaryCorrectPartFacts": "{count, plural, =1{1 fact added} other{{count} facts added}}",
++    "@summaryCorrectPartFacts": {
++        "description": "Correction toast part: lasting facts saved as memories from the correction",
++        "placeholders": {
++            "count": {
++                "type": "int"
++            }
++        }
++    },
++    "summaryCorrectNothingFound": "Correction saved; no passage to replace was found.",
++    "@summaryCorrectNothingFound": {
++        "description": "Toast after a correction that replaced nothing (it is kept for the next summaries)"
++    },
++    "summaryCorrectModelFailed": "Omi couldn’t reread the conversation; nothing was changed. Try again.",
++    "@summaryCorrectModelFailed": {
++        "description": "Correction sheet: the server's model failed (502); nothing was written"
++    },
++    "summaryCorrectBusy": "The conversation is changing right now. Try again in a moment.",
++    "@summaryCorrectBusy": {
++        "description": "Correction sheet: the conversation kept changing during the correction (409)"
++    },
++    "summaryCorrectNetwork": "Couldn’t reach Omi. Try again — the correction won’t be applied twice.",
++    "@summaryCorrectNetwork": {
++        "description": "Correction sheet: network failure; resending is safe (same correction id)"
++    },
++    "summaryCorrectGone": "This conversation no longer exists.",
++    "@summaryCorrectGone": {
++        "description": "Correction sheet: the conversation was deleted (404)"
++    },
++    "summaryCorrectInvalid": "Write what’s wrong, in 1,000 characters at most.",
++    "@summaryCorrectInvalid": {
++        "description": "Correction sheet: the server refused the text (empty or too long)"
++    },
++    "summaryCorrectRetry": "Omi couldn’t finish. Try again — the correction won’t be applied twice.",
++    "@summaryCorrectRetry": {
++        "description": "Correction sheet: a server error other than 502 (some changes may already be written); resending is safe"
++    },
++    "summaryCorrectPartSkipped": "{count, plural, =1{1 older memory not reread} other{{count} older memories not reread}}",
++    "@summaryCorrectPartSkipped": {
++        "description": "Correction toast, after the main line: memories of the conversation beyond the 30 most recent were not offered to the model",
++        "placeholders": {
++            "count": {
++                "type": "int"
++            }
++        }
++    },
+     "auto": "Auto",
+     "noSummaryForApp": "No summary available for this app. Try another app for better results.",
+     "tryAnotherApp": "Try Another App",
+diff --git a/app/lib/l10n/app_fr.arb b/app/lib/l10n/app_fr.arb
+index befbaa1d37..7aa0230e57 100644
+--- a/app/lib/l10n/app_fr.arb
++++ b/app/lib/l10n/app_fr.arb
+@@ -1133,6 +1133,27 @@
+     "summaryVersionsBackToCurrent": "Revenir à l’actuel",
+     "summaryVersionsReadOnly": "Ancienne version, en lecture seule",
+     "summaryVersionsBefore": "antérieur au {when}",
++    "summaryVersionsCorrected": "corrigé par vous",
++    "summaryCorrect": "Corriger le résumé",
++    "summaryCorrectIntro": "Omi relit cette conversation et corrige son titre, ses résumés et les souvenirs qui en viennent. L’ancienne version reste dans le menu des résumés.",
++    "summaryCorrectLabel": "Qu’est-ce qui est faux ?",
++    "summaryCorrectHint": "C’est Pascal, pas Thomas Pascal.",
++    "summaryCorrectSend": "Envoyer",
++    "summaryCorrectSending": "Omi relit la conversation…",
++    "summaryCorrectDone": "Corrigé : {parts}",
++    "summaryCorrectPartNotes": "résumé",
++    "summaryCorrectPartTitle": "titre",
++    "summaryCorrectPartApps": "{count, plural, =1{1 résumé d’app} other{{count} résumés d’apps}}",
++    "summaryCorrectPartMemories": "{count, plural, =1{1 souvenir} other{{count} souvenirs}}",
++    "summaryCorrectPartFacts": "{count, plural, =1{1 fait ajouté} other{{count} faits ajoutés}}",
++    "summaryCorrectNothingFound": "Correction enregistrée ; aucun passage à remplacer trouvé.",
++    "summaryCorrectModelFailed": "Omi n’a pas pu relire la conversation ; rien n’a été modifié. Réessayez.",
++    "summaryCorrectBusy": "La conversation change en ce moment. Réessayez dans un instant.",
++    "summaryCorrectNetwork": "Impossible de joindre Omi. Réessayez : la correction ne sera pas appliquée deux fois.",
++    "summaryCorrectGone": "Cette conversation n’existe plus.",
++    "summaryCorrectInvalid": "Écrivez ce qui est faux, en 1000 caractères au plus.",
++    "summaryCorrectRetry": "Omi n’a pas pu terminer. Réessayez : la correction ne sera pas appliquée deux fois.",
++    "summaryCorrectPartSkipped": "{count, plural, =1{1 souvenir plus ancien non relu} other{{count} souvenirs plus anciens non relus}}",
+     "auto": "Automatique",
+     "noSummaryForApp": "Aucun résumé disponible pour cette application. Essayez une autre application pour de meilleurs résultats.",
+     "tryAnotherApp": "Essayer une autre application",
+diff --git a/app/lib/pages/conversation_detail/conversation_detail_provider.dart b/app/lib/pages/conversation_detail/conversation_detail_provider.dart
+index b53e85f16e..f19513ed68 100644
+--- a/app/lib/pages/conversation_detail/conversation_detail_provider.dart
++++ b/app/lib/pages/conversation_detail/conversation_detail_provider.dart
+@@ -8,6 +8,7 @@ import 'package:flutter_provider_utilities/flutter_provider_utilities.dart';
+ 
+ import 'package:omi/backend/http/api/apps.dart';
+ import 'package:omi/backend/http/api/audio.dart';
++import 'package:omi/backend/http/api/conversation_corrections.dart';
+ import 'package:omi/backend/http/api/conversations.dart'
+     hide unlinkCalendarEvent, autoLinkCalendarEvent, linkCalendarEvent;
+ import 'package:omi/backend/http/api/conversations.dart' as conv_api
+@@ -33,6 +34,8 @@ typedef SpeakerAssignmentCall = Future<bool> Function(String, List<String>,
+ typedef ConversationReprocessCall = Future<ServerConversation?> Function(String,
+     {String? appId, bool requireSpeakerReceipt});
+ typedef ConversationDetailFetchCall = Future<ServerConversation?> Function(String);
++typedef ConversationCorrectionCall = Future<ApiResult<ConversationCorrectionResult>> Function(String conversationId,
++    {required String id, required String text});
+ 
+ /// Where the open conversation's full detail fetch stands. The page renders the list's copy first;
+ /// a tab with nothing to show yet uses this to say "loading" or "couldn't load" instead of blank.
+@@ -46,10 +49,13 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
+     ConversationReprocessCall? reprocess,
+     ConversationDetailFetchCall? fetchConversation,
+     SpeakerRejectionCall? rejectSpeaker,
++    ConversationCorrectionCall? correctSummary,
+   })  : _assignSpeaker = assignSpeaker ?? assignBulkConversationTranscriptSegments,
+         _rejectSpeaker = rejectSpeaker ?? rejectConversationSpeaker,
+         _reprocess = reprocess ?? reProcessConversationServer,
+-        _fetchConversation = fetchConversation ?? getConversationById;
++        _fetchConversation = fetchConversation ?? getConversationById,
++        _correctSummary = correctSummary ?? ConversationCorrectionsApi().correct;
++  final ConversationCorrectionCall _correctSummary;
+   final SpeakerAssignmentCall _assignSpeaker;
+   final ConversationReprocessCall _reprocess;
+   final ConversationDetailFetchCall _fetchConversation;
+@@ -967,6 +973,38 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
+     notifyListeners();
+   }
+ 
++  /// Clone local : une correction est en cours d'envoi (« Corriger le résumé »).
++  bool correctingSummary = false;
++
++  /// Clone local : envoie la correction de l'utilisateur. Le serveur corrige cette conversation (titre, notes,
++  /// résumés d'apps, souvenirs tirés d'elle) et garde chaque ancienne version ; la conversation rendue remplace
++  /// celle de la page et de la liste, et le résumé actuel (corrigé) s'affiche. Un échec ne change rien ici.
++  Future<ApiResult<ConversationCorrectionResult>> correctSummary(String text, {required String correctionId}) async {
++    final target = conversationOrNull;
++    if (target == null) return const ApiFailure(ApiProblem(ApiProblemKind.notFound));
++    if (correctingSummary) return const ApiFailure(ApiProblem(ApiProblemKind.rejected));
++    correctingSummary = true;
++    notifyListeners();
++    final ApiResult<ConversationCorrectionResult> result;
++    try {
++      result = await _correctSummary(target.id, id: correctionId, text: text.trim());
++    } finally {
++      correctingSummary = false;
++    }
++    if (_isDisposed) return result;
++    if (result case ApiSuccess(:final data)) {
++      final updated = data.conversation;
++      conversationProvider?.updateConversation(updated);
++      if (conversationOrNull?.id == updated.id) {
++        _cachedConversation = updated;
++        _refreshGeneration++;
++      }
++      if (_selectedSummaryChoiceConversationId == updated.id) clearSummaryChoice(notify: false);
++    }
++    notifyListeners();
++    return result;
++  }
++
+   /// Revient au résumé actuel (nouvelle relance, autre conversation, bouton « Revenir à l'actuel »).
+   void clearSummaryChoice({bool notify = true}) {
+     if (_selectedSummaryChoiceKey == null) return;
+diff --git a/app/lib/pages/conversation_detail/widgets/summary_correction_sheet.dart b/app/lib/pages/conversation_detail/widgets/summary_correction_sheet.dart
+new file mode 100644
+index 0000000000..001b4e77d2
+--- /dev/null
++++ b/app/lib/pages/conversation_detail/widgets/summary_correction_sheet.dart
+@@ -0,0 +1,271 @@
++import 'package:flutter/material.dart';
++import 'package:provider/provider.dart';
++import 'package:uuid/uuid.dart';
++
++import 'package:omi/backend/http/api/conversation_corrections.dart';
++import 'package:omi/backend/http/api_result.dart';
++import 'package:omi/backend/schema/conversation.dart';
++import 'package:omi/l10n/app_localizations.dart';
++import 'package:omi/pages/conversation_detail/conversation_detail_provider.dart';
++import 'package:omi/pages/conversation_detail/conversation_summary_selection.dart';
++import 'package:omi/providers/connectivity_provider.dart';
++import 'package:omi/ui/ui.dart';
++import 'package:omi/utils/l10n_extensions.dart';
++
++/// Clone local : « Corriger le résumé ». Un bouton discret sous le résumé ouvre une feuille où l'utilisateur écrit ce
++/// qui est faux (« C'est Pascal, pas Thomas Pascal. ») ; Omi corrige cette conversation (titre, résumés, souvenirs
++/// qui en viennent), l'ancienne version reste dans le menu des résumés, et une ligne dit ce qui a changé.
++class SummaryCorrectionButton extends StatelessWidget {
++  const SummaryCorrectionButton({super.key});
++
++  @override
++  Widget build(BuildContext context) {
++    final busy = context.select<ConversationDetailProvider, bool>((p) => p.correctingSummary);
++    return Align(
++      alignment: AlignmentDirectional.centerStart,
++      child: Padding(
++        padding: const EdgeInsets.only(top: OmiSpacing.xs),
++        child: OmiButton.tertiary(
++          key: const Key('conversation_summary_correct'),
++          label: context.l10n.summaryCorrect,
++          icon: Icons.edit_note_rounded,
++          size: OmiButtonSize.compact,
++          onPressed: busy ? null : () => openSummaryCorrection(context),
++        ),
++      ),
++    );
++  }
++}
++
++/// Le bouton s'affiche sous le résumé actuel d'une conversation traitée, pas sous une ancienne version lue depuis le
++/// menu des résumés, ni pendant l'édition du texte du résumé.
++bool offersSummaryCorrection(ServerConversation? conversation, ConversationSummarySelection selection,
++    {bool editing = false}) {
++  return conversation != null &&
++      !conversation.discarded &&
++      !editing &&
++      conversation.status == ConversationStatus.completed &&
++      !selection.isArchived;
++}
++
++/// Ouvre la feuille ; après un envoi réussi, dit en une ligne ce qui a été corrigé.
++Future<void> openSummaryCorrection(BuildContext context) async {
++  final connectivity = context.read<ConnectivityProvider?>();
++  if (connectivity != null && !connectivity.isConnected) {
++    ConnectivityProvider.showNoInternetDialog(context);
++    return;
++  }
++  final provider = context.read<ConversationDetailProvider>();
++  final result = await showOmiEditSheet<ConversationCorrectionResult>(
++    context: context,
++    builder: (_) => ChangeNotifierProvider<ConversationDetailProvider>.value(
++      value: provider,
++      child: const SummaryCorrectionSheet(),
++    ),
++  );
++  if (result == null || !context.mounted) return;
++  final line = describeCorrection(context.l10n, result.summary);
++  if (result.summary.nothingReplaced) {
++    OmiFeedback.info(context, line);
++  } else {
++    OmiFeedback.confirm(context, line);
++  }
++}
++
++/// La ligne affichée après l'envoi : « Corrigé : résumé, titre, 1 souvenir », ou que rien n'a été trouvé.
++String describeCorrection(AppLocalizations l10n, ConversationCorrectionSummary summary) {
++  final line = _describeChanges(l10n, summary);
++  final skipped = summary.memoriesSkipped;
++  return skipped > 0 ? '$line · ${l10n.summaryCorrectPartSkipped(skipped)}' : line;
++}
++
++String _describeChanges(AppLocalizations l10n, ConversationCorrectionSummary summary) {
++  if (summary.nothingReplaced) return l10n.summaryCorrectNothingFound;
++  final parts = [
++    if (summary.notes) l10n.summaryCorrectPartNotes,
++    if (summary.title) l10n.summaryCorrectPartTitle,
++    if (summary.appSummaries > 0) l10n.summaryCorrectPartApps(summary.appSummaries),
++    if (summary.memories > 0) l10n.summaryCorrectPartMemories(summary.memories),
++    if (summary.facts > 0) l10n.summaryCorrectPartFacts(summary.facts),
++  ];
++  return l10n.summaryCorrectDone(parts.join(', '));
++}
++
++/// Pourquoi l'envoi a échoué, en mots (jamais par la seule couleur : une icône accompagne le texte).
++String correctionProblemMessage(AppLocalizations l10n, ApiProblem problem) {
++  return switch (problem.kind) {
++    // 502 seulement : le modèle n'a pas répondu, rien n'a été écrit. Toute autre erreur serveur peut suivre des
++    // écritures validées : renvoyer le même envoi est sûr (le serveur ne refait rien).
++    ApiProblemKind.server when problem.statusCode == 502 => l10n.summaryCorrectModelFailed,
++    ApiProblemKind.server => l10n.summaryCorrectRetry,
++    ApiProblemKind.notFound => l10n.summaryCorrectGone,
++    ApiProblemKind.transport ||
++    ApiProblemKind.authTransient ||
++    ApiProblemKind.rateLimited =>
++      l10n.summaryCorrectNetwork,
++    ApiProblemKind.unprocessable => l10n.summaryCorrectInvalid,
++    ApiProblemKind.rejected when problem.statusCode == 409 => l10n.summaryCorrectBusy,
++    ApiProblemKind.rejected when problem.statusCode == 400 => l10n.summaryCorrectInvalid,
++    _ => l10n.somethingWentWrong,
++  };
++}
++
++class SummaryCorrectionSheet extends StatefulWidget {
++  const SummaryCorrectionSheet({super.key});
++
++  @override
++  State<SummaryCorrectionSheet> createState() => _SummaryCorrectionSheetState();
++}
++
++class _SummaryCorrectionSheetState extends State<SummaryCorrectionSheet> {
++  final TextEditingController _controller = TextEditingController();
++  bool _sending = false;
++  String? _error;
++
++  /// L'id de l'envoi : le même texte renvoyé après un échec garde le même id (le serveur ne refait rien) ; un texte
++  /// changé est une autre correction.
++  String? _correctionId;
++  String? _sentText;
++
++  String get _text => _controller.text.trim();
++
++  @override
++  void dispose() {
++    _controller.dispose();
++    super.dispose();
++  }
++
++  Future<void> _send() async {
++    final text = _text;
++    if (text.isEmpty || text.length > ConversationCorrectionsApi.maxLength || _sending) return;
++    if (_sentText != text) {
++      _correctionId = const Uuid().v4();
++      _sentText = text;
++    }
++    FocusScope.of(context).unfocus();
++    setState(() {
++      _sending = true;
++      _error = null;
++    });
++    final provider = context.read<ConversationDetailProvider>();
++    final result = await provider.correctSummary(text, correctionId: _correctionId!);
++    if (!mounted) return;
++    switch (result) {
++      case ApiSuccess(:final data):
++        OmiHaptics.success();
++        Navigator.of(context).pop(data);
++      case ApiFailure(:final problem):
++        setState(() {
++          _sending = false;
++          _error = correctionProblemMessage(context.l10n, problem);
++        });
++    }
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    final l10n = context.l10n;
++    final canSend = !_sending && _text.isNotEmpty && _text.length <= ConversationCorrectionsApi.maxLength;
++    return OmiEditSheet(
++      title: l10n.summaryCorrect,
++      isDirty: _text.isNotEmpty,
++      enabled: !_sending,
++      child: SingleChildScrollView(
++        child: Column(
++          mainAxisSize: MainAxisSize.min,
++          crossAxisAlignment: CrossAxisAlignment.stretch,
++          children: [
++            Text(l10n.summaryCorrectIntro, style: OmiType.footnote.copyWith(color: OmiColors.textSecondary)),
++            const SizedBox(height: OmiSpacing.md),
++            TextField(
++              key: const ValueKey('summary_correction_field'),
++              controller: _controller,
++              enabled: !_sending,
++              autofocus: true,
++              minLines: 3,
++              maxLines: 6,
++              maxLength: ConversationCorrectionsApi.maxLength,
++              keyboardType: TextInputType.multiline,
++              textInputAction: TextInputAction.newline,
++              textCapitalization: TextCapitalization.sentences,
++              onChanged: (_) => setState(() => _error = null),
++              // Lisible en thème clair comme en sombre : texte et fond viennent de la palette (jamais en dur).
++              style: OmiType.callout.copyWith(color: OmiColors.textPrimary, height: 1.4),
++              cursorColor: OmiColors.accent,
++              decoration: InputDecoration(
++                labelText: l10n.summaryCorrectLabel,
++                hintText: l10n.summaryCorrectHint,
++                alignLabelWithHint: true,
++                floatingLabelBehavior: FloatingLabelBehavior.always,
++                labelStyle: OmiType.subhead.copyWith(color: OmiColors.textSecondary),
++                floatingLabelStyle: OmiType.subhead.copyWith(color: OmiColors.textSecondary),
++                hintStyle: OmiType.callout.copyWith(color: OmiColors.textSecondary),
++                counterStyle: OmiType.footnote.copyWith(color: OmiColors.textSecondary),
++                filled: true,
++                fillColor: OmiColors.surface2,
++                contentPadding: const EdgeInsets.all(OmiSpacing.sm),
++                border: const OutlineInputBorder(borderRadius: OmiRadius.smAll, borderSide: BorderSide.none),
++              ),
++            ),
++            if (_sending) ...[
++              const SizedBox(height: OmiSpacing.sm),
++              Semantics(
++                liveRegion: true,
++                child: Row(
++                  key: const Key('summary_correction_sending'),
++                  children: [
++                    const OmiSpinner(size: OmiSpinnerSize.small),
++                    const SizedBox(width: OmiSpacing.xs),
++                    Expanded(
++                      child: Text(
++                        l10n.summaryCorrectSending,
++                        style: OmiType.footnote.copyWith(color: OmiColors.textSecondary),
++                      ),
++                    ),
++                  ],
++                ),
++              ),
++            ],
++            if (_error case final error?) ...[
++              const SizedBox(height: OmiSpacing.sm),
++              Semantics(
++                liveRegion: true,
++                child: Row(
++                  key: const Key('summary_correction_error'),
++                  crossAxisAlignment: CrossAxisAlignment.start,
++                  children: [
++                    Icon(Icons.error_outline_rounded, size: 18, color: OmiColors.textPrimary),
++                    const SizedBox(width: OmiSpacing.xs),
++                    Expanded(child: Text(error, style: OmiType.footnote.copyWith(color: OmiColors.textPrimary))),
++                  ],
++                ),
++              ),
++            ],
++            const SizedBox(height: OmiSpacing.md),
++            Row(
++              children: [
++                Expanded(
++                  child: OmiButton.secondary(
++                    label: l10n.cancel,
++                    onPressed: _sending ? null : () => Navigator.of(context).pop(),
++                    expand: true,
++                  ),
++                ),
++                const SizedBox(width: OmiSpacing.sm),
++                Expanded(
++                  child: OmiButton(
++                    key: const Key('summary_correction_send'),
++                    label: l10n.summaryCorrectSend,
++                    onPressed: canSend ? _send : null,
++                    isLoading: _sending,
++                    expand: true,
++                  ),
++                ),
++              ],
++            ),
++          ],
++        ),
++      ),
++    );
++  }
++}
+diff --git a/app/lib/pages/conversation_detail/widgets/summary_tab.dart b/app/lib/pages/conversation_detail/widgets/summary_tab.dart
+index 607f9c2c14..825e31dcbc 100644
+--- a/app/lib/pages/conversation_detail/widgets/summary_tab.dart
++++ b/app/lib/pages/conversation_detail/widgets/summary_tab.dart
+@@ -21,6 +21,7 @@ import 'package:uuid/uuid.dart';
+ import 'conversation_screenshots_section.dart';
+ import 'feedback_prompt_policy.dart';
+ import 'feedback_sheet.dart';
++import 'summary_correction_sheet.dart';
+ 
+ class SummaryTab extends StatefulWidget {
+   final bool reviewEnabled;
+@@ -134,6 +135,10 @@ class _SummaryTabState extends State<SummaryTab> with AutomaticKeepAliveClientMi
+                                       );
+                                 },
+                               ),
++                        // Clone local : « Corriger le résumé », sous le résumé actuel d'une conversation traitée
++                        // (pas sous une ancienne version lue depuis le menu des résumés).
++                        if (offersSummaryCorrection(conversation, summarySelection, editing: _isEditing))
++                          const SliverToBoxAdapter(child: SummaryCorrectionButton()),
+                       ]),
+                     ),
+                     // Where the Mac puts its strip: after the note's own sections. Only a completed
+diff --git a/app/lib/pages/conversation_detail/widgets/summary_versions_sheet.dart b/app/lib/pages/conversation_detail/widgets/summary_versions_sheet.dart
+index 8762acfb95..17c56ccd62 100644
+--- a/app/lib/pages/conversation_detail/widgets/summary_versions_sheet.dart
++++ b/app/lib/pages/conversation_detail/widgets/summary_versions_sheet.dart
+@@ -57,8 +57,15 @@ class SummaryVersionsSheet extends StatelessWidget {
+               final choice = choices[index];
+               final selected = choice.key == displayed;
+               final when = summaryChoiceWhen(choice, dates, l10n);
+-              final details = [if (when != null) when, if (choice.isCurrent) l10n.summaryVersionsCurrent].join(' · ');
+-              final preview = choice.content.replaceAll(RegExp(r'[#*_>`]'), '').replaceAll(RegExp(r'\s+'), ' ').trim();
++              final details = [
++                if (when != null) when,
++                if (choice.isCurrent) l10n.summaryVersionsCurrent,
++                if (choice.correctionId != null) l10n.summaryVersionsCorrected,
++              ].join(' · ');
++              final text = choice.content.replaceAll(RegExp(r'[#*_>`]'), '').replaceAll(RegExp(r'\s+'), ' ').trim();
++              // Notes d'Omi : leur titre d'abord, pour distinguer une version dont seul le titre a été corrigé.
++              final title = choice.kind == 'omi' ? (choice.title ?? '').trim() : '';
++              final preview = title.isEmpty ? text : '$title — $text';
+               return ListTile(
+                 key: Key('summary_choice_${choice.key}'),
+                 contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 2),
+@@ -145,7 +152,13 @@ class SummaryVersionBanner extends StatelessWidget {
+     final provider = context.read<ConversationDetailProvider>();
+     final l10n = context.l10n;
+     final when = summaryChoiceWhen(choice, OmiDateFormat.of(context), l10n);
+-    final label = [summaryChoiceName(choice, provider, l10n), if (when != null) when].join(' · ');
++    // Une ancienne version des notes d'Omi montre aussi son titre (un titre corrigé seul ne se verrait pas sinon).
++    final oldTitle = !choice.isCurrent && choice.kind == 'omi' ? (choice.title ?? '').trim() : '';
++    final label = [
++      summaryChoiceName(choice, provider, l10n),
++      if (oldTitle.isNotEmpty) oldTitle,
++      if (when != null) when,
++    ].join(' · ');
+     return Padding(
+       padding: const EdgeInsets.only(top: OmiSpacing.xs, bottom: OmiSpacing.sm),
+       child: Row(
+diff --git a/app/test/unit/summary_correction_test.dart b/app/test/unit/summary_correction_test.dart
+new file mode 100644
+index 0000000000..152172624d
+--- /dev/null
++++ b/app/test/unit/summary_correction_test.dart
+@@ -0,0 +1,268 @@
++// Clone local : « Corriger le résumé » (0009) — API, bilan en une ligne, messages d'échec, fournisseur, et versions
++// gardées (une version dont seul le titre a été corrigé reste atteignable).
++import 'dart:convert';
++
++import 'package:flutter/material.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:http/http.dart' as http;
++import 'package:shared_preferences/shared_preferences.dart';
++
++import 'package:omi/backend/http/api/conversation_corrections.dart';
++import 'package:omi/backend/http/api_result.dart';
++import 'package:omi/backend/preferences.dart';
++import 'package:omi/backend/schema/conversation.dart';
++import 'package:omi/backend/schema/structured.dart';
++import 'package:omi/backend/schema/summary_version.dart';
++import 'package:omi/l10n/app_localizations.dart';
++import 'package:omi/pages/conversation_detail/conversation_detail_provider.dart';
++import 'package:omi/pages/conversation_detail/widgets/summary_correction_sheet.dart';
++import 'package:omi/providers/conversation_provider.dart' show conversationLocalDayKey;
++
++final _t0 = DateTime.utc(2026, 10, 10, 9);
++final _t1 = DateTime.utc(2026, 10, 10, 18, 30);
++
++Map<String, dynamic> conversationJson({String title = 'Déjeuner avec Pascal', List<Map<String, dynamic>>? history}) => {
++      'id': 'c1',
++      'created_at': '2026-10-10T09:00:00Z',
++      'started_at': '2026-10-10T09:00:00Z',
++      'finished_at': '2026-10-10T10:00:00Z',
++      'status': 'completed',
++      'structured': {'title': title, 'overview': 'Mike a revu Pascal.', 'emoji': '🎬', 'category': 'personal'},
++      'transcript_segments': [],
++      'apps_results': [],
++      'summary_history': history ??
++          [
++            {
++              'id': 'v-old',
++              'kind': 'omi',
++              'title': 'Déjeuner avec Thomas Pascal',
++              'content': 'Mike a revu Thomas Pascal.',
++              'created_at': null,
++              'recorded_at': '2026-10-10T18:30:00Z',
++            },
++            {
++              'id': 'v-new',
++              'kind': 'omi',
++              'title': 'Déjeuner avec Pascal',
++              'content': 'Mike a revu Pascal.',
++              'created_at': '2026-10-10T18:30:00Z',
++              'recorded_at': '2026-10-10T18:30:00Z',
++              'correction_id': 'corr-1',
++            },
++          ],
++    };
++
++String answer({Map<String, dynamic>? bilan, bool replay = false}) => jsonEncode({
++      'conversation': conversationJson(),
++      'bilan': bilan ?? {'titre': true, 'notes': true, 'resumes_apps': 0, 'souvenirs': 1, 'faits': 0, 'refuses': 0},
++      'deja_appliquee': replay,
++    });
++
++SummaryVersion version(String id, String kind, String content,
++        {String? title, String? appId, DateTime? createdAt, required DateTime recordedAt, String? correctionId}) =>
++    SummaryVersion(
++      id: id,
++      kind: kind,
++      content: content,
++      title: title,
++      appId: appId,
++      createdAt: createdAt,
++      recordedAt: recordedAt,
++      correctionId: correctionId,
++    );
++
++void main() {
++  TestWidgetsFlutterBinding.ensureInitialized();
++  final fr = lookupAppLocalizations(const Locale('fr'));
++  final en = lookupAppLocalizations(const Locale('en'));
++
++  group('ConversationCorrectionsApi', () {
++    test('posts the id and the text, and reads the corrected conversation and what changed', () async {
++      final requests = <ApiRequest>[];
++      final api = ConversationCorrectionsApi(
++        baseUrl: 'https://example.invalid/',
++        send: (request) async {
++          requests.add(request);
++          return http.Response(answer(), 200, headers: {'content-type': 'application/json; charset=utf-8'});
++        },
++      );
++      final result = await api.correct('c1', id: 'corr-1', text: "C'est Pascal, pas Thomas Pascal.");
++      expect(requests.single.method, 'POST');
++      expect(Uri.parse(requests.single.url).path, '/v1/conversations/c1/corrections');
++      expect(jsonDecode(requests.single.body), {'id': 'corr-1', 'texte': "C'est Pascal, pas Thomas Pascal."});
++      final data = (result as ApiSuccess<ConversationCorrectionResult>).data;
++      expect(data.conversation.structured.title, 'Déjeuner avec Pascal');
++      expect(data.conversation.summaryHistory.last.correctionId, 'corr-1');
++      expect(data.summary.title, isTrue);
++      expect(data.summary.memories, 1);
++      expect(data.alreadyApplied, isFalse);
++    });
++
++    test('a model failure (502), a conflict (409) and an unreadable answer stay failures', () async {
++      for (final (status, body, kind) in [
++        (502, '{"detail":"x"}', ApiProblemKind.server),
++        (409, '{"detail":"x"}', ApiProblemKind.rejected),
++        (200, '{"conversation": 3}', ApiProblemKind.decode),
++      ]) {
++        final api = ConversationCorrectionsApi(
++            baseUrl: 'https://example.invalid/', send: (_) async => http.Response(body, status));
++        final result = await api.correct('c1', id: 'x', text: 'y');
++        expect((result as ApiFailure).problem.kind, kind, reason: '$status');
++      }
++    });
++
++    test('the summary reads tolerantly', () {
++      final summary = ConversationCorrectionSummary.fromJson({'titre': 'oui', 'souvenirs': -2, 'faits': 2});
++      expect(summary.title, isFalse);
++      expect(summary.memories, 0);
++      expect(summary.facts, 2);
++      expect(summary.nothingReplaced, isFalse);
++      expect(ConversationCorrectionSummary.fromJson({}).nothingReplaced, isTrue);
++    });
++  });
++
++  group('one line after sending', () {
++    test('says what was corrected, in French and in English', () {
++      const summary = ConversationCorrectionSummary(title: true, notes: true, memories: 1);
++      expect(describeCorrection(fr, summary), 'Corrigé : résumé, titre, 1 souvenir');
++      expect(describeCorrection(en, summary), 'Corrected: summary, title, 1 memory');
++      expect(
++        describeCorrection(fr, const ConversationCorrectionSummary(appSummaries: 2, memories: 3, facts: 1)),
++        'Corrigé : 2 résumés d’apps, 3 souvenirs, 1 fait ajouté',
++      );
++    });
++
++    test('memories beyond the 30 most recent are said, never hidden', () {
++      expect(describeCorrection(fr, const ConversationCorrectionSummary(notes: true, memoriesSkipped: 12)),
++          'Corrigé : résumé · 12 souvenirs plus anciens non relus');
++      expect(ConversationCorrectionSummary.fromJson({'souvenirs_ignores': 3}).memoriesSkipped, 3);
++    });
++
++    test('a correction that replaced nothing says it is kept', () {
++      expect(describeCorrection(fr, const ConversationCorrectionSummary(refused: 2)),
++          'Correction enregistrée ; aucun passage à remplacer trouvé.');
++    });
++
++    test('each failure says why in words', () {
++      expect(correctionProblemMessage(fr, const ApiProblem(ApiProblemKind.server, statusCode: 502)),
++          'Omi n’a pas pu relire la conversation ; rien n’a été modifié. Réessayez.');
++      // Un 500 ou un 503 peut suivre des écritures validées : jamais « rien n'a été modifié ».
++      for (final status in [500, 503]) {
++        expect(correctionProblemMessage(fr, ApiProblem(ApiProblemKind.server, statusCode: status)),
++            'Omi n’a pas pu terminer. Réessayez : la correction ne sera pas appliquée deux fois.');
++      }
++      expect(correctionProblemMessage(fr, const ApiProblem(ApiProblemKind.rejected, statusCode: 409)),
++          'La conversation change en ce moment. Réessayez dans un instant.');
++      expect(correctionProblemMessage(fr, const ApiProblem(ApiProblemKind.transport)),
++          'Impossible de joindre Omi. Réessayez : la correction ne sera pas appliquée deux fois.');
++      expect(correctionProblemMessage(fr, const ApiProblem(ApiProblemKind.notFound, statusCode: 404)),
++          'Cette conversation n’existe plus.');
++      expect(correctionProblemMessage(fr, const ApiProblem(ApiProblemKind.rejected, statusCode: 400)),
++          'Écrivez ce qui est faux, en 1000 caractères au plus.');
++    });
++  });
++
++  group('kept versions after a correction', () {
++    test('a title-only correction keeps the old title reachable; the newest same text is the current one', () {
++      final choices = buildSummaryChoices(
++        currentAppResults: const [],
++        currentOmiNotes: 'Mike a revu Pascal.',
++        currentTitle: 'Déjeuner avec Pascal',
++        history: [
++          version('v0', 'omi', 'Mike a revu Pascal.', title: 'Déjeuner avec Thomas Pascal', recordedAt: _t1),
++          version('v1', 'omi', 'Mike a revu Pascal.',
++              title: 'Déjeuner avec Pascal', createdAt: _t1, recordedAt: _t1, correctionId: 'corr-1'),
++        ],
++      );
++      expect(choices.map((c) => c.key), ['current:omi', 'version:v0']);
++      expect(choices.first.correctionId, 'corr-1');
++      expect(choices.first.createdAt, _t1);
++      expect(choices.last.title, 'Déjeuner avec Thomas Pascal');
++    });
++
++    test('a hand-written title never turns the current notes into a duplicate version', () {
++      final choices = buildSummaryChoices(
++        currentAppResults: const [],
++        currentOmiNotes: 'Notes',
++        currentTitle: 'Mon titre à moi',
++        history: [version('v1', 'omi', 'Notes', title: 'Titre généré', createdAt: _t0, recordedAt: _t0)],
++      );
++      expect(choices.map((c) => c.key), ['current:omi']);
++    });
++
++    test('correction_id is read and kept through the local cache', () {
++      final parsed = SummaryVersion.tryParse({
++        'id': 'a',
++        'kind': 'app',
++        'content': 'R',
++        'recorded_at': '2026-10-10T18:30:00Z',
++        'correction_id': 'corr-1',
++      })!;
++      expect(parsed.correctionId, 'corr-1');
++      expect(SummaryVersion.tryParse(parsed.toJson())!.correctionId, 'corr-1');
++      expect(SummaryVersion.tryParse({...parsed.toJson()}..remove('correction_id'))!.correctionId, isNull);
++    });
++  });
++
++  group('ConversationDetailProvider.correctSummary', () {
++    setUp(() async {
++      SharedPreferences.setMockInitialValues({});
++      await SharedPreferencesUtil.init();
++    });
++
++    ServerConversation current() => ServerConversation(
++          id: 'c1',
++          createdAt: _t0,
++          status: ConversationStatus.completed,
++          structured: Structured('Déjeuner avec Thomas Pascal', 'Mike a revu Thomas Pascal.'),
++        );
++
++    ConversationDetailProvider detail(ConversationCorrectionCall call) {
++      final provider = ConversationDetailProvider(correctSummary: call)
++        ..selectedDate = conversationLocalDayKey(_t0)
++        ..setCachedConversation(current());
++      addTearDown(provider.dispose);
++      return provider;
++    }
++
++    test('a success shows the corrected conversation and the current summary', () async {
++      final sent = <(String, String, String)>[];
++      final provider = detail((conversationId, {required id, required text}) async {
++        sent.add((conversationId, id, text));
++        return ApiSuccess(ConversationCorrectionResult.decode(answer()));
++      });
++      expect(provider.summaryChoices(), hasLength(1));
++      final result = await provider.correctSummary("  C'est Pascal.  ", correctionId: 'corr-1');
++      expect(result, isA<ApiSuccess<ConversationCorrectionResult>>());
++      expect(sent, [('c1', 'corr-1', "C'est Pascal.")]);
++      expect(provider.conversation.structured.title, 'Déjeuner avec Pascal');
++      expect(provider.getSummarySelection().content, 'Mike a revu Pascal.');
++      expect(provider.summaryChoices().map((c) => c.key), ['current:omi', 'version:v-old']);
++      expect(provider.correctingSummary, isFalse);
++    });
++
++    test('a failure changes nothing on the page', () async {
++      final provider = detail((conversationId, {required id, required text}) async =>
++          const ApiFailure(ApiProblem(ApiProblemKind.server, statusCode: 502)));
++      final result = await provider.correctSummary('x', correctionId: 'corr-1');
++      expect(result, isA<ApiFailure<ConversationCorrectionResult>>());
++      expect(provider.conversation.structured.title, 'Déjeuner avec Thomas Pascal');
++      expect(provider.correctingSummary, isFalse);
++    });
++
++    test('a second send while one is running is refused, not sent twice', () async {
++      var calls = 0;
++      final provider = detail((conversationId, {required id, required text}) async {
++        calls++;
++        await Future<void>.delayed(const Duration(milliseconds: 10));
++        return ApiSuccess(ConversationCorrectionResult.decode(answer()));
++      });
++      final first = provider.correctSummary('x', correctionId: 'corr-1');
++      expect(provider.correctingSummary, isTrue);
++      final second = await provider.correctSummary('x', correctionId: 'corr-1');
++      expect(second, isA<ApiFailure<ConversationCorrectionResult>>());
++      await first;
++      expect(calls, 1);
++    });
++  });
++}
+diff --git a/app/test/widgets/summary_correction_sheet_test.dart b/app/test/widgets/summary_correction_sheet_test.dart
+new file mode 100644
+index 0000000000..a2b0511adb
+--- /dev/null
++++ b/app/test/widgets/summary_correction_sheet_test.dart
+@@ -0,0 +1,275 @@
++// Clone local : « Corriger le résumé » (0009) — bouton sous le résumé, feuille, envoi, indicateur, ligne de bilan,
++// échec sans perte du texte, renvoi idempotent, ancienne version atteignable par la flèche, lisibilité en thème clair.
++import 'dart:async';
++import 'dart:convert';
++
++import 'package:flutter/material.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:provider/provider.dart';
++import 'package:shared_preferences/shared_preferences.dart';
++
++import 'package:omi/backend/http/api/conversation_corrections.dart';
++import 'package:omi/backend/http/api_result.dart';
++import 'package:omi/backend/preferences.dart';
++import 'package:omi/backend/schema/conversation.dart';
++import 'package:omi/backend/schema/structured.dart';
++import 'package:omi/backend/schema/summary_version.dart';
++import 'package:omi/l10n/app_localizations.dart';
++import 'package:omi/pages/conversation_detail/conversation_detail_provider.dart';
++import 'package:omi/pages/conversation_detail/conversation_summary_selection.dart';
++import 'package:omi/pages/conversation_detail/widgets.dart';
++import 'package:omi/pages/conversation_detail/widgets/conversation_detail_tabs.dart';
++import 'package:omi/pages/conversation_detail/widgets/summary_correction_sheet.dart';
++import 'package:omi/providers/conversation_provider.dart' show conversationLocalDayKey;
++import 'package:omi/ui/ui.dart';
++
++final _t0 = DateTime.utc(2026, 10, 10, 9);
++
++ServerConversation _before({ConversationStatus status = ConversationStatus.completed, bool discarded = false}) =>
++    ServerConversation(
++      id: 'c1',
++      createdAt: _t0,
++      status: status,
++      discarded: discarded,
++      structured: Structured('Déjeuner avec Thomas Pascal', 'Mike a revu Thomas Pascal, qui monte un film.'),
++    );
++
++Map<String, dynamic> _after() => {
++      'id': 'c1',
++      'created_at': '2026-10-10T09:00:00Z',
++      'started_at': '2026-10-10T09:00:00Z',
++      'finished_at': '2026-10-10T10:00:00Z',
++      'status': 'completed',
++      'structured': {
++        'title': 'Déjeuner avec Pascal',
++        'overview': 'Mike a revu Pascal, qui monte un film.',
++        'emoji': '🎬',
++        'category': 'personal',
++      },
++      'transcript_segments': [],
++      'apps_results': [],
++      'summary_history': [
++        {
++          'id': 'v-old',
++          'kind': 'omi',
++          'title': 'Déjeuner avec Thomas Pascal',
++          'content': 'Mike a revu Thomas Pascal, qui monte un film.',
++          'recorded_at': '2026-10-10T18:30:00Z',
++        },
++        {
++          'id': 'v-new',
++          'kind': 'omi',
++          'title': 'Déjeuner avec Pascal',
++          'content': 'Mike a revu Pascal, qui monte un film.',
++          'created_at': '2026-10-10T18:30:00Z',
++          'recorded_at': '2026-10-10T18:30:00Z',
++          'correction_id': 'corr',
++        },
++      ],
++    };
++
++ApiResult<ConversationCorrectionResult> _success({Map<String, dynamic>? bilan}) =>
++    ApiSuccess(ConversationCorrectionResult.decode(jsonEncode({
++      'conversation': _after(),
++      'bilan': bilan ?? {'titre': true, 'notes': true, 'resumes_apps': 0, 'souvenirs': 1, 'faits': 0, 'refuses': 0},
++      'deja_appliquee': false,
++    })));
++
++class _Calls {
++  final sent = <(String id, String text)>[];
++  final answers = <Completer<ApiResult<ConversationCorrectionResult>>>[];
++
++  Future<ApiResult<ConversationCorrectionResult>> call(String conversationId,
++      {required String id, required String text}) {
++    sent.add((id, text));
++    final answer = Completer<ApiResult<ConversationCorrectionResult>>();
++    answers.add(answer);
++    return answer.future;
++  }
++}
++
++class _Tabs extends StatefulWidget {
++  const _Tabs();
++  @override
++  State<_Tabs> createState() => _TabsState();
++}
++
++class _TabsState extends State<_Tabs> with SingleTickerProviderStateMixin {
++  late final TabController controller = TabController(length: 2, vsync: this);
++  @override
++  void dispose() {
++    controller.dispose();
++    super.dispose();
++  }
++
++  @override
++  Widget build(BuildContext context) => Column(children: [
++        ConversationDetailTabs(controller: controller, onTap: (_) {}),
++        // Comme l'onglet Résumé : le résumé, puis le bouton sous le résumé actuel.
++        Expanded(
++          child: Consumer<ConversationDetailProvider>(
++            builder: (context, provider, _) => CustomScrollView(slivers: [
++              const GetAppsWidgets(),
++              if (offersSummaryCorrection(provider.conversationOrNull, provider.getSummarySelection()))
++                const SliverToBoxAdapter(child: SummaryCorrectionButton()),
++            ]),
++          ),
++        ),
++      ]);
++}
++
++Future<(ConversationDetailProvider, _Calls)> _pump(WidgetTester tester,
++    {Locale locale = const Locale('fr'), ServerConversation? conversation}) async {
++  final calls = _Calls();
++  final start = conversation ?? _before();
++  final provider = ConversationDetailProvider(correctSummary: calls.call)
++    ..selectedDate = conversationLocalDayKey(start.createdAt)
++    ..setCachedConversation(start)
++    ..titleController = TextEditingController(text: start.structured.title)
++    ..titleFocusNode = FocusNode();
++  addTearDown(provider.dispose);
++  OmiColors.active = OmiPalette.light;
++  await tester.pumpWidget(ChangeNotifierProvider<ConversationDetailProvider>.value(
++    value: provider,
++    child: MaterialApp(
++      theme: buildOmiTheme(),
++      localizationsDelegates: AppLocalizations.localizationsDelegates,
++      supportedLocales: AppLocalizations.supportedLocales,
++      locale: locale,
++      home: const Scaffold(body: _Tabs()),
++    ),
++  ));
++  await _settle(tester);
++  return (provider, calls);
++}
++
++Finder get _button => find.byKey(const Key('conversation_summary_correct'));
++
++/// Le résumé peut garder un indicateur animé : on laisse passer les animations (feuille, menu) sans attendre
++/// qu'il s'arrête.
++Future<void> _settle(WidgetTester tester) async {
++  for (var i = 0; i < 12; i++) {
++    await tester.pump(const Duration(milliseconds: 100));
++  }
++}
++
++Finder get _field => find.byKey(const ValueKey('summary_correction_field'));
++Finder get _send => find.byKey(const Key('summary_correction_send'));
++
++void main() {
++  setUp(() async {
++    SharedPreferences.setMockInitialValues({});
++    await SharedPreferencesUtil.init();
++  });
++
++  testWidgets('Corriger : the sheet asks what is wrong, shows Omi rereading, then one line of what changed',
++      (tester) async {
++    final (provider, calls) = await _pump(tester);
++    expect(_button, findsOneWidget);
++    expect(find.text('Corriger le résumé'), findsOneWidget);
++    await tester.tap(_button);
++    await _settle(tester);
++    expect(find.text('Qu’est-ce qui est faux ?'), findsOneWidget);
++    expect(find.text('C’est Pascal, pas Thomas Pascal.'), findsOneWidget);
++    expect(tester.widget<OmiButton>(_send).onPressed, isNull, reason: 'nothing to send yet');
++
++    await tester.enterText(_field, "C'est Pascal, pas Thomas Pascal.");
++    await tester.pump();
++    await tester.tap(_send);
++    await tester.pump();
++    expect(find.text('Omi relit la conversation…'), findsOneWidget);
++    expect(calls.sent.single.$2, "C'est Pascal, pas Thomas Pascal.");
++
++    calls.answers.single.complete(_success());
++    await _settle(tester);
++    expect(_field, findsNothing, reason: 'the sheet closes');
++    expect(find.text('Corrigé : résumé, titre, 1 souvenir'), findsOneWidget);
++    expect(provider.conversation.structured.title, 'Déjeuner avec Pascal');
++    expect(find.textContaining('Mike a revu Pascal'), findsWidgets);
++    // L'ancienne version reste atteignable : la flèche des résumés apparaît, avec la version d'avant.
++    expect(find.byKey(const Key('conversation_summary_versions')), findsOneWidget);
++    await tester.tap(find.byKey(const Key('conversation_summary_versions')));
++    await _settle(tester);
++    expect(find.textContaining('corrigé par vous'), findsOneWidget);
++    expect(find.textContaining('Déjeuner avec Thomas Pascal — Mike a revu Thomas Pascal'), findsOneWidget);
++    await tester.tap(find.byKey(Key('summary_choice_${historyChoiceKey('v-old')}')));
++    await _settle(tester);
++    expect(provider.getSummarySelection().content, 'Mike a revu Thomas Pascal, qui monte un film.');
++    // Sous une ancienne version, pas de bouton Corriger.
++    expect(_button, findsNothing);
++  });
++
++  testWidgets('a failure keeps the sheet and the text, says why, and resending reuses the same id', (tester) async {
++    final (provider, calls) = await _pump(tester);
++    await tester.tap(_button);
++    await _settle(tester);
++    await tester.enterText(_field, 'La grand-mère est celle d’Éloïse et Tristan.');
++    await tester.pump();
++    await tester.tap(_send);
++    await tester.pump();
++    calls.answers.last.complete(const ApiFailure(ApiProblem(ApiProblemKind.server, statusCode: 502)));
++    await _settle(tester);
++    expect(find.text('Omi n’a pas pu relire la conversation ; rien n’a été modifié. Réessayez.'), findsOneWidget);
++    expect(find.byIcon(Icons.error_outline_rounded), findsOneWidget, reason: 'never by color alone');
++    expect(find.text('La grand-mère est celle d’Éloïse et Tristan.'), findsOneWidget);
++    expect(provider.conversation.structured.title, 'Déjeuner avec Thomas Pascal');
++
++    await tester.tap(_send);
++    await tester.pump();
++    expect(calls.sent[1].$1, calls.sent[0].$1, reason: 'same correction, same id: the server never applies it twice');
++    calls.answers.last.complete(const ApiFailure(ApiProblem(ApiProblemKind.transport)));
++    await _settle(tester);
++    expect(find.text('Impossible de joindre Omi. Réessayez : la correction ne sera pas appliquée deux fois.'),
++        findsOneWidget);
++
++    await tester.enterText(_field, 'Une autre correction.');
++    await tester.pump();
++    await tester.tap(_send);
++    await tester.pump();
++    expect(calls.sent[2].$1, isNot(calls.sent[0].$1), reason: 'a changed text is another correction');
++    calls.answers.last.complete(_success(bilan: {'refuses': 1}));
++    await _settle(tester);
++    expect(find.text('Correction enregistrée ; aucun passage à remplacer trouvé.'), findsOneWidget);
++  });
++
++  testWidgets('the field is readable in the light theme and limited to 1000 characters', (tester) async {
++    await _pump(tester);
++    await tester.tap(_button);
++    await _settle(tester);
++    final field = tester.widget<TextField>(_field);
++    expect(field.maxLength, 1000);
++    expect(field.style?.color, OmiPalette.light.textPrimary);
++    expect(field.decoration?.fillColor, OmiPalette.light.surface2);
++    expect(field.decoration?.hintStyle?.color, OmiPalette.light.textSecondary);
++    expect(OmiPalette.light.textPrimary, isNot(OmiPalette.light.surface2));
++  });
++
++  testWidgets('in English too', (tester) async {
++    final (_, calls) = await _pump(tester, locale: const Locale('en'));
++    await tester.tap(find.text('Correct the summary'));
++    await _settle(tester);
++    expect(find.text('What’s wrong?'), findsOneWidget);
++    await tester.enterText(_field, "It's Pascal.");
++    await tester.pump();
++    await tester.tap(find.text('Send'));
++    await tester.pump();
++    expect(find.text('Omi is rereading the conversation…'), findsOneWidget);
++    calls.answers.single.complete(_success());
++    await _settle(tester);
++    expect(find.text('Corrected: summary, title, 1 memory'), findsOneWidget);
++  });
++
++  test('the button is offered only under the current summary of a processed conversation', () {
++    final current = ConversationSummarySelection.select(_before());
++    expect(offersSummaryCorrection(_before(), current), isTrue);
++    expect(offersSummaryCorrection(_before(), current, editing: true), isFalse);
++    expect(offersSummaryCorrection(_before(discarded: true), current), isFalse);
++    expect(offersSummaryCorrection(_before(status: ConversationStatus.processing), current), isFalse);
++    expect(offersSummaryCorrection(null, current), isFalse);
++    final archived = ConversationSummarySelection.fromChoice(
++      const SummaryChoice(key: 'version:x', source: SummaryChoiceSource.history, kind: 'omi', content: 'Ancien'),
++      _before(),
++    );
++    expect(offersSummaryCorrection(_before(), archived), isFalse);
++  });
++}
+-- 
+2.43.0
+

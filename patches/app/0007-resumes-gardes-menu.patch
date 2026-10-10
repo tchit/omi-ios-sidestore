@@ -1,0 +1,1288 @@
+From 711e21749dd999f78ce1c81e4d69169c05e7aa58 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 9 Oct 2026 15:05:00 +0000
+Subject: [PATCH] =?UTF-8?q?R=C3=A9sum=C3=A9s=20gard=C3=A9s=20:=20fl=C3=A8c?=
+ =?UTF-8?q?he=20=C3=A0=20c=C3=B4t=C3=A9=20de=20=C2=AB=20R=C3=A9sum=C3=A9?=
+ =?UTF-8?q?=20=C2=BB=20pour=20choisir=20parmi=20tous=20les=20r=C3=A9sum?=
+ =?UTF-8?q?=C3=A9s=20produits?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Changer de modèle de résumé (ou retraiter) remplaçait le résumé affiché : l'ancien était perdu. Le serveur
+du clone garde maintenant chaque résumé dans summary_history (correctif serveur « summary-history ») ;
+l'app le lit et laisse choisir lequel afficher.
+
+- ServerConversation.summaryHistory, lu à part dans fromJson (champ propre au clone, absent du schéma
+  généré conversation_wire.g.dart), gardé dans toJson (cache local) et dans la copie faite au
+  rattachement d'un événement d'agenda.
+- Onglet « Résumé » : une flèche apparaît dès qu'il y a plus d'un résumé à lire. Toucher le mot change
+  d'onglet ; toucher la flèche ouvre le menu « Résumés » : résumé actuel (modèle), notes d'Omi, puis les
+  versions gardées de la plus récente à la plus ancienne, chacune avec son nom, son heure (ou « antérieur
+  au … » quand le serveur ne la connaît pas) et un aperçu.
+- Choisir une version l'affiche avec un bandeau (nom, heure, « Revenir à l'actuel »), et passe sur
+  l'onglet Résumé quand la flèche a été touchée depuis Transcription (critique, risque 3). Une version
+  gardée se lit, ne s'édite pas ; le choix est local (rien n'est écrit sur le serveur) et s'efface
+  quand une relance produit un nouveau résumé.
+- La recherche ne perd plus summary_history : le schéma généré de la recherche ne le connaît pas, il
+  est repris de la réponse brute (withSummaryHistory), donc une conversation ouverte depuis la
+  recherche a sa flèche tout de suite.
+- « Copier le résumé » copie le résumé affiché ; « Modèle de résumé » et sa coche restent sur le modèle
+  actuel.
+- Textes en anglais et en français (app_en.arb, app_fr.arb ; les app_localizations*.dart sont
+  régénérés par flutter pub get).
+
+Correction de la relecture (2026-10-10) : la flèche s'affiche aussi quand le résumé actuel est vide et
+qu'une seule version gardée existe (avant, cette version était inatteignable). Règle : la flèche apparaît
+dès que le menu offre quelque chose que l'onglet ne montre pas déjà.
+
+Tests : test/unit/summary_versions_test.dart (modèle, menu, recherche),
+test/widgets/summary_versions_tab_test.dart (choix depuis Transcription → onglet Résumé, menu en
+français, version unique derrière un résumé vide, pas de flèche sans rien à choisir).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ app/lib/backend/http/api/conversations.dart   |  15 +-
+ app/lib/backend/schema/conversation.dart      |  10 +
+ app/lib/backend/schema/summary_version.dart   | 205 ++++++++++++++++++
+ app/lib/l10n/app_en.arb                       |  37 ++++
+ app/lib/l10n/app_fr.arb                       |   8 +
+ .../conversation_detail_provider.dart         |  52 ++++-
+ .../conversation_summary_selection.dart       |  85 +++++++-
+ app/lib/pages/conversation_detail/page.dart   |   7 +-
+ .../pages/conversation_detail/widgets.dart    |   5 +
+ .../widgets/conversation_detail_tabs.dart     |  19 +-
+ .../widgets/summarized_apps_sheet.dart        |   4 +-
+ .../widgets/summary_tab.dart                  |   6 +-
+ .../widgets/summary_versions_sheet.dart       | 173 +++++++++++++++
+ app/test/unit/summary_versions_test.dart      | 136 ++++++++++++
+ .../widgets/summary_versions_tab_test.dart    | 159 ++++++++++++++
+ 15 files changed, 904 insertions(+), 17 deletions(-)
+ create mode 100644 app/lib/backend/schema/summary_version.dart
+ create mode 100644 app/lib/pages/conversation_detail/widgets/summary_versions_sheet.dart
+ create mode 100644 app/test/unit/summary_versions_test.dart
+ create mode 100644 app/test/widgets/summary_versions_tab_test.dart
+
+diff --git a/app/lib/backend/http/api/conversations.dart b/app/lib/backend/http/api/conversations.dart
+index edf4ee4296..eecec1fbf7 100644
+--- a/app/lib/backend/http/api/conversations.dart
++++ b/app/lib/backend/http/api/conversations.dart
+@@ -11,6 +11,7 @@ import 'package:omi/backend/schema/gen/apps_wire.g.dart' as apps_wire;
+ import 'package:omi/backend/schema/gen/conversation_wire.g.dart' as wire;
+ import 'package:omi/backend/schema/gen/misc_wire.g.dart' as misc_wire;
+ import 'package:omi/backend/schema/schema.dart';
++import 'package:omi/backend/schema/summary_version.dart' show withSummaryHistory;
+ import 'package:omi/env/env.dart';
+ import 'package:omi/services/capture/calendar_capture_gap_monitor.dart';
+ import 'package:omi/services/integrations/google_calendar_service.dart';
+@@ -991,12 +992,18 @@ Future<ConversationSearchResult> searchConversationsServerResult(
+   if (response == null) return const ConversationSearchResult.failure();
+   if (response.statusCode == 200) {
+     try {
+-      final data = wire.GeneratedSearchConversationsResponse.fromJson(
+-        jsonDecode(response.body) as Map<String, dynamic>,
+-      );
++      final body = jsonDecode(response.body) as Map<String, dynamic>;
++      final data = wire.GeneratedSearchConversationsResponse.fromJson(body);
+       // Search items are ConversationSearchItem (includes match_snippets); parse via JSON so
+       // ServerConversation keeps seek-to-moment evidence without widening GeneratedConversation.
+-      final convos = data.items.map((conversation) => ServerConversation.fromJson(conversation.toJson())).toList();
++      // Clone local : summary_history (absent du schéma généré) est repris de la réponse brute, pour qu'une
++      // conversation ouverte depuis la recherche ait déjà sa flèche des résumés.
++      final rawItems = body['items'] is List ? body['items'] as List : const [];
++      final convos = [
++        for (final (index, conversation) in data.items.indexed)
++          ServerConversation.fromJson(
++              withSummaryHistory(conversation.toJson(), index < rawItems.length ? rawItems[index] : null)),
++      ];
+       return ConversationSearchResult(
+         items: convos,
+         currentPage: data.currentPage,
+diff --git a/app/lib/backend/schema/conversation.dart b/app/lib/backend/schema/conversation.dart
+index a9b1b19e05..2195179169 100644
+--- a/app/lib/backend/schema/conversation.dart
++++ b/app/lib/backend/schema/conversation.dart
+@@ -13,6 +13,7 @@ import 'package:omi/backend/schema/geolocation.dart';
+ import 'package:omi/utils/audio/audio_timeline_mapper.dart';
+ import 'package:omi/backend/schema/message.dart';
+ import 'package:omi/backend/schema/structured.dart';
++import 'package:omi/backend/schema/summary_version.dart';
+ import 'package:omi/backend/schema/transcript_segment.dart';
+ import 'package:omi/ui/omi_tokens.dart';
+ 
+@@ -379,6 +380,9 @@ class ServerConversation {
+ 
+   final List<AppResponse> appResults;
+   final List<String> suggestedSummarizationApps;
++
++  /// Clone local : chaque résumé produit puis remplacé, gardé par le serveur (plus ancien d'abord).
++  final List<SummaryVersion> summaryHistory;
+   final ConversationSource? source;
+   final String? language; // applies to friend/omi only
+ 
+@@ -429,6 +433,7 @@ class ServerConversation {
+     this.transcriptSegments = const [],
+     this.appResults = const [],
+     this.suggestedSummarizationApps = const [],
++    this.summaryHistory = const [],
+     this.geolocation,
+     this.photos = const [],
+     this.audioFiles = const [],
+@@ -486,6 +491,8 @@ class ServerConversation {
+       structured: structured,
+       geolocation: json['geolocation'] is Map<String, dynamic> ? Geolocation.fromJson(json['geolocation']) : null,
+       deleted: json['deleted'] ?? false,
++      // Lu à part : summary_history est propre au clone, absent du schéma généré (conversation_wire.g.dart).
++      summaryHistory: SummaryVersion.parseList(json['summary_history']),
+       siriVisibilityValid: json['siri_visibility_valid'] != false &&
+           (json['visibility'] == null || const ['private', 'shared', 'public'].contains(json['visibility'])),
+       matchSnippets: snippets,
+@@ -499,6 +506,7 @@ class ServerConversation {
+     bool deleted = false,
+     bool siriVisibilityValid = true,
+     List<TranscriptMatchSnippet>? matchSnippets,
++    List<SummaryVersion> summaryHistory = const [],
+   }) {
+     final snippets = matchSnippets ?? const <TranscriptMatchSnippet>[];
+     return ServerConversation(
+@@ -512,6 +520,7 @@ class ServerConversation {
+           ? generated.appsResults.map(AppResponse.fromGenerated).toList()
+           : generated.pluginsResults.map((result) => AppResponse(result.content, appId: result.pluginId)).toList(),
+       suggestedSummarizationApps: generated.suggestedSummarizationApps,
++      summaryHistory: summaryHistory,
+       geolocation:
+           geolocation ?? (generated.geolocation == null ? null : Geolocation.fromGenerated(generated.geolocation!)),
+       photos: generated.photos.map(ConversationPhoto.fromGenerated).toList(),
+@@ -557,6 +566,7 @@ class ServerConversation {
+         return wire.GeneratedPluginResult(pluginId: result.appId, content: result.content).toJson();
+       }).toList(),
+       'suggested_summarization_apps': suggestedSummarizationApps,
++      if (summaryHistory.isNotEmpty) 'summary_history': summaryHistory.map((version) => version.toJson()).toList(),
+       'geolocation': geolocation?.toJson(),
+       'photos': photos.map((photo) => photo.toJson()).toList(),
+       'discarded': discarded,
+diff --git a/app/lib/backend/schema/summary_version.dart b/app/lib/backend/schema/summary_version.dart
+new file mode 100644
+index 0000000000..c2d946d13d
+--- /dev/null
++++ b/app/lib/backend/schema/summary_version.dart
+@@ -0,0 +1,205 @@
++/// Clone local : les résumés gardés d'une conversation (`summary_history` côté serveur).
++///
++/// Changer de modèle de résumé ou retraiter remplaçait l'ancien résumé ; le serveur les garde maintenant
++/// tous, et l'app laisse choisir lequel lire depuis la flèche à côté de « Résumé ». Fichier en Dart pur (sans
++/// Flutter) pour être testé seul.
++class SummaryVersion {
++  final String id;
++
++  /// `omi` (notes d'Omi) ou `app` (un modèle de résumé).
++  final String kind;
++  final String? appId;
++  final String? appName;
++  final String? title;
++  final String content;
++
++  /// Heure de production ; null pour un résumé produit avant l'historique (archivé à [recordedAt]).
++  final DateTime? createdAt;
++  final DateTime recordedAt;
++
++  const SummaryVersion({
++    required this.id,
++    required this.kind,
++    required this.content,
++    required this.recordedAt,
++    this.appId,
++    this.appName,
++    this.title,
++    this.createdAt,
++  });
++
++  /// Null pour une entrée illisible : un historique abîmé ne doit jamais empêcher d'ouvrir la conversation.
++  static SummaryVersion? tryParse(Object? json) {
++    if (json is! Map) return null;
++    final id = json['id'];
++    final kind = json['kind'];
++    final content = json['content'];
++    final recordedAt = _date(json['recorded_at']);
++    if (id is! String || (kind != 'omi' && kind != 'app') || content is! String || recordedAt == null) {
++      return null;
++    }
++    return SummaryVersion(
++      id: id,
++      kind: kind as String,
++      content: content,
++      recordedAt: recordedAt,
++      appId: json['app_id'] is String ? json['app_id'] as String : null,
++      appName: json['app_name'] is String ? json['app_name'] as String : null,
++      title: json['title'] is String ? json['title'] as String : null,
++      createdAt: _date(json['created_at']),
++    );
++  }
++
++  static List<SummaryVersion> parseList(Object? json) {
++    if (json is! List) return const [];
++    return json.map(tryParse).whereType<SummaryVersion>().toList();
++  }
++
++  Map<String, dynamic> toJson() => {
++    'id': id,
++    'kind': kind,
++    'app_id': appId,
++    'app_name': appName,
++    'title': title,
++    'content': content,
++    'created_at': createdAt?.toUtc().toIso8601String(),
++    'recorded_at': recordedAt.toUtc().toIso8601String(),
++  };
++
++  static DateTime? _date(Object? value) => value is String ? DateTime.tryParse(value) : null;
++}
++
++enum SummaryChoiceSource { currentApp, currentOmi, history }
++
++/// Une ligne du menu des résumés : un résumé actuel de la conversation ou une version gardée.
++class SummaryChoice {
++  final String key;
++  final SummaryChoiceSource source;
++
++  /// `omi` ou `app`.
++  final String kind;
++  final String? appId;
++  final String? appName;
++  final String? title;
++  final String content;
++
++  /// Heure de production quand elle est connue.
++  final DateTime? createdAt;
++
++  /// Pour une version gardée : quand elle est entrée dans l'historique.
++  final DateTime? recordedAt;
++
++  /// Pour un résultat d'app actuel : sa place dans `apps_results`.
++  final int? resultIndex;
++
++  const SummaryChoice({
++    required this.key,
++    required this.source,
++    required this.kind,
++    required this.content,
++    this.appId,
++    this.appName,
++    this.title,
++    this.createdAt,
++    this.recordedAt,
++    this.resultIndex,
++  });
++
++  bool get isCurrent => source != SummaryChoiceSource.history;
++}
++
++const String currentOmiChoiceKey = 'current:omi';
++String currentAppChoiceKey(int index) => 'current:app:$index';
++String historyChoiceKey(String id) => 'version:$id';
++
++/// Le menu : d'abord les résumés actuels dans l'ordre où l'app les préfère (résultat d'app, puis notes d'Omi),
++/// puis les versions gardées, de la plus récente à la plus ancienne. Une version identique à un résumé actuel
++/// n'est pas répétée : elle lui donne seulement son heure de production.
++List<SummaryChoice> buildSummaryChoices({
++  required List<({String? appId, String content})> currentAppResults,
++  required String currentOmiNotes,
++  String? currentTitle,
++  required List<SummaryVersion> history,
++}) {
++  String id(String kind, String? appId, String content) => '$kind\u0000${appId ?? ''}\u0000${content.trim()}';
++  final historyById = <String, SummaryVersion>{};
++  for (final version in history) {
++    historyById.putIfAbsent(id(version.kind, version.appId, version.content), () => version);
++  }
++
++  final choices = <SummaryChoice>[];
++  final currentIds = <String>{};
++  for (var index = 0; index < currentAppResults.length; index++) {
++    final result = currentAppResults[index];
++    final content = result.content.trim();
++    if (content.isEmpty) continue;
++    final key = id('app', result.appId, content);
++    if (!currentIds.add(key)) continue;
++    final known = historyById[key];
++    choices.add(
++      SummaryChoice(
++        key: currentAppChoiceKey(index),
++        source: SummaryChoiceSource.currentApp,
++        kind: 'app',
++        appId: result.appId,
++        appName: known?.appName,
++        content: content,
++        createdAt: known?.createdAt,
++        resultIndex: index,
++      ),
++    );
++  }
++  final notes = currentOmiNotes.trim();
++  if (notes.isNotEmpty) {
++    final key = id('omi', null, notes);
++    currentIds.add(key);
++    choices.add(
++      SummaryChoice(
++        key: currentOmiChoiceKey,
++        source: SummaryChoiceSource.currentOmi,
++        kind: 'omi',
++        title: currentTitle,
++        content: notes,
++        createdAt: historyById[key]?.createdAt,
++      ),
++    );
++  }
++
++  // Le serveur range l'historique du plus ancien au plus récent ; à heure égale (un résumé archivé et celui qui
++  // le remplace sont inscrits ensemble), cet ordre départage.
++  final kept = <({int order, SummaryVersion version})>[];
++  for (var order = 0; order < history.length; order++) {
++    final version = history[order];
++    final key = id(version.kind, version.appId, version.content);
++    if (version.content.trim().isNotEmpty && currentIds.add(key)) kept.add((order: order, version: version));
++  }
++  kept.sort((a, b) {
++    final byTime = (b.version.createdAt ?? b.version.recordedAt).compareTo(a.version.createdAt ?? a.version.recordedAt);
++    return byTime != 0 ? byTime : b.order.compareTo(a.order);
++  });
++  for (final entry in kept) {
++    final version = entry.version;
++    choices.add(
++      SummaryChoice(
++        key: historyChoiceKey(version.id),
++        source: SummaryChoiceSource.history,
++        kind: version.kind,
++        appId: version.appId,
++        appName: version.appName,
++        title: version.title,
++        content: version.content.trim(),
++        createdAt: version.createdAt,
++        recordedAt: version.recordedAt,
++      ),
++    );
++  }
++  return choices;
++}
++
++/// Clone local : [json] avec le `summary_history` de [raw] (la même conversation lue telle que le serveur l'a
++/// envoyée), quand un passage par le schéma généré l'a perdu. Une ligne brute d'une autre conversation ne
++/// donne rien.
++Map<String, dynamic> withSummaryHistory(Map<String, dynamic> json, Object? raw) {
++  if (raw is! Map || raw['id'] != json['id'] || raw['summary_history'] is! List) return json;
++  return {...json, 'summary_history': raw['summary_history']};
++}
+diff --git a/app/lib/l10n/app_en.arb b/app/lib/l10n/app_en.arb
+index 5a0d554b40..2f32a46d31 100644
+--- a/app/lib/l10n/app_en.arb
++++ b/app/lib/l10n/app_en.arb
+@@ -4047,6 +4047,43 @@
+     "saveSettings": "Save Settings",
+     "syncingDeveloperSettings": "Syncing Developer Settings…",
+     "summary": "Summary",
++    "summaryVersionsTitle": "Summaries",
++    "@summaryVersionsTitle": {
++        "description": "Conversation: title of the menu listing every summary kept for the conversation"
++    },
++    "summaryVersionsOpen": "Choose a summary",
++    "@summaryVersionsOpen": {
++        "description": "Conversation: accessibility label of the arrow next to Summary that opens the summaries menu"
++    },
++    "summaryVersionsOmiNotes": "Omi's notes",
++    "@summaryVersionsOmiNotes": {
++        "description": "Conversation summaries menu: the summary written by Omi itself (not a summary template)"
++    },
++    "summaryVersionsUnknownApp": "Summary template",
++    "@summaryVersionsUnknownApp": {
++        "description": "Conversation summaries menu: a summary whose template name is unknown"
++    },
++    "summaryVersionsCurrent": "current",
++    "@summaryVersionsCurrent": {
++        "description": "Conversation summaries menu: marks the summaries the conversation shows today"
++    },
++    "summaryVersionsBackToCurrent": "Back to current",
++    "@summaryVersionsBackToCurrent": {
++        "description": "Conversation: button above a summary chosen from the menu, shows the current summary again"
++    },
++    "summaryVersionsReadOnly": "Earlier version, read-only",
++    "@summaryVersionsReadOnly": {
++        "description": "Conversation: note above a kept earlier summary"
++    },
++    "summaryVersionsBefore": "before {when}",
++    "@summaryVersionsBefore": {
++        "description": "Conversation summaries menu: a summary produced before history was kept, archived at {when}",
++        "placeholders": {
++            "when": {
++                "type": "String"
++            }
++        }
++    },
+     "auto": "Auto",
+     "noSummaryForApp": "No summary available for this app. Try another app for better results.",
+     "tryAnotherApp": "Try Another App",
+diff --git a/app/lib/l10n/app_fr.arb b/app/lib/l10n/app_fr.arb
+index 02a27b019b..c49649f20e 100644
+--- a/app/lib/l10n/app_fr.arb
++++ b/app/lib/l10n/app_fr.arb
+@@ -1091,6 +1091,14 @@
+     "saveSettings": "Enregistrer les Paramètres",
+     "syncingDeveloperSettings": "Synchronisation des paramètres développeur…",
+     "summary": "Résumé",
++    "summaryVersionsTitle": "Résumés",
++    "summaryVersionsOpen": "Choisir un résumé",
++    "summaryVersionsOmiNotes": "Notes d’Omi",
++    "summaryVersionsUnknownApp": "Modèle de résumé",
++    "summaryVersionsCurrent": "actuel",
++    "summaryVersionsBackToCurrent": "Revenir à l’actuel",
++    "summaryVersionsReadOnly": "Ancienne version, en lecture seule",
++    "summaryVersionsBefore": "antérieur au {when}",
+     "auto": "Automatique",
+     "noSummaryForApp": "Aucun résumé disponible pour cette application. Essayez une autre application pour de meilleurs résultats.",
+     "tryAnotherApp": "Essayer une autre application",
+diff --git a/app/lib/pages/conversation_detail/conversation_detail_provider.dart b/app/lib/pages/conversation_detail/conversation_detail_provider.dart
+index a5ebbc26c6..b53e85f16e 100644
+--- a/app/lib/pages/conversation_detail/conversation_detail_provider.dart
++++ b/app/lib/pages/conversation_detail/conversation_detail_provider.dart
+@@ -19,6 +19,7 @@ import 'package:omi/backend/preferences.dart';
+ import 'package:omi/backend/schema/app.dart';
+ import 'package:omi/backend/schema/conversation.dart';
+ import 'package:omi/backend/schema/structured.dart';
++import 'package:omi/backend/schema/summary_version.dart';
+ import 'package:omi/backend/schema/transcript_segment.dart';
+ import 'package:omi/providers/app_provider.dart';
+ import 'package:omi/providers/conversation_provider.dart';
+@@ -484,6 +485,11 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
+   int _refreshGeneration = 0;
+   App? selectedAppForReprocessing;
+ 
++  /// Clone local : le résumé choisi dans le menu de « Résumé » (clé de [SummaryChoice]) et sa conversation.
++  /// Null : le résumé actuel, comme avant. Lecture seule : ce choix n'écrit rien sur le serveur.
++  String? _selectedSummaryChoiceKey;
++  String? _selectedSummaryChoiceConversationId;
++
+   final scaffoldKey = GlobalKey<ScaffoldState>();
+ 
+   // Cache enabled conversation apps and suggested apps
+@@ -882,6 +888,8 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
+         _cachedConversation = updatedConversation;
+         _refreshGeneration++;
+       }
++      // Clone local : le résumé qui vient d'être produit s'affiche ; l'ancien reste dans le menu.
++      if (_selectedSummaryChoiceConversationId == target.id) clearSummaryChoice(notify: false);
+       if (generation == _speakerEditGeneration && _speakerSummaryConversationId == target.id) {
+         _speakerSummaryConversationId = null;
+       }
+@@ -922,8 +930,49 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
+   }
+ 
+   /// Returns the explicit source and body used by every summary surface.
++  ///
++  /// Clone local : le résumé choisi dans le menu des résumés quand il y en a un, sinon le résumé actuel.
+   ConversationSummarySelection getSummarySelection() {
+-    return ConversationSummarySelection.select(conversation);
++    final current = conversation;
++    final key = _selectedSummaryChoiceKey;
++    if (key != null && _selectedSummaryChoiceConversationId == current.id) {
++      final choice = summaryChoices().firstWhereOrNull((c) => c.key == key);
++      if (choice != null) return ConversationSummarySelection.fromChoice(choice, current);
++    }
++    return ConversationSummarySelection.select(current);
++  }
++
++  /// Clone local : les résumés que l'on peut lire pour cette conversation (actuels, puis versions gardées).
++  List<SummaryChoice> summaryChoices() {
++    final current = conversationOrNull;
++    if (current == null) return const [];
++    return ConversationSummarySelection.choices(current);
++  }
++
++  /// La clé du résumé affiché, pour cocher la bonne ligne du menu.
++  String? get displayedSummaryChoiceKey {
++    final current = conversationOrNull;
++    if (current == null) return null;
++    final selection = getSummarySelection();
++    return selection.choiceKey ?? ConversationSummarySelection.select(current).choiceKey;
++  }
++
++  /// Affiche [choice] ; le résumé actuel par défaut efface le choix.
++  void selectSummaryChoice(SummaryChoice choice) {
++    final current = conversationOrNull;
++    if (current == null) return;
++    final defaultKey = ConversationSummarySelection.select(current).choiceKey;
++    _selectedSummaryChoiceKey = choice.key == defaultKey ? null : choice.key;
++    _selectedSummaryChoiceConversationId = _selectedSummaryChoiceKey == null ? null : current.id;
++    notifyListeners();
++  }
++
++  /// Revient au résumé actuel (nouvelle relance, autre conversation, bouton « Revenir à l'actuel »).
++  void clearSummaryChoice({bool notify = true}) {
++    if (_selectedSummaryChoiceKey == null) return;
++    _selectedSummaryChoiceKey = null;
++    _selectedSummaryChoiceConversationId = null;
++    if (notify) notifyListeners();
+   }
+ 
+   /// Returns the list of suggested summarization apps for this conversation
+@@ -1181,6 +1230,7 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
+         transcriptSegments: _cachedConversation!.transcriptSegments,
+         appResults: _cachedConversation!.appResults,
+         suggestedSummarizationApps: _cachedConversation!.suggestedSummarizationApps,
++        summaryHistory: _cachedConversation!.summaryHistory,
+         geolocation: _cachedConversation!.geolocation,
+         photos: _cachedConversation!.photos,
+         audioFiles: _cachedConversation!.audioFiles,
+diff --git a/app/lib/pages/conversation_detail/conversation_summary_selection.dart b/app/lib/pages/conversation_detail/conversation_summary_selection.dart
+index 354762db99..d3f88b0873 100644
+--- a/app/lib/pages/conversation_detail/conversation_summary_selection.dart
++++ b/app/lib/pages/conversation_detail/conversation_summary_selection.dart
+@@ -1,23 +1,40 @@
+ import 'package:omi/backend/schema/conversation.dart';
+ import 'package:omi/backend/schema/structured.dart';
++import 'package:omi/backend/schema/summary_version.dart';
+ 
+ /// The one summary body a conversation detail surface should render or export.
+ ///
+ /// [appId] is optional metadata. [resultIndex] is the identity for an app
+ /// result, including legacy results whose app id is null; a null app id alone
+ /// must never be used to decide that a result is first-party content.
+-enum ConversationSummaryKind { app, overview, sections, empty }
++///
++/// Clone local : [archived] est une version gardée (`summary_history`), choisie dans le menu de « Résumé » ;
++/// elle se lit, ne s'édite pas. [choiceKey] relie la sélection à sa ligne de ce menu.
++enum ConversationSummaryKind { app, overview, sections, empty, archived }
+ 
+ class ConversationSummarySelection {
+   final String content;
+   final ConversationSummaryKind kind;
+   final String? appId;
+   final int? resultIndex;
++  final String? choiceKey;
++
++  /// La ligne du menu des résumés quand l'utilisateur en a choisi une autre que l'actuelle.
++  final SummaryChoice? choice;
+ 
+-  const ConversationSummarySelection({required this.content, required this.kind, this.appId, this.resultIndex});
++  const ConversationSummarySelection({
++    required this.content,
++    required this.kind,
++    this.appId,
++    this.resultIndex,
++    this.choiceKey,
++    this.choice,
++  });
+ 
+   bool get isApp => kind == ConversationSummaryKind.app;
+ 
++  bool get isArchived => kind == ConversationSummaryKind.archived;
++
+   /// Whether this selection can still be edited safely against [conversation].
+   ///
+   /// App results are addressed by app id by the current mutation API, so the
+@@ -26,6 +43,7 @@ class ConversationSummarySelection {
+   /// conversation's current primary selection as well, preventing a stale
+   /// overview edit from overwriting a newly selected app result.
+   bool canEdit(ServerConversation conversation) {
++    if (isArchived) return false;
+     if (isApp) {
+       final index = resultIndex;
+       final selectedAppId = appId;
+@@ -59,24 +77,81 @@ class ConversationSummarySelection {
+           kind: ConversationSummaryKind.app,
+           appId: result.appId,
+           resultIndex: index,
++          choiceKey: currentAppChoiceKey(index),
+         );
+       }
+     }
+ 
++    return _selectOmiNotes(conversation);
++  }
++
++  static ConversationSummarySelection _selectOmiNotes(ServerConversation conversation, {SummaryChoice? choice}) {
+     final overview = conversation.structured.overview.trim();
+     final projectedSections = renderSections(conversation.structured.sections);
+     if (projectedSections.isNotEmpty && overview == projectedSections) {
+-      return ConversationSummarySelection(content: projectedSections, kind: ConversationSummaryKind.sections);
++      return ConversationSummarySelection(
++        content: projectedSections,
++        kind: ConversationSummaryKind.sections,
++        choiceKey: currentOmiChoiceKey,
++        choice: choice,
++      );
+     }
+     if (overview.isNotEmpty) {
+-      return ConversationSummarySelection(content: overview, kind: ConversationSummaryKind.overview);
++      return ConversationSummarySelection(
++        content: overview,
++        kind: ConversationSummaryKind.overview,
++        choiceKey: currentOmiChoiceKey,
++        choice: choice,
++      );
+     }
+     if (projectedSections.isNotEmpty) {
+-      return ConversationSummarySelection(content: projectedSections, kind: ConversationSummaryKind.sections);
++      return ConversationSummarySelection(
++        content: projectedSections,
++        kind: ConversationSummaryKind.sections,
++        choiceKey: currentOmiChoiceKey,
++        choice: choice,
++      );
+     }
+     return const ConversationSummarySelection(content: '', kind: ConversationSummaryKind.empty);
+   }
+ 
++  /// Clone local : les lignes du menu des résumés (résumés actuels, puis versions gardées).
++  static List<SummaryChoice> choices(ServerConversation conversation) {
++    final overview = conversation.structured.overview.trim();
++    return buildSummaryChoices(
++      currentAppResults: [for (final result in conversation.appResults) (appId: result.appId, content: result.content)],
++      currentOmiNotes: overview.isNotEmpty ? overview : renderSections(conversation.structured.sections),
++      currentTitle: conversation.structured.title,
++      history: conversation.summaryHistory,
++    );
++  }
++
++  /// Clone local : la sélection qui affiche [choice]. Un résumé actuel reste éditable comme avant ; une
++  /// version gardée se lit seulement.
++  static ConversationSummarySelection fromChoice(SummaryChoice choice, ServerConversation conversation) {
++    switch (choice.source) {
++      case SummaryChoiceSource.currentApp:
++        return ConversationSummarySelection(
++          content: choice.content,
++          kind: ConversationSummaryKind.app,
++          appId: choice.appId,
++          resultIndex: choice.resultIndex,
++          choiceKey: choice.key,
++          choice: choice,
++        );
++      case SummaryChoiceSource.currentOmi:
++        return _selectOmiNotes(conversation, choice: choice);
++      case SummaryChoiceSource.history:
++        return ConversationSummarySelection(
++          content: choice.content,
++          kind: ConversationSummaryKind.archived,
++          appId: choice.appId,
++          choiceKey: choice.key,
++          choice: choice,
++        );
++    }
++  }
++
+   /// The canonical Markdown projection of structured sections.
+   ///
+   /// Heading-only sections are intentionally ignored: a heading without a
+diff --git a/app/lib/pages/conversation_detail/page.dart b/app/lib/pages/conversation_detail/page.dart
+index cc89babe3f..8003680614 100644
+--- a/app/lib/pages/conversation_detail/page.dart
++++ b/app/lib/pages/conversation_detail/page.dart
+@@ -552,8 +552,8 @@ class ConversationDetailPageState extends State<ConversationDetailPage> with Tic
+         _copyContent(context, provider.conversation.getTranscript(generate: true), context.l10n.transcript);
+         break;
+       case 'copy_summary':
+-        final conversation = provider.conversation;
+-        _copyContent(context, ConversationSummarySelection.select(conversation).content, context.l10n.summary);
++        // Clone local : copie le résumé affiché (celui choisi dans le menu des résumés, sinon l'actuel).
++        _copyContent(context, provider.getSummarySelection().content, context.l10n.summary);
+         break;
+       case 'download_audio':
+         await _downloadAudio(context, provider);
+@@ -811,7 +811,8 @@ class ConversationDetailPageState extends State<ConversationDetailPage> with Tic
+     final showDeveloperTools = conversationDetailShowsDeveloperTools();
+     final conversation = provider.conversation;
+     final hasRecordings = CaptureGroupPresentation.recordings(conversation).isNotEmpty;
+-    final summarySelection = provider.getSummarySelection();
++    // Le modèle de résumé actuel, pas une version choisie dans le menu des résumés.
++    final summarySelection = ConversationSummarySelection.select(provider.conversation);
+     final summaryApp =
+         summarySelection.isApp ? provider.appsList.where((app) => app.id == summarySelection.appId).firstOrNull : null;
+     // Grouped, with large dividers between groups: how the summary is written, then organising
+diff --git a/app/lib/pages/conversation_detail/widgets.dart b/app/lib/pages/conversation_detail/widgets.dart
+index 983b37feb3..422924d939 100644
+--- a/app/lib/pages/conversation_detail/widgets.dart
++++ b/app/lib/pages/conversation_detail/widgets.dart
+@@ -14,6 +14,7 @@ import 'package:omi/pages/conversation_detail/conversation_detail_provider.dart'
+ import 'package:omi/pages/conversation_detail/conversation_summary_selection.dart';
+ import 'package:omi/pages/conversation_detail/widgets/conversation_markdown_widget.dart';
+ import 'package:omi/pages/conversation_detail/widgets/summarized_apps_sheet.dart';
++import 'package:omi/pages/conversation_detail/widgets/summary_versions_sheet.dart';
+ import 'package:omi/ui/ui.dart';
+ import 'package:omi/utils/other/temp.dart';
+ import 'package:omi/widgets/extensions/string.dart';
+@@ -419,8 +420,12 @@ class GetAppsWidgets extends StatelessWidget {
+           return SliverToBoxAdapter(child: child!);
+         }
+ 
++        final choice = selection.choice;
+         return SliverMainAxisGroup(
+           slivers: [
++            // Clone local : un résumé choisi dans le menu dit lequel il est et ramène à l'actuel.
++            if (!provider.conversation.discarded && choice != null)
++              SliverToBoxAdapter(child: SummaryVersionBanner(choice: choice)),
+             if (!provider.conversation.discarded)
+               AppResultDetailWidget(
+                 summarySelection: selection,
+diff --git a/app/lib/pages/conversation_detail/widgets/conversation_detail_tabs.dart b/app/lib/pages/conversation_detail/widgets/conversation_detail_tabs.dart
+index f78e667faa..082d569e85 100644
+--- a/app/lib/pages/conversation_detail/widgets/conversation_detail_tabs.dart
++++ b/app/lib/pages/conversation_detail/widgets/conversation_detail_tabs.dart
+@@ -7,6 +7,7 @@ import 'package:omi/backend/schema/conversation.dart';
+ import 'package:omi/pages/conversation_detail/conversation_detail_provider.dart';
+ import 'package:omi/pages/conversation_detail/widgets/conversation_detail_chip.dart';
+ import 'package:omi/pages/conversation_detail/widgets/conversation_detail_header.dart';
++import 'package:omi/pages/conversation_detail/widgets/summary_versions_sheet.dart';
+ import 'package:omi/pages/conversations/conversation_action_analytics.dart';
+ import 'package:omi/ui/ui.dart';
+ import 'package:omi/utils/l10n_extensions.dart';
+@@ -62,7 +63,23 @@ class ConversationDetailTabs extends StatelessWidget {
+                     onTap(index);
+                   },
+                   tabs: [
+-                    Tab(key: const Key('conversation_tab_summary'), height: 44, text: l10n.summary),
++                    // Clone local : la flèche à côté de « Résumé » ouvre le menu des résumés (actuels et gardés).
++                    // Toucher le mot change d'onglet ; toucher la flèche ouvre le menu, et une version choisie
++                    // s'affiche dans l'onglet Résumé, même depuis Transcription.
++                    Tab(
++                      key: const Key('conversation_tab_summary'),
++                      height: 44,
++                      child: Row(
++                        mainAxisSize: MainAxisSize.min,
++                        children: [
++                          Text(l10n.summary),
++                          SummaryVersionsArrow(onChosen: () {
++                            if (controller.index != 0) controller.animateTo(0);
++                            onTap(0);
++                          }),
++                        ],
++                      ),
++                    ),
+                     Tab(key: const Key('conversation_tab_transcript'), height: 44, text: l10n.transcript),
+                   ],
+                 ),
+diff --git a/app/lib/pages/conversation_detail/widgets/summarized_apps_sheet.dart b/app/lib/pages/conversation_detail/widgets/summarized_apps_sheet.dart
+index e6ad0a382b..6b948e7504 100644
+--- a/app/lib/pages/conversation_detail/widgets/summarized_apps_sheet.dart
++++ b/app/lib/pages/conversation_detail/widgets/summarized_apps_sheet.dart
+@@ -12,6 +12,7 @@ import 'package:omi/backend/schema/app.dart';
+ import 'package:omi/pages/apps/widgets/capability_apps_page.dart';
+ import 'package:omi/utils/l10n_extensions.dart';
+ import 'package:omi/pages/conversation_detail/conversation_detail_provider.dart';
++import 'package:omi/pages/conversation_detail/conversation_summary_selection.dart';
+ import 'package:omi/pages/conversation_detail/widgets/create_template_bottom_sheet.dart';
+ import 'package:omi/providers/app_provider.dart';
+ import 'package:omi/utils/logger.dart';
+@@ -39,7 +40,8 @@ class SummarizedAppsBottomSheet extends StatelessWidget {
+       height: MediaQuery.sizeOf(context).height * 0.7,
+       child: Consumer<ConversationDetailProvider>(
+         builder: (context, provider, _) {
+-          final currentSelection = provider.getSummarySelection();
++          // Le modèle de résumé actuel, pas une version choisie dans le menu des résumés.
++          final currentSelection = ConversationSummarySelection.select(provider.conversation);
+           final currentAppId = currentSelection.isApp ? currentSelection.appId : null;
+ 
+           PlatformManager.instance.analytics.summarizedAppSheetViewed(
+diff --git a/app/lib/pages/conversation_detail/widgets/summary_tab.dart b/app/lib/pages/conversation_detail/widgets/summary_tab.dart
+index b0cd350392..607f9c2c14 100644
+--- a/app/lib/pages/conversation_detail/widgets/summary_tab.dart
++++ b/app/lib/pages/conversation_detail/widgets/summary_tab.dart
+@@ -67,8 +67,10 @@ class _SummaryTabState extends State<SummaryTab> with AutomaticKeepAliveClientMi
+           // App-result summaries require result coordinates for trustworthy
+           // feedback provenance. Keep this prompt on the canonical overview /
+           // sections population until that wire is available.
+-          final hasSummaryFeedback =
+-              !discarded && !summarySelection.isApp && summarySelection.content.trim().isNotEmpty;
++          final hasSummaryFeedback = !discarded &&
++              !summarySelection.isApp &&
++              !summarySelection.isArchived &&
++              summarySelection.content.trim().isNotEmpty;
+           final hasRecordingFeedback = !discarded &&
+               conversation != null &&
+               conversation.status == ConversationStatus.completed &&
+diff --git a/app/lib/pages/conversation_detail/widgets/summary_versions_sheet.dart b/app/lib/pages/conversation_detail/widgets/summary_versions_sheet.dart
+new file mode 100644
+index 0000000000..8762acfb95
+--- /dev/null
++++ b/app/lib/pages/conversation_detail/widgets/summary_versions_sheet.dart
+@@ -0,0 +1,173 @@
++import 'package:flutter/material.dart';
++
++import 'package:provider/provider.dart';
++
++import 'package:omi/backend/schema/summary_version.dart';
++import 'package:omi/l10n/app_localizations.dart';
++import 'package:omi/pages/conversation_detail/conversation_detail_provider.dart';
++import 'package:omi/ui/ui.dart';
++import 'package:omi/utils/l10n_extensions.dart';
++import 'package:omi/widgets/extensions/string.dart';
++
++/// Le nom à montrer pour [choice] : notes d'Omi, ou le modèle de résumé (nom gardé, sinon catalogue de l'app).
++String summaryChoiceName(SummaryChoice choice, ConversationDetailProvider provider, AppLocalizations l10n) {
++  if (choice.kind == 'omi') return l10n.summaryVersionsOmiNotes;
++  final name = choice.appName ?? provider.findAppById(choice.appId)?.name;
++  return (name == null || name.trim().isEmpty) ? l10n.summaryVersionsUnknownApp : name.decodeString;
++}
++
++/// Quand : l'heure de production, ou « antérieur au … » pour un résumé d'avant l'historique.
++String? summaryChoiceWhen(SummaryChoice choice, OmiDateFormat dates, AppLocalizations l10n) {
++  final created = choice.createdAt;
++  if (created != null) return dates.timestamp(created.toLocal());
++  final recorded = choice.recordedAt;
++  if (recorded != null) return l10n.summaryVersionsBefore(dates.timestamp(recorded.toLocal()));
++  return null;
++}
++
++/// Ouvre le menu des résumés de la conversation ouverte. Rend la ligne choisie (null : menu fermé sans choix).
++Future<SummaryChoice?> showSummaryVersionsSheet(BuildContext context) {
++  return showOmiSheet<SummaryChoice>(
++    context: context,
++    title: context.l10n.summaryVersionsTitle,
++    padding: EdgeInsets.zero,
++    builder: (_) => const SummaryVersionsSheet(),
++  );
++}
++
++class SummaryVersionsSheet extends StatelessWidget {
++  const SummaryVersionsSheet({super.key});
++
++  @override
++  Widget build(BuildContext context) {
++    final dates = OmiDateFormat.of(context);
++    final l10n = context.l10n;
++    return Consumer<ConversationDetailProvider>(
++      builder: (context, provider, _) {
++        final choices = provider.summaryChoices();
++        final displayed = provider.displayedSummaryChoiceKey;
++        return ConstrainedBox(
++          constraints: BoxConstraints(maxHeight: MediaQuery.sizeOf(context).height * 0.7),
++          child: ListView.separated(
++            shrinkWrap: true,
++            itemCount: choices.length,
++            separatorBuilder: (_, __) =>
++                Divider(height: 1, thickness: 0.5, color: OmiColors.border, indent: 16, endIndent: 16),
++            itemBuilder: (context, index) {
++              final choice = choices[index];
++              final selected = choice.key == displayed;
++              final when = summaryChoiceWhen(choice, dates, l10n);
++              final details = [if (when != null) when, if (choice.isCurrent) l10n.summaryVersionsCurrent].join(' · ');
++              final preview = choice.content.replaceAll(RegExp(r'[#*_>`]'), '').replaceAll(RegExp(r'\s+'), ' ').trim();
++              return ListTile(
++                key: Key('summary_choice_${choice.key}'),
++                contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 2),
++                title: Text(
++                  summaryChoiceName(choice, provider, l10n),
++                  style: OmiType.callout.copyWith(fontWeight: selected ? FontWeight.w600 : FontWeight.w500),
++                ),
++                subtitle: Column(
++                  crossAxisAlignment: CrossAxisAlignment.start,
++                  children: [
++                    if (details.isNotEmpty)
++                      Text(details, style: OmiType.footnote.copyWith(color: OmiColors.textSecondary)),
++                    Text(
++                      preview,
++                      maxLines: 2,
++                      overflow: TextOverflow.ellipsis,
++                      style: OmiType.footnote.copyWith(color: OmiColors.textTertiary),
++                    ),
++                  ],
++                ),
++                trailing: selected ? Icon(Icons.check_rounded, color: OmiColors.textPrimary, size: 20) : null,
++                selected: selected,
++                onTap: () {
++                  OmiHaptics.selection();
++                  provider.selectSummaryChoice(choice);
++                  Navigator.of(context).pop(choice);
++                },
++              );
++            },
++          ),
++        );
++      },
++    );
++  }
++}
++
++/// La flèche à côté de « Résumé » : visible dès qu'il y a plus d'un résumé à lire, ou une seule version gardée
++/// quand le résumé actuel est vide (jamais de version inatteignable). [onChosen] : une ligne a été choisie dans le
++/// menu (l'onglet Résumé s'affiche alors, même si la flèche a été touchée depuis Transcription).
++class SummaryVersionsArrow extends StatelessWidget {
++  const SummaryVersionsArrow({super.key, this.onChosen});
++
++  final VoidCallback? onChosen;
++
++  /// Le menu a quelque chose à offrir que l'onglet ne montre pas déjà.
++  static bool hasChoices(List<SummaryChoice> choices) =>
++      choices.length > 1 || choices.any((choice) => !choice.isCurrent);
++
++  @override
++  Widget build(BuildContext context) {
++    final visible = context.select<ConversationDetailProvider, bool>(
++      (provider) => hasChoices(provider.summaryChoices()),
++    );
++    if (!visible) return const SizedBox.shrink();
++    return Semantics(
++      button: true,
++      label: context.l10n.summaryVersionsOpen,
++      excludeSemantics: true,
++      child: GestureDetector(
++        key: const Key('conversation_summary_versions'),
++        behavior: HitTestBehavior.opaque,
++        onTap: () async {
++          OmiHaptics.selection();
++          final chosen = await showSummaryVersionsSheet(context);
++          if (chosen != null) onChosen?.call();
++        },
++        child: const Padding(
++          padding: EdgeInsetsDirectional.only(start: 2, end: 6, top: 10, bottom: 10),
++          child: Icon(Icons.keyboard_arrow_down_rounded, size: 20),
++        ),
++      ),
++    );
++  }
++}
++
++/// Au-dessus d'un résumé choisi dans le menu : lequel, quand, et le retour à l'actuel.
++class SummaryVersionBanner extends StatelessWidget {
++  const SummaryVersionBanner({super.key, required this.choice});
++
++  final SummaryChoice choice;
++
++  @override
++  Widget build(BuildContext context) {
++    final provider = context.read<ConversationDetailProvider>();
++    final l10n = context.l10n;
++    final when = summaryChoiceWhen(choice, OmiDateFormat.of(context), l10n);
++    final label = [summaryChoiceName(choice, provider, l10n), if (when != null) when].join(' · ');
++    return Padding(
++      padding: const EdgeInsets.only(top: OmiSpacing.xs, bottom: OmiSpacing.sm),
++      child: Row(
++        crossAxisAlignment: CrossAxisAlignment.start,
++        children: [
++          Expanded(
++            child: Column(
++              crossAxisAlignment: CrossAxisAlignment.start,
++              children: [
++                Text(label, style: OmiType.footnote.copyWith(fontWeight: FontWeight.w600)),
++                if (!choice.isCurrent)
++                  Text(l10n.summaryVersionsReadOnly, style: OmiType.footnote.copyWith(color: OmiColors.textTertiary)),
++              ],
++            ),
++          ),
++          OmiButton.tertiary(
++            label: l10n.summaryVersionsBackToCurrent,
++            size: OmiButtonSize.compact,
++            onPressed: () => provider.clearSummaryChoice(),
++          ),
++        ],
++      ),
++    );
++  }
++}
+diff --git a/app/test/unit/summary_versions_test.dart b/app/test/unit/summary_versions_test.dart
+new file mode 100644
+index 0000000000..817af0eabf
+--- /dev/null
++++ b/app/test/unit/summary_versions_test.dart
+@@ -0,0 +1,136 @@
++// Clone local : menu des résumés (actuels + versions gardées par le serveur dans summary_history).
++import 'package:flutter_test/flutter_test.dart';
++
++import 'package:omi/backend/schema/summary_version.dart';
++
++SummaryVersion version(
++  String id,
++  String kind,
++  String content, {
++  String? appId,
++  String? appName,
++  DateTime? createdAt,
++  required DateTime recordedAt,
++}) {
++  return SummaryVersion(
++    id: id,
++    kind: kind,
++    content: content,
++    appId: appId,
++    appName: appName,
++    createdAt: createdAt,
++    recordedAt: recordedAt,
++  );
++}
++
++void main() {
++  final t1 = DateTime.utc(2026, 10, 9, 8);
++  final t2 = DateTime.utc(2026, 10, 9, 9);
++  final t3 = DateTime.utc(2026, 10, 9, 10);
++
++  group('SummaryVersion.parseList', () {
++    test('reads the server shape and skips unreadable entries', () {
++      final parsed = SummaryVersion.parseList([
++        {
++          'id': 'a',
++          'kind': 'app',
++          'app_id': 'x',
++          'app_name': 'Modèle X',
++          'content': 'Résumé',
++          'created_at': '2026-10-09T08:00:00Z',
++          'recorded_at': '2026-10-09T08:00:00Z',
++        },
++        {'id': 'b', 'kind': 'omi', 'content': 'Notes', 'created_at': null, 'recorded_at': '2026-10-09T09:00:00Z'},
++        {'id': 'c', 'kind': 'autre', 'content': 'x', 'recorded_at': '2026-10-09T09:00:00Z'},
++        {'id': 'd', 'kind': 'app', 'content': 'sans date'},
++        'abîmé',
++      ]);
++      expect(parsed.map((v) => v.id), ['a', 'b']);
++      expect(parsed.first.appName, 'Modèle X');
++      expect(parsed.first.createdAt, t1);
++      expect(parsed.last.createdAt, isNull);
++      expect(SummaryVersion.parseList(null), isEmpty);
++      expect(SummaryVersion.parseList({'id': 'a'}), isEmpty);
++    });
++
++    test('round-trips through toJson (local cache)', () {
++      final original = version('a', 'app', 'R', appId: 'x', createdAt: t1, recordedAt: t2);
++      final again = SummaryVersion.tryParse(original.toJson())!;
++      expect([again.id, again.kind, again.appId, again.content], ['a', 'app', 'x', 'R']);
++      expect(again.createdAt, t1);
++      expect(again.recordedAt, t2);
++    });
++  });
++
++  group('buildSummaryChoices', () {
++    test('current app result first, then Omi notes, then kept versions newest first', () {
++      final choices = buildSummaryChoices(
++        currentAppResults: [(appId: 'b', content: 'Résumé B')],
++        currentOmiNotes: 'Notes',
++        currentTitle: 'Courses',
++        history: [
++          version('1', 'app', 'Résumé A', appId: 'a', recordedAt: t1),
++          version('2', 'app', 'Résumé C', appId: 'c', createdAt: t2, recordedAt: t2),
++          version('3', 'app', 'Résumé B', appId: 'b', appName: 'Modèle B', createdAt: t3, recordedAt: t3),
++        ],
++      );
++      expect(choices.map((c) => c.key), ['current:app:0', 'current:omi', 'version:2', 'version:1']);
++      // Le résumé actuel garde son heure de production et son nom grâce à l'historique.
++      expect(choices.first.createdAt, t3);
++      expect(choices.first.appName, 'Modèle B');
++      expect(choices.first.isCurrent, isTrue);
++      expect(choices[2].isCurrent, isFalse);
++    });
++
++    test('an archived summary and its replacement recorded together keep their order', () {
++      final choices = buildSummaryChoices(
++        currentAppResults: const [],
++        currentOmiNotes: 'Notes',
++        history: [
++          version('old', 'app', 'Ancien', appId: 'a', recordedAt: t2),
++          version('new', 'app', 'Nouveau', appId: 'b', createdAt: t2, recordedAt: t2),
++        ],
++      );
++      expect(choices.map((c) => c.key), ['current:omi', 'version:new', 'version:old']);
++    });
++
++    test('a single summary gives a single choice (no arrow)', () {
++      final choices = buildSummaryChoices(
++        currentAppResults: [(appId: 'a', content: '  ')],
++        currentOmiNotes: 'Notes',
++        history: [version('1', 'omi', ' Notes ', createdAt: t1, recordedAt: t1)],
++      );
++      expect(choices.map((c) => c.key), ['current:omi']);
++      expect(choices.single.createdAt, t1);
++    });
++
++    test('same text from another model stays a separate choice', () {
++      final choices = buildSummaryChoices(
++        currentAppResults: [(appId: 'a', content: 'Pareil')],
++        currentOmiNotes: '',
++        history: [version('1', 'app', 'Pareil', appId: 'b', recordedAt: t1)],
++      );
++      expect(choices.map((c) => c.key), ['current:app:0', 'version:1']);
++    });
++  });
++
++  group('withSummaryHistory (recherche)', () {
++    final history = [
++      {'id': 'a', 'kind': 'omi', 'content': 'Notes', 'recorded_at': '2026-10-09T08:00:00Z'}
++    ];
++
++    test('takes the kept summaries back from the raw search row of the same conversation', () {
++      final json = withSummaryHistory({'id': 'c1', 'title': 'x'}, {'id': 'c1', 'summary_history': history});
++      expect(json['summary_history'], history);
++      expect(json['title'], 'x');
++    });
++
++    test('ignores another conversation, a missing history and an unreadable row', () {
++      final json = {'id': 'c1'};
++      expect(withSummaryHistory(json, {'id': 'c2', 'summary_history': history}), same(json));
++      expect(withSummaryHistory(json, {'id': 'c1'}), same(json));
++      expect(withSummaryHistory(json, {'id': 'c1', 'summary_history': 'broken'}), same(json));
++      expect(withSummaryHistory(json, null), same(json));
++    });
++  });
++}
+diff --git a/app/test/widgets/summary_versions_tab_test.dart b/app/test/widgets/summary_versions_tab_test.dart
+new file mode 100644
+index 0000000000..a822126155
+--- /dev/null
++++ b/app/test/widgets/summary_versions_tab_test.dart
+@@ -0,0 +1,159 @@
++// Clone local : choisir un résumé gardé depuis l'onglet Transcription affiche l'onglet Résumé (0007).
++import 'package:flutter/material.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:provider/provider.dart';
++import 'package:shared_preferences/shared_preferences.dart';
++
++import 'package:omi/backend/preferences.dart';
++import 'package:omi/backend/schema/conversation.dart';
++import 'package:omi/backend/schema/structured.dart';
++import 'package:omi/backend/schema/summary_version.dart';
++import 'package:omi/l10n/app_localizations.dart';
++import 'package:omi/pages/conversation_detail/conversation_detail_provider.dart';
++import 'package:omi/pages/conversation_detail/widgets/conversation_detail_tabs.dart';
++import 'package:omi/providers/conversation_provider.dart';
++
++ServerConversation _conversation({String overview = 'Les notes d’Omi actuelles.'}) => ServerConversation(
++      id: 'conv-1',
++      createdAt: DateTime(2026, 10, 9, 9).toUtc(),
++      structured: Structured('Point avec Arnaud', overview),
++      summaryHistory: [
++        SummaryVersion(
++          id: 'v1',
++          kind: 'app',
++          appId: 'meeting-notes',
++          appName: 'Compte rendu de réunion',
++          content: 'Le compte rendu demandé hier.',
++          createdAt: DateTime.utc(2026, 10, 8, 18),
++          recordedAt: DateTime.utc(2026, 10, 9, 8),
++        ),
++      ],
++    );
++
++class _Host extends StatefulWidget {
++  const _Host({required this.taps});
++  final List<int> taps;
++
++  @override
++  State<_Host> createState() => _HostState();
++}
++
++class _HostState extends State<_Host> with SingleTickerProviderStateMixin {
++  late final TabController controller = TabController(length: 2, vsync: this, initialIndex: 1);
++
++  @override
++  void dispose() {
++    controller.dispose();
++    super.dispose();
++  }
++
++  @override
++  Widget build(BuildContext context) => Scaffold(
++        body: Column(children: [
++          ConversationDetailTabs(controller: controller, onTap: widget.taps.add),
++          Expanded(
++            child: TabBarView(controller: controller, children: const [Text('summary page'), Text('transcript page')]),
++          ),
++        ]),
++      );
++}
++
++void main() {
++  setUp(() async {
++    SharedPreferences.setMockInitialValues({});
++    await SharedPreferencesUtil.init();
++  });
++
++  Future<(ConversationDetailProvider, List<int>)> pump(WidgetTester tester,
++      {Locale locale = const Locale('en'), ServerConversation? conversation}) async {
++    final provider = ConversationDetailProvider();
++    addTearDown(provider.dispose);
++    conversation ??= _conversation();
++    provider.selectedDate = conversationLocalDayKey(conversation.createdAt);
++    provider.setCachedConversation(conversation);
++    final taps = <int>[];
++    await tester.pumpWidget(ChangeNotifierProvider<ConversationDetailProvider>.value(
++      value: provider,
++      child: MaterialApp(
++        localizationsDelegates: AppLocalizations.localizationsDelegates,
++        supportedLocales: AppLocalizations.supportedLocales,
++        locale: locale,
++        home: _Host(taps: taps),
++      ),
++    ));
++    await tester.pumpAndSettle();
++    return (provider, taps);
++  }
++
++  TabController controllerOf(WidgetTester tester) => tester.state<_HostState>(find.byType(_Host)).controller;
++
++  testWidgets('choosing a kept summary from the Transcript tab shows it in the Summary tab', (tester) async {
++    final (provider, taps) = await pump(tester);
++    expect(find.text('transcript page'), findsOneWidget);
++    await tester.tap(find.byKey(const Key('conversation_summary_versions')));
++    await tester.pumpAndSettle();
++    expect(find.text('Summaries'), findsOneWidget);
++    await tester.tap(find.byKey(Key('summary_choice_${historyChoiceKey('v1')}')));
++    await tester.pumpAndSettle();
++    expect(controllerOf(tester).index, 0);
++    expect(taps, [0], reason: 'counts as an explicit tab choice, so no automatic switch overrides it');
++    expect(find.text('summary page'), findsOneWidget);
++    expect(provider.getSummarySelection().isArchived, isTrue);
++    expect(provider.getSummarySelection().content, 'Le compte rendu demandé hier.');
++  });
++
++  testWidgets('closing the menu without a choice stays on Transcript', (tester) async {
++    final (provider, taps) = await pump(tester);
++    await tester.tap(find.byKey(const Key('conversation_summary_versions')));
++    await tester.pumpAndSettle();
++    await tester.tapAt(const Offset(5, 5));
++    await tester.pumpAndSettle();
++    expect(controllerOf(tester).index, 1);
++    expect(taps, isEmpty);
++    expect(provider.getSummarySelection().isArchived, isFalse);
++  });
++
++  testWidgets('the menu speaks French', (tester) async {
++    await pump(tester, locale: const Locale('fr'));
++    expect(find.byWidgetPredicate((w) => w is Semantics && w.properties.label == 'Choisir un résumé'), findsOneWidget);
++    await tester.tap(find.byKey(const Key('conversation_summary_versions')));
++    await tester.pumpAndSettle();
++    expect(find.text('Résumés'), findsOneWidget);
++    expect(find.text('Notes d’Omi'), findsOneWidget);
++    expect(find.text('Compte rendu de réunion'), findsOneWidget);
++  });
++
++  testWidgets('an empty current summary with a single kept version still offers the arrow (never unreachable)',
++      (tester) async {
++    final (provider, _) = await pump(tester, conversation: _conversation(overview: ''));
++    expect(provider.summaryChoices(), hasLength(1));
++    expect(find.byKey(const Key('conversation_summary_versions')), findsOneWidget);
++    await tester.tap(find.byKey(const Key('conversation_summary_versions')));
++    await tester.pumpAndSettle();
++    await tester.tap(find.byKey(Key('summary_choice_${historyChoiceKey('v1')}')));
++    await tester.pumpAndSettle();
++    expect(provider.getSummarySelection().content, 'Le compte rendu demandé hier.');
++  });
++
++  testWidgets('a single current summary and nothing kept: no arrow', (tester) async {
++    final provider = ConversationDetailProvider();
++    addTearDown(provider.dispose);
++    final conversation = ServerConversation(
++        id: 'conv-2',
++        createdAt: DateTime(2026, 10, 9, 9).toUtc(),
++        structured: Structured('Seul', 'Les notes.'));
++    provider.selectedDate = conversationLocalDayKey(conversation.createdAt);
++    provider.setCachedConversation(conversation);
++    final taps = <int>[];
++    await tester.pumpWidget(ChangeNotifierProvider<ConversationDetailProvider>.value(
++      value: provider,
++      child: MaterialApp(
++        localizationsDelegates: AppLocalizations.localizationsDelegates,
++        supportedLocales: AppLocalizations.supportedLocales,
++        home: _Host(taps: taps),
++      ),
++    ));
++    await tester.pumpAndSettle();
++    expect(find.byKey(const Key('conversation_summary_versions')), findsNothing);
++  });
++}
+-- 
+2.43.0
+

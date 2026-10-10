@@ -1,0 +1,1740 @@
+From 99736ec2aae535dfeb4bb45265a858b56fd4d055 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 9 Oct 2026 15:01:12 +0000
+Subject: [PATCH] =?UTF-8?q?Chat=20:=20discussions=20s=C3=A9par=C3=A9es=20(?=
+ =?UTF-8?q?Nouvelle=20discussion,=20Discussions=20pass=C3=A9es,=20reprise,?=
+ =?UTF-8?q?=20une=20discussion=20par=20conversation)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Le chat de l'iPhone n'avait qu'un fil. L'en-tête gagne deux boutons, « Nouvelle discussion » et
+« Discussions passées » (Fermer à gauche, poignée toujours centrée). La liste montre les discussions
+par jour, la plus récente en haut ; toucher une ligne la rouvre, un appui long la supprime après
+confirmation. Une discussion est créée sur le serveur au premier envoi seulement.
+
+Après un redémarrage, le chat rouvre la discussion qui était ouverte (lastChatSessionId, rangé par
+compte) et non la dernière créée ; supprimée ailleurs, il revient au fil courant.
+
+« Demander à Omi » depuis une conversation ne continue plus la discussion ouverte (le sujet d'Arnaud
+tombait dans celle de la psy) : il reprend la discussion déjà utilisée pour cette conversation, ou en
+ouvre une nouvelle. Le lien conversation → discussion est noté à chaque envoi avec ce contexte, et
+appris du page_context que le serveur du clone garde sur les messages de Mike (utile après une
+réinstallation). Une nouvelle discussion laissée sans message rend la discussion ouverte à la
+fermeture. Pendant une réponse en cours, le changement est refusé avec « Attendez la fin de la
+réponse en cours ».
+
+Version allégée (critique §4) : l'ancien fil unique est rangé côté serveur dans une « Discussion
+d'origine » par la migration du clone, l'app n'a donc ni épinglage local, ni lecture seule, ni
+lecture de /v2/desktop/messages ; le serveur remonte la discussion à chaque message (updated_at),
+l'app ne la « touche » plus. Seuls app_en.arb et app_fr.arb changent : les fichiers
+app_localizations*.dart sont régénérés par flutter pub get (vérifié avec Flutter 3.44.5, la version
+de la recette).
+
+Corrections de la relecture contradictoire (2026-10-10) :
+- « Demander à Omi » pendant une réponse en cours : la discussion de la conversation s'ouvre dès la fin
+  de la réponse, au lieu de rester sur la discussion ouverte avec la puce « À propos de » d'une autre
+  conversation. Un envoi depuis une autre discussion ne remplace plus le lien conversation → discussion
+  déjà connu (seul l'oubli d'une discussion supprimée le défait).
+- Pendant la lecture de la discussion de la conversation, la discussion ouverte et sa relance sont
+  masquées (chargement) : rien ne part dans la mauvaise discussion ; une lecture en échec la remontre.
+  Un choix fait entre-temps (Nouvelle discussion, Discussions passées, un envoi) l'emporte.
+- Changer de discussion depuis l'en-tête (Nouvelle discussion, Discussions passées) retire la puce
+  « À propos de ».
+- La discussion reprise au démarrage n'est plus re-titrée à chaque lancement (« Discussion d'origine »
+  garde son nom).
+- Supprimer la « Discussion d'origine » (reconnue par son identifiant fixe ou son titre) : la
+  confirmation dit que tout l'ancien fil du chat (N messages) sera supprimé définitivement.
+
+Tests : test/providers/chat_history_state_test.dart, test/widgets/chat_continuity_navigation_test.dart,
+test/widgets/chat_discussion_switch_test.dart (scénarios de la relecture, en échec avant les corrections).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ app/lib/backend/http/api/chat_sessions.dart   |  11 +
+ app/lib/backend/preferences.dart              |  63 ++++
+ app/lib/backend/schema/message.dart           |  28 +-
+ app/lib/l10n/app_en.arb                       |  21 ++
+ app/lib/l10n/app_fr.arb                       |   4 +
+ app/lib/pages/chat/README.md                  |  30 +-
+ app/lib/pages/chat/page.dart                  |  46 ++-
+ app/lib/pages/chat/widgets/chat_chrome.dart   |  47 ++-
+ .../chat/widgets/chat_history_sheet.dart      | 292 ++++++++++++++++
+ app/lib/providers/chat_history_state.dart     |  96 ++++++
+ app/lib/providers/message_provider.dart       |   1 +
+ .../providers/chat_history_state_test.dart    | 299 ++++++++++++++++-
+ .../chat_continuity_navigation_test.dart      |  83 ++++-
+ .../widgets/chat_discussion_switch_test.dart  | 316 ++++++++++++++++++
+ 14 files changed, 1312 insertions(+), 25 deletions(-)
+ create mode 100644 app/lib/pages/chat/widgets/chat_history_sheet.dart
+ create mode 100644 app/test/widgets/chat_discussion_switch_test.dart
+
+diff --git a/app/lib/backend/http/api/chat_sessions.dart b/app/lib/backend/http/api/chat_sessions.dart
+index 9828099600..248cc31f24 100644
+--- a/app/lib/backend/http/api/chat_sessions.dart
++++ b/app/lib/backend/http/api/chat_sessions.dart
+@@ -56,6 +56,17 @@ class ChatSessionsApi {
+         decode: (_) {},
+       );
+ 
++  /// One session by id. A session deleted elsewhere answers 404 ([ApiProblemKind.notFound]).
++  Future<ApiResult<ChatSessionSummary>> get(String id) => executeApi(
++        request: ApiRequest(url: _url('v2/chat-sessions/${Uri.encodeComponent(id)}'), method: 'GET'),
++        send: send,
++        decode: (body) {
++          final row = jsonDecode(body);
++          if (row is! Map<String, dynamic>) throw const FormatException('Invalid chat');
++          return ChatSessionSummary.fromJson(row);
++        },
++      );
++
+   /// Reads the explicit session even when it is not the server-current conversation.
+   Future<ApiResult<List<ServerMessage>>> messages(String id, {int offset = 0, int limit = 100}) => _rows('v2/messages',
+       {'chat_session_id': id, 'offset': '$offset', 'limit': '$limit'}, ServerMessage.fromGeneratedWireJson);
+diff --git a/app/lib/backend/preferences.dart b/app/lib/backend/preferences.dart
+index 2461ecec51..c87e0d03d1 100644
+--- a/app/lib/backend/preferences.dart
++++ b/app/lib/backend/preferences.dart
+@@ -1328,6 +1328,69 @@ class SharedPreferencesUtil {
+ 
+   String get fullName => '$givenName $familyName'.trim();
+ 
++  /// The discussion the chat reopens on after a restart; empty follows the server-current thread.
++  String get lastChatSessionId => _ownedChatValue('lastChatSessionId');
++
++  set lastChatSessionId(String value) => _saveOwnedChatValue('lastChatSessionId', value);
++
++  /// The discussion last used to ask about each conversation (conversation id → session id), so
++  /// Ask Omi from a conversation resumes it instead of the open chat. Bounded, newest kept.
++  static const int _chatsByConversationMax = 200;
++
++  String chatForConversation(String conversationId) => _chatsByConversation()[conversationId] ?? '';
++
++  /// Records [sessionId] for [conversationId]; an empty [sessionId] forgets the conversation.
++  /// [onlyIfUnknown] keeps an existing entry (used when learning from older messages).
++  void setChatForConversation(String conversationId, String sessionId, {bool onlyIfUnknown = false}) {
++    if (conversationId.isEmpty) return;
++    final map = _chatsByConversation();
++    if (onlyIfUnknown && map.containsKey(conversationId)) return;
++    if (map[conversationId] == sessionId) return;
++    map.remove(conversationId);
++    if (sessionId.isNotEmpty) map[conversationId] = sessionId;
++    while (map.length > _chatsByConversationMax) {
++      map.remove(map.keys.first);
++    }
++    _saveOwnedChatValue('chatsByConversation', jsonEncode(map));
++  }
++
++  /// Forgets every conversation that pointed to [sessionId] (a deleted discussion).
++  void forgetChatForConversations(String sessionId) {
++    final map = _chatsByConversation();
++    final before = map.length;
++    map.removeWhere((_, value) => value == sessionId);
++    if (map.length != before) _saveOwnedChatValue('chatsByConversation', jsonEncode(map));
++  }
++
++  Map<String, String> _chatsByConversation() {
++    final raw = _ownedChatValue('chatsByConversation');
++    if (raw.isEmpty) return <String, String>{};
++    try {
++      final decoded = jsonDecode(raw);
++      if (decoded is! Map) return <String, String>{};
++      return {
++        for (final entry in decoded.entries)
++          if (entry.key is String && entry.value is String) entry.key as String: entry.value as String,
++      };
++    } catch (_) {
++      return <String, String>{};
++    }
++  }
++
++  // Chat thread choices belong to one account; another sign-in never inherits them.
++  String _ownedChatValue(String key) {
++    final raw = getString(key);
++    final owner = uid;
++    if (owner.isEmpty || !raw.startsWith('$owner|')) return '';
++    return raw.substring(owner.length + 1);
++  }
++
++  void _saveOwnedChatValue(String key, String value) {
++    final owner = uid;
++    if (owner.isEmpty) return;
++    saveString(key, '$owner|$value');
++  }
++
+   /// Clears persisted user identity and server-backed display caches while
+   /// preserving device, onboarding, permissions, and offline recording state.
+   void clearUserDisplayCache() {
+diff --git a/app/lib/backend/schema/message.dart b/app/lib/backend/schema/message.dart
+index 91fc98e4f7..b474c51d0e 100644
+--- a/app/lib/backend/schema/message.dart
++++ b/app/lib/backend/schema/message.dart
+@@ -225,6 +225,26 @@ class ChartData {
+   Map<String, dynamic> toJson() => toGenerated().toJson();
+ }
+ 
++/// Clone local : what a human message was about (`page_context` on the clone's server).
++class MessagePageContext {
++  const MessagePageContext({required this.type, this.id});
++
++  /// `conversation`, `task`, `memory` or `recap`.
++  final String type;
++  final String? id;
++
++  /// Null for a missing or unreadable context: it never hides the message.
++  static MessagePageContext? tryParse(Object? json) {
++    if (json is! Map) return null;
++    final type = json['type'];
++    if (type is! String || type.isEmpty) return null;
++    final id = json['id'];
++    return MessagePageContext(type: type, id: id is String && id.isNotEmpty ? id : null);
++  }
++
++  Map<String, dynamic> toJson() => {'type': type, 'id': id};
++}
++
+ class ServerMessage {
+   String id;
+   DateTime createdAt;
+@@ -233,6 +253,10 @@ class ServerMessage {
+   MessageType type;
+ 
+   String? appId;
++
++  /// Clone local : the « About » context the human message was sent with (`page_context`, saved by
++  /// the clone's server: type and id only). Null without context and on Omi's replies.
++  MessagePageContext? pageContext;
+   String? messageSource;
+   String? metadata;
+   String? wireType;
+@@ -301,7 +325,8 @@ class ServerMessage {
+       fromIntegration: fromIntegration,
+       contentBlocks: _decodeContentBlocks(json['content_blocks'], generated.metadata),
+       evidenceEnvelope: _decodeEvidenceEnvelope(json, generated.metadata),
+-    );
++      // Read apart: page_context is the clone's own field, absent from the generated schema.
++    )..pageContext = MessagePageContext.tryParse(json['page_context']);
+   }
+ 
+   static ServerMessage fromResponseJson(Map<String, dynamic> json) {
+@@ -398,6 +423,7 @@ class ServerMessage {
+       if (messageSource != null) 'message_source': messageSource,
+       if (metadata != null) 'metadata': metadata,
+       'plugin_id': appId,
++      if (pageContext != null) 'page_context': pageContext!.toJson(),
+       'from_integration': fromIntegration,
+       'memories': memories.map((m) => m.toJson()).toList(),
+       'files': files.map((m) => m.toJson()).toList(),
+diff --git a/app/lib/l10n/app_en.arb b/app/lib/l10n/app_en.arb
+index 9576dab771..5a0d554b40 100644
+--- a/app/lib/l10n/app_en.arb
++++ b/app/lib/l10n/app_en.arb
+@@ -13821,6 +13821,27 @@
+     "@deleteChat": {
+         "description": "Ask: the confirm button"
+     },
++    "deleteOriginChatQuestion": "Delete the original chat?",
++    "@deleteOriginChatQuestion": {
++        "description": "Past chats: confirm title before deleting the « Discussion d'origine », the former single chat thread filed by the migration"
++    },
++    "deleteOriginChatMessage": "{count, plural, =0{Your whole former chat thread will be deleted for good. This can’t be undone.} =1{Your whole former chat thread (1 message) will be deleted for good. This can’t be undone.} other{Your whole former chat thread ({count} messages) will be deleted for good. This can’t be undone.}}",
++    "@deleteOriginChatMessage": {
++        "description": "Past chats: what deleting the original chat removes (the whole former single thread, with its message count)",
++        "placeholders": {
++            "count": {
++                "type": "int"
++            }
++        }
++    },
++    "untitledChat": "Untitled chat",
++    "@untitledChat": {
++        "description": "Chat history: a chat the server has not named yet"
++    },
++    "chatSwitchBusy": "Wait for the current reply to finish.",
++    "@chatSwitchBusy": {
++        "description": "Chat: switching chats while a reply or deletion is still running"
++    },
+     "appsAskWith": "Ask Omi with",
+     "@appsAskWith": {
+         "description": "Apps: group of chat apps"
+diff --git a/app/lib/l10n/app_fr.arb b/app/lib/l10n/app_fr.arb
+index 7a3b55f841..02a27b019b 100644
+--- a/app/lib/l10n/app_fr.arb
++++ b/app/lib/l10n/app_fr.arb
+@@ -3687,6 +3687,10 @@
+     "deleteChatQuestion": "Supprimer cette discussion ?",
+     "deleteChatMessage": "Elle disparaît définitivement des discussions passées.",
+     "deleteChat": "Supprimer la discussion",
++    "deleteOriginChatQuestion": "Supprimer la Discussion d’origine ?",
++    "deleteOriginChatMessage": "{count, plural, =0{Tout votre ancien fil du chat sera supprimé définitivement. C’est irréversible.} =1{Tout votre ancien fil du chat (1 message) sera supprimé définitivement. C’est irréversible.} other{Tout votre ancien fil du chat ({count} messages) sera supprimé définitivement. C’est irréversible.}}",
++    "untitledChat": "Discussion sans titre",
++    "chatSwitchBusy": "Attendez la fin de la réponse en cours.",
+     "appsAskWith": "Demander à Omi avec",
+     "conversationsTodayCount": "{count, plural, =0{Aucune conversation aujourd’hui.} =1{1 conversation aujourd’hui.} other{{count} conversations aujourd’hui.}}",
+     "meetingScreenshotsTitle": "Ce qui était à l'écran",
+diff --git a/app/lib/pages/chat/README.md b/app/lib/pages/chat/README.md
+index 3191c2b870..d01e6ad6a0 100644
+--- a/app/lib/pages/chat/README.md
++++ b/app/lib/pages/chat/README.md
+@@ -14,15 +14,33 @@ instance or bottom navigation bar.
+ | `widgets/chat_entrance.dart` | One disposable entrance timeline per popup. |
+ | `widgets/chat_starters.dart` | Localized greeting and editable question chips. |
+ | `widgets/chat_chrome.dart` | Close, centered dismissal handle, selected app and loading feedback. |
+-| `providers/chat_history_state.dart` | Existing current-thread loading and cache; shared session compatibility. |
++| `widgets/chat_history_sheet.dart` | Past chats: new chat, saved chats by day, delete. |
++| `providers/chat_history_state.dart` | Open-thread loading and cache, remembered chat, chat per conversation. |
+ 
+ ## Thread and draft rules
+ 
+-All mobile entry points resume the current conversation. Opening or closing the popup never
+-creates a chat session, clears messages or changes an active send's target. An empty provider
+-loads the server-current transcript through the existing current-chat path and cache.
+-Typed questions and composer microphone transcripts continue that same conversation.
+-The mobile popup has no Past chats or New Chat controls.
++Opening or closing the popup never creates a chat session, clears messages or changes an active
++send's target. An empty provider reloads the open chat: the discussion that was open before a
++restart (`lastChatSessionId`, owner-scoped) or, when there is none, the server-current transcript
++through the existing current-chat path and cache. Typed questions and composer microphone
++transcripts continue the open chat.
++
++The header has New chat and Past chats on the right, balanced by Close on the left so the dismissal
++handle stays centered. New chat only clears the local projection; the server session is created on
++the first send (`prepareChatSession`). Past chats (`widgets/chat_history_sheet.dart`) lists saved
++chats newest first by day, opens one explicitly by id, starts a new one, and deletes one after
++confirmation (long press). The clone's server moves a chat up the list when a message is added to
++it (`updated_at`), so the app never touches a session for ordering.
++
++Ask Omi from a conversation (`initialChatContext` of type `conversation`) never continues whatever
++chat is open: it resumes the chat last used about that conversation (`chatForConversation`,
++owner-scoped, learned from each send with that context and from the `page_context` the clone's
++server keeps on human messages) or starts a new one. A new chat left without a message is dropped
++when the popup closes, so the next opening resumes the open chat again.
++
++The single thread that existed before separate chats is moved server-side into a "Discussion
++d'origine" session by the clone's migration (`omi-local/migrer-chat.py`); the app shows it like any
++other saved chat.
+ 
+ Existing server sessions and stored messages remain intact. Shared session APIs stay available
+ for their other consumers; this change does not merge or delete previously saved sessions.
+diff --git a/app/lib/pages/chat/page.dart b/app/lib/pages/chat/page.dart
+index b66b69742e..87809fafc6 100644
+--- a/app/lib/pages/chat/page.dart
++++ b/app/lib/pages/chat/page.dart
+@@ -123,15 +123,27 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin,
+       provider.readAloud.active = true;
+       // Listen for quota exceeded from any send path (text or voice)
+       provider.addListener(_onMessageProviderChanged);
+-      // Every entry resumes the current conversation, including while a reply or voice send is active.
+-      if (provider.messages.isEmpty && !provider.isFreshChat) {
++      if (widget.initialChatContext != null) {
++        setState(() => _chatScope = widget.initialChatContext);
++      }
++      // Ask Omi from a conversation opens that conversation's own discussion (or a new one); every
++      // other entry resumes the open chat, including while a reply or voice send is active.
++      final conversationId = _askedConversationId;
++      if (conversationId != null) {
++        _openedForConversation = true;
++        if (!provider.canSwitchChat) {
++          OmiFeedback.info(context, context.l10n.chatSwitchBusy);
++          // Opened as soon as the running reply ends (_onMessageProviderChanged), never left on the open chat.
++          _pendingConversationChat = conversationId;
++        } else if (!await provider.openChatForConversation(conversationId) && mounted) {
++          OmiFeedback.error(context, context.l10n.somethingWentWrong);
++        }
++        if (!mounted) return;
++      } else if (provider.messages.isEmpty && !provider.isFreshChat) {
+         provider.refreshMessages();
+       }
+       // Fetch enabled chat apps
+       provider.fetchChatApps();
+-      if (widget.initialChatContext != null) {
+-        setState(() => _chatScope = widget.initialChatContext);
+-      }
+       // Sync Apple Health data if connected (ensures fresh data for health queries)
+       _syncAppleHealthIfConnected();
+       // Auto-start voice recording if requested (e.g., from home chat bar mic button)
+@@ -177,6 +189,16 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin,
+ 
+   void _onMessageProviderChanged() {
+     final provider = context.read<MessageProvider>();
++    final pending = _pendingConversationChat;
++    if (mounted && pending != null && provider.canSwitchChat) {
++      _pendingConversationChat = null;
++      Future.microtask(() async {
++        if (!mounted) return;
++        if (!await provider.openChatForConversation(pending) && mounted) {
++          OmiFeedback.error(context, context.l10n.somethingWentWrong);
++        }
++      });
++    }
+     if (mounted && provider.isChatQuotaExceeded && !_quotaSheetShown) {
+       _quotaSheetShown = true;
+       _showPlansSheetOnQuotaExceeded();
+@@ -207,11 +229,23 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin,
+     readAloud.active = state == AppLifecycleState.resumed;
+   }
+ 
++  /// The conversation this chat was opened about (Ask Omi from a conversation), if any.
++  String? get _askedConversationId {
++    final scope = widget.initialChatContext;
++    final id = scope?.id;
++    return scope?.type == 'conversation' && id != null && id.isNotEmpty ? id : null;
++  }
++
++  bool _openedForConversation = false;
++  String? _pendingConversationChat;
++
+   @override
+   void dispose() {
+     WidgetsBinding.instance.removeObserver(this);
+     _messageProvider?.readAloud.active = false;
+     _messageProvider?.removeListener(_onMessageProviderChanged);
++    // A new discussion about a conversation that got no message is not kept open for the next chat.
++    if (_openedForConversation) _messageProvider?.leaveUnusedFreshChat();
+     _cancelOwnedLifecycleTimers();
+     _latestJumpIdleTimer?.cancel();
+     _cancelPendingScrolls();
+@@ -270,7 +304,7 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin,
+             child: Scaffold(
+               key: scaffoldKey,
+               backgroundColor: Colors.transparent,
+-              appBar: ChatHeader(provider: provider),
++              appBar: ChatHeader(provider: provider, onChatSwitched: () => setState(() => _chatScope = null)),
+               endDrawer: ChatAppsDrawer(
+                 onSelectApp: (id) => _handleAppSelection(id, context.read<AppProvider>()),
+                 onEnableApps: _navigateToChatAppsPage,
+diff --git a/app/lib/pages/chat/widgets/chat_chrome.dart b/app/lib/pages/chat/widgets/chat_chrome.dart
+index e952c19339..17664d250f 100644
+--- a/app/lib/pages/chat/widgets/chat_chrome.dart
++++ b/app/lib/pages/chat/widgets/chat_chrome.dart
+@@ -4,14 +4,22 @@ import 'package:collection/collection.dart';
+ import 'package:provider/provider.dart';
+ import 'package:omi/pages/chat/chat_route.dart';
+ import 'package:omi/pages/chat/widgets/chat_apps_drawer.dart';
++import 'package:omi/pages/chat/widgets/chat_history_sheet.dart';
+ import 'package:omi/providers/app_provider.dart';
+ import 'package:omi/providers/message_provider.dart';
+ import 'package:omi/ui/ui.dart';
+ import 'package:omi/utils/l10n_extensions.dart';
+ 
++/// Width of each side of the header: close on the left, New chat and Past chats on the right. Both
++/// sides are equal so the dismissal handle stays centered.
++const double _kChatHeaderSideWidth = 2 * kOmiMinTapTarget + 2 * OmiSpacing.xxs;
++
+ class ChatHeader extends StatelessWidget implements PreferredSizeWidget {
+-  const ChatHeader({super.key, required this.provider});
++  const ChatHeader({super.key, required this.provider, this.onChatSwitched});
+   final MessageProvider provider;
++
++  /// Another chat (or a new one) was opened from the header: the page drops its « About » scope.
++  final VoidCallback? onChatSwitched;
+   @override
+   Size get preferredSize => Size.fromHeight(kToolbarHeight + (provider.isLoadingMessages ? 32 : 0));
+ 
+@@ -25,7 +33,11 @@ class ChatHeader extends StatelessWidget implements PreferredSizeWidget {
+       backgroundColor: Colors.transparent,
+       surfaceTintColor: Colors.transparent,
+       automaticallyImplyLeading: false,
+-      leading: const Center(child: OmiCloseButton.circled(key: Key('chat_close'))),
++      leadingWidth: _kChatHeaderSideWidth,
++      leading: const Padding(
++        padding: EdgeInsets.only(left: OmiSpacing.xxs),
++        child: Align(alignment: Alignment.centerLeft, child: OmiCloseButton.circled(key: Key('chat_close'))),
++      ),
+       centerTitle: true,
+       title: _ChatDismissRegion(
+           child: app == null
+@@ -41,8 +53,35 @@ class ChatHeader extends StatelessWidget implements PreferredSizeWidget {
+                   const SizedBox(width: OmiSpacing.xs),
+                   Flexible(child: Text(app.getName(), overflow: TextOverflow.ellipsis, style: OmiType.callout)),
+                 ])),
+-      // Balance the close control so the dismissal handle stays centered without a history button.
+-      actions: const [SizedBox(width: kToolbarHeight)],
++      actions: [
++        SizedBox(
++          width: _kChatHeaderSideWidth,
++          child: Padding(
++            padding: const EdgeInsets.only(right: OmiSpacing.xxs),
++            child: Row(mainAxisAlignment: MainAxisAlignment.end, children: [
++              OmiIconButton(
++                key: const Key('chat_new'),
++                icon: const Icon(Icons.add_comment_outlined, size: 22),
++                label: context.l10n.newChat,
++                // Already on an empty new chat: nothing to start.
++                onPressed: provider.isFreshChat && provider.messages.isEmpty
++                    ? null
++                    : () => applyChatHistoryChoice(context, provider, const ChatHistoryNewChat(),
++                        onSwitched: onChatSwitched),
++              ),
++              OmiIconButton(
++                key: const Key('chat_history'),
++                icon: const Icon(Icons.history_rounded, size: 22),
++                label: context.l10n.pastChats,
++                onPressed: () {
++                  FocusScope.of(context).unfocus();
++                  showChatHistory(context, provider, onSwitched: onChatSwitched);
++                },
++              ),
++            ]),
++          ),
++        ),
++      ],
+       bottom: provider.isLoadingMessages
+           ? PreferredSize(
+               preferredSize: const Size.fromHeight(32),
+diff --git a/app/lib/pages/chat/widgets/chat_history_sheet.dart b/app/lib/pages/chat/widgets/chat_history_sheet.dart
+new file mode 100644
+index 0000000000..6755b132e8
+--- /dev/null
++++ b/app/lib/pages/chat/widgets/chat_history_sheet.dart
+@@ -0,0 +1,292 @@
++import 'dart:convert';
++
++import 'package:crypto/crypto.dart';
++import 'package:flutter/material.dart';
++
++import 'package:omi/backend/http/api_result.dart';
++import 'package:omi/backend/preferences.dart';
++import 'package:omi/backend/schema/chat_session.dart';
++import 'package:omi/providers/message_provider.dart';
++import 'package:omi/ui/ui.dart';
++import 'package:omi/utils/l10n_extensions.dart';
++
++/// What Past chats asks the chat to do once the sheet has closed.
++sealed class ChatHistoryChoice {
++  const ChatHistoryChoice();
++}
++
++class ChatHistoryNewChat extends ChatHistoryChoice {
++  const ChatHistoryNewChat();
++}
++
++class ChatHistoryOpenChat extends ChatHistoryChoice {
++  const ChatHistoryOpenChat(this.session);
++  final ChatSessionSummary session;
++}
++
++/// Opens Past chats. Reading the list never changes the open thread; only a choice does.
++Future<void> showChatHistory(BuildContext context, MessageProvider provider, {VoidCallback? onSwitched}) async {
++  final choice = await showOmiSheet<ChatHistoryChoice>(
++    context: context,
++    title: context.l10n.pastChats,
++    padding: EdgeInsets.zero,
++    builder: (_) => ChatHistoryList(provider: provider),
++  );
++  if (choice == null || !context.mounted) return;
++  await applyChatHistoryChoice(context, provider, choice, onSwitched: onSwitched);
++}
++
++/// Starts or opens a chat. A refused switch (a reply still streaming) says why; a failed read keeps
++/// the current thread and its draft.
++Future<void> applyChatHistoryChoice(BuildContext context, MessageProvider provider, ChatHistoryChoice choice,
++    {VoidCallback? onSwitched}) async {
++  final l10n = context.l10n;
++  if (!provider.canSwitchChat) {
++    OmiFeedback.info(context, l10n.chatSwitchBusy);
++    return;
++  }
++  OmiHaptics.selection();
++  final opened = switch (choice) {
++    ChatHistoryNewChat() => provider.startFreshChat(),
++    ChatHistoryOpenChat(:final session) => await provider.openChatSession(session),
++  };
++  if (opened) {
++    onSwitched?.call();
++  } else if (context.mounted) {
++    OmiFeedback.error(context, l10n.somethingWentWrong);
++  }
++}
++
++/// Namespace of the « Discussion d'origine » id (omi-local/insights_regles.py, ESPACE_ORIGINE). It is not an
++/// RFC 4122 variant, so the uuid package refuses it: the name-based id (Python's uuid5) is computed here.
++const _originChatNamespace = '6f6d692d636c6f6e652d6f726967696e';
++
++String _originChatId(String uid) {
++  final namespace = [
++    for (var i = 0; i < _originChatNamespace.length; i += 2) int.parse(_originChatNamespace.substring(i, i + 2), radix: 16)
++  ];
++  final hash = sha1.convert([...namespace, ...utf8.encode('discussion-origine:$uid')]).bytes.sublist(0, 16);
++  hash[6] = (hash[6] & 0x0f) | 0x50;
++  hash[8] = (hash[8] & 0x3f) | 0x80;
++  final hex = hash.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
++  return '${hex.substring(0, 8)}-${hex.substring(8, 12)}-${hex.substring(12, 16)}-${hex.substring(16, 20)}-${hex.substring(20)}';
++}
++
++/// The « Discussion d'origine »: the former single chat thread, filed by the clone's migration under a
++/// fixed id per account (uuid5 of « discussion-origine:<uid> ») and that title. Deleting it removes the
++/// whole old thread, so its confirmation says so with the message count.
++bool isOriginChat(ChatSessionSummary session, {String? uid}) {
++  final owner = uid ?? SharedPreferencesUtil().uid;
++  if (owner.isNotEmpty && session.id == _originChatId(owner)) {
++    return true;
++  }
++  return session.title.trim() == "Discussion d'origine" || session.title.trim() == 'Discussion d’origine';
++}
++
++/// New chat first, then every saved chat newest first, grouped by day. Long-press deletes.
++class ChatHistoryList extends StatefulWidget {
++  const ChatHistoryList({super.key, required this.provider});
++  final MessageProvider provider;
++
++  @override
++  State<ChatHistoryList> createState() => _ChatHistoryListState();
++}
++
++class _ChatHistoryListState extends State<ChatHistoryList> {
++  static const _pageSize = 50;
++  final List<ChatSessionSummary> _sessions = [];
++  int _offset = 0;
++  bool _loading = true;
++  bool _hasMore = false;
++  ApiProblem? _problem;
++
++  MessageProvider get _provider => widget.provider;
++
++  @override
++  void initState() {
++    super.initState();
++    _load();
++  }
++
++  Future<void> _load() async {
++    setState(() {
++      _loading = true;
++      _problem = null;
++    });
++    final result = await _provider.chatSessionsApi.list(offset: _offset, limit: _pageSize);
++    if (!mounted) return;
++    setState(() {
++      _loading = false;
++      switch (result) {
++        case ApiSuccess(:final data, :final rejectedRows):
++          final known = _sessions.map((s) => s.id).toSet();
++          _sessions.addAll(data.where((s) => known.add(s.id)));
++          final received = data.length + rejectedRows;
++          _offset += received;
++          _hasMore = received == _pageSize;
++        case ApiFailure(:final problem):
++          _problem = problem;
++      }
++    });
++  }
++
++  String _title(BuildContext context, ChatSessionSummary session) =>
++      session.hasTitle ? session.title.trim() : context.l10n.untitledChat;
++
++  Future<void> _confirmDelete(ChatSessionSummary session) async {
++    final l10n = context.l10n;
++    final origin = isOriginChat(session);
++    final confirmed = await showOmiConfirm(
++      context,
++      title: origin ? l10n.deleteOriginChatQuestion : l10n.deleteChatQuestion,
++      message: origin ? l10n.deleteOriginChatMessage(session.messageCount) : l10n.deleteChatMessage,
++      confirmLabel: l10n.deleteChat,
++      destructive: true,
++    );
++    if (!confirmed || !mounted) return;
++    if (!_provider.canSwitchChat) {
++      OmiFeedback.info(context, l10n.chatSwitchBusy);
++      return;
++    }
++    final deleted = await _provider.deleteChatSession(session.id);
++    if (!mounted) return;
++    if (deleted) {
++      setState(() => _sessions.removeWhere((s) => s.id == session.id));
++    } else {
++      OmiFeedback.error(context, l10n.somethingWentWrong);
++    }
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    final l10n = context.l10n;
++    final maxHeight = MediaQuery.sizeOf(context).height * 0.72;
++    return ConstrainedBox(
++      constraints: BoxConstraints(maxHeight: maxHeight),
++      child: ListenableBuilder(
++        listenable: _provider,
++        builder: (context, _) {
++          final dates = OmiDateFormat.of(context);
++          final children = <Widget>[
++            _HistoryRow(
++              key: const Key('chat_history_new'),
++              icon: Icons.add_comment_outlined,
++              title: l10n.newChat,
++              subtitle: l10n.startFresh,
++              onTap: () => Navigator.of(context).pop(const ChatHistoryNewChat()),
++            ),
++          ];
++          // The server lists chats by their last message, newest first (its order is kept).
++          String? day;
++          for (final session in _sessions) {
++            final header = dates.dayHeader(session.updatedAt);
++            if (header != day) {
++              day = header;
++              children.add(Padding(
++                padding: const EdgeInsets.fromLTRB(OmiSpacing.md, OmiSpacing.md, OmiSpacing.md, OmiSpacing.xxs),
++                child: Text(header, style: OmiType.footnote.copyWith(color: OmiColors.textTertiary)),
++              ));
++            }
++            final title = _title(context, session);
++            children.add(_HistoryRow(
++              key: Key('chat_history_${session.id}'),
++              icon: Icons.chat_bubble_outline_rounded,
++              title: title,
++              subtitle: dates.time(session.updatedAt),
++              selected: session.id == _provider.chatSessionId && !_provider.isFreshChat,
++              onTap: () => Navigator.of(context).pop(ChatHistoryOpenChat(session)),
++              onLongPress: () => showOmiRowMenu(context, title: title, actions: [
++                OmiMenuAction(
++                  icon: Icons.delete_outline,
++                  label: l10n.deleteChat,
++                  isDestructive: true,
++                  onSelected: () => _confirmDelete(session),
++                ),
++              ]),
++            ));
++          }
++          if (_loading) {
++            children.add(const Padding(
++              padding: EdgeInsets.all(OmiSpacing.lg),
++              child: Center(child: OmiSpinner(size: OmiSpinnerSize.small)),
++            ));
++          } else if (_problem != null) {
++            children.add(OmiErrorState(message: l10n.somethingWentWrong, onRetry: _load));
++          } else if (_hasMore) {
++            children.add(TextButton(key: const Key('chat_history_more'), onPressed: _load, child: Text(l10n.showMore)));
++          } else if (_sessions.isEmpty) {
++            children.add(Padding(
++              padding: const EdgeInsets.all(OmiSpacing.lg),
++              child: Text(
++                l10n.noPastChats,
++                textAlign: TextAlign.center,
++                style: OmiType.footnote.copyWith(color: OmiColors.textTertiary),
++              ),
++            ));
++          }
++          return ListView(
++            shrinkWrap: true,
++            padding: const EdgeInsets.only(bottom: OmiSpacing.md),
++            children: children,
++          );
++        },
++      ),
++    );
++  }
++}
++
++class _HistoryRow extends StatelessWidget {
++  const _HistoryRow({
++    super.key,
++    required this.icon,
++    required this.title,
++    required this.subtitle,
++    required this.onTap,
++    this.onLongPress,
++    this.selected = false,
++  });
++
++  final IconData icon;
++  final String title;
++  final String subtitle;
++  final VoidCallback onTap;
++  final VoidCallback? onLongPress;
++  final bool selected;
++
++  @override
++  Widget build(BuildContext context) {
++    return Semantics(
++      button: true,
++      selected: selected,
++      child: InkWell(
++        onTap: onTap,
++        onLongPress: onLongPress,
++        child: ConstrainedBox(
++          constraints: const BoxConstraints(minHeight: 52),
++          child: Padding(
++            padding: const EdgeInsets.symmetric(horizontal: OmiSpacing.md, vertical: OmiSpacing.xs),
++            child: Row(children: [
++              ExcludeSemantics(child: Icon(icon, size: 20, color: OmiColors.textTertiary)),
++              const SizedBox(width: OmiSpacing.md),
++              Expanded(
++                child: Column(
++                  crossAxisAlignment: CrossAxisAlignment.start,
++                  mainAxisSize: MainAxisSize.min,
++                  children: [
++                    Text(title, maxLines: 2, overflow: TextOverflow.ellipsis, style: OmiType.callout),
++                    const SizedBox(height: 2),
++                    Text(subtitle, style: OmiType.footnote.copyWith(color: OmiColors.textTertiary)),
++                  ],
++                ),
++              ),
++              if (selected) ...[
++                const SizedBox(width: OmiSpacing.xs),
++                ExcludeSemantics(child: Icon(Icons.check_rounded, size: 20, color: OmiColors.textPrimary)),
++              ],
++            ]),
++          ),
++        ),
++      ),
++    );
++  }
++}
+diff --git a/app/lib/providers/chat_history_state.dart b/app/lib/providers/chat_history_state.dart
+index ca93f817d5..9ef0367f51 100644
+--- a/app/lib/providers/chat_history_state.dart
++++ b/app/lib/providers/chat_history_state.dart
+@@ -89,7 +89,9 @@ mixin ChatHistoryState on ChangeNotifier {
+     appProvider?.setSelectedChatAppId(null);
+     chatSessionId = session.id;
+     isFreshChat = false;
++    SharedPreferencesUtil().lastChatSessionId = session.id;
+     final loaded = result as ApiSuccess<List<ServerMessage>>;
++    _learnConversationChats(session.id, loaded.data);
+     messages = loaded.data.where((m) => !m.isAutomaticChatEntry).toList()
+       ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+     _messageOffset = loaded.data.length + loaded.rejectedRows;
+@@ -109,6 +111,9 @@ mixin ChatHistoryState on ChangeNotifier {
+     try {
+       final result = await chatSessionsApi.delete(id);
+       if (_historyDisposed || result is! ApiSuccess<void>) return false;
++      final prefs = SharedPreferencesUtil();
++      if (prefs.lastChatSessionId == id) prefs.lastChatSessionId = '';
++      prefs.forgetChatForConversations(id);
+       if (chatSessionId == id) {
+         isClearingChat = false;
+         startFreshChat();
+@@ -155,6 +160,7 @@ mixin ChatHistoryState on ChangeNotifier {
+       if (result is! ApiSuccess<ChatSessionSummary>) throw StateError('Could not create chat');
+       chatSessionId = result.data.id;
+       isFreshChat = false;
++      SharedPreferencesUtil().lastChatSessionId = result.data.id;
+       notifyListeners();
+     }();
+     _creatingSession = future;
+@@ -176,6 +182,76 @@ mixin ChatHistoryState on ChangeNotifier {
+     }));
+   }
+ 
++  /// Ask Omi from a conversation: resumes the discussion last used about [conversationId], or starts
++  /// a new one (created on the first send). Never reuses whatever chat happens to be open, so two
++  /// subjects do not end up in the same discussion. False when a reply or deletion is still running
++  /// or the remembered discussion could not be read for another reason than being deleted.
++  Future<bool> openChatForConversation(String conversationId) async {
++    if (!canSwitchChat) return false;
++    final prefs = SharedPreferencesUtil();
++    final known = prefs.chatForConversation(conversationId);
++    if (known.isEmpty) return isFreshChat && messages.isEmpty ? true : startFreshChat();
++    if (known == chatSessionId && !isFreshChat && (appProvider?.selectedChatAppId ?? '').isEmpty) return true;
++    // While the remembered discussion is read, the open one (and its suggested follow-up) is hidden behind
++    // the loading state: nothing from it can be sent with this conversation's « About » context.
++    final epoch = _historyEpoch;
++    isLoadingMessages = true;
++    historyProblem = null;
++    notifyListeners();
++    final found = await chatSessionsApi.get(known);
++    if (_historyDisposed) return false;
++    // Superseded by the reader's own later choice (New chat, Past chats, a send): that choice stands and
++    // already settled the loading state; there is nothing to open and nothing to report.
++    if (epoch != _historyEpoch) return true;
++    final bool opened;
++    if (found is ApiSuccess<ChatSessionSummary>) {
++      opened = await openChatSession(found.data);
++    } else if ((found as ApiFailure<ChatSessionSummary>).problem.kind == ApiProblemKind.notFound) {
++      // Deleted elsewhere: forget it and start a new discussion about this conversation.
++      prefs.setChatForConversation(conversationId, '');
++      opened = isFreshChat && messages.isEmpty ? true : startFreshChat();
++    } else {
++      opened = false;
++    }
++    // Nothing replaced the thread (failed read, refused switch, already on an empty new chat): it shows again.
++    if (epoch == _historyEpoch && isLoadingMessages) {
++      isLoadingMessages = false;
++      notifyListeners();
++    }
++    return opened;
++  }
++
++  /// After a send with an « About » context: the open discussion becomes the one for that conversation.
++  void rememberChatContext(ChatPageContext? context) {
++    final id = context?.id;
++    final session = chatSessionId;
++    if (context?.type != 'conversation' || id == null || id.isEmpty || session == null) return;
++    // A known tie is only replaced by forgetting it (deleted chat), never by a send from another chat.
++    SharedPreferencesUtil().setChatForConversation(id, session, onlyIfUnknown: true);
++  }
++
++  /// A new chat opened from a conversation and left without a message: the next opening resumes the
++  /// remembered discussion instead of an empty page. Called while the popup is being disposed, so it
++  /// does not notify (nothing shows the chat until it is opened again, which reloads it).
++  void leaveUnusedFreshChat() {
++    if (!isFreshChat || messages.isNotEmpty || !canSwitchChat) return;
++    _historyEpoch++;
++    isFreshChat = false;
++    chatSessionId = null;
++  }
++
++  /// The server keeps each human message's « About » context (clone): a discussion read in full
++  /// teaches which conversations it was about, even after a reinstall. Existing entries win.
++  void _learnConversationChats(String sessionId, List<ServerMessage> rows) {
++    final prefs = SharedPreferencesUtil();
++    for (final row in rows) {
++      final context = row.pageContext;
++      final id = context?.id;
++      if (row.sender != MessageSender.human || context?.type != 'conversation' || id == null) continue;
++      prefs.setChatForConversation(id, sessionId, onlyIfUnknown: true);
++    }
++  }
++
+   void setHasCachedMessages(bool value) {
+     hasCachedMessages = value;
+     notifyListeners();
+@@ -242,6 +318,15 @@ mixin ChatHistoryState on ChangeNotifier {
+       isFreshChat = false;
+     }
+     if (isFreshChat) return;
++    // After a restart, reopen the discussion that was open rather than the newest-created one.
++    var remembered = false;
++    if (chatSessionId == null && (appProvider?.selectedChatAppId ?? '').isEmpty) {
++      final last = SharedPreferencesUtil().lastChatSessionId;
++      if (last.isNotEmpty) {
++        chatSessionId = last;
++        remembered = true;
++      }
++    }
+     final epoch = ++_historyEpoch;
+     final appId = appProvider?.selectedChatAppId;
+     if (dropdownSelected) markPendingAppSwitch();
+@@ -257,9 +342,18 @@ mixin ChatHistoryState on ChangeNotifier {
+       _pendingAppSwitch = false;
+       isSwitchingChatApp = false;
+       if (result is ApiFailure<List<ServerMessage>>) {
++        if (remembered && result.problem.kind == ApiProblemKind.notFound) {
++          // Deleted elsewhere: forget it and fall back to the server-current thread.
++          SharedPreferencesUtil().lastChatSessionId = '';
++          chatSessionId = null;
++          return refreshMessages();
++        }
+         historyProblem = result.problem;
+       } else {
+         final loaded = result as ApiSuccess<List<ServerMessage>>;
++        // A remembered chat was listed (titled) or titled on its first exchange: never rename it again.
++        if (remembered) _namedSessions.add(id);
++        _learnConversationChats(id, loaded.data);
+         messages = loaded.data.where((m) => !m.isAutomaticChatEntry).toList();
+         _messageOffset = loaded.data.length + loaded.rejectedRows;
+         hasOlderMessages = _messageOffset == 100;
+@@ -295,6 +389,8 @@ mixin ChatHistoryState on ChangeNotifier {
+ 
+   void setMessagesFromCache() {
+     if (chatSessionId != null || isFreshChat || (appProvider?.selectedChatAppId ?? '').isNotEmpty) return;
++    // The cache holds the server-current thread; a remembered discussion is read explicitly instead.
++    if (SharedPreferencesUtil().lastChatSessionId.isNotEmpty) return;
+     messages = SharedPreferencesUtil().cachedMessages.where((m) => !m.isAutomaticChatEntry).toList()
+       ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+     hasCachedMessages = messages.isNotEmpty;
+diff --git a/app/lib/providers/message_provider.dart b/app/lib/providers/message_provider.dart
+index a152710450..5cae09bfcc 100644
+--- a/app/lib/providers/message_provider.dart
++++ b/app/lib/providers/message_provider.dart
+@@ -874,6 +874,7 @@ class MessageProvider extends ChangeNotifier with ChatHistoryState {
+ 
+     try {
+       await prepareChatSession();
++      rememberChatContext(context);
+       await for (var chunk in (replyStreamOverride ?? sendMessageStreamServer)(
+         text,
+         appId: currentAppId,
+diff --git a/app/test/providers/chat_history_state_test.dart b/app/test/providers/chat_history_state_test.dart
+index dc65209d85..98859631ff 100644
+--- a/app/test/providers/chat_history_state_test.dart
++++ b/app/test/providers/chat_history_state_test.dart
+@@ -2,6 +2,7 @@ import 'dart:async';
+ import 'package:flutter_test/flutter_test.dart';
+ import 'package:shared_preferences/shared_preferences.dart';
+ import 'package:omi/backend/preferences.dart';
++import 'package:omi/backend/http/api/messages.dart' show ChatPageContext;
+ import 'package:omi/backend/http/api/chat_sessions.dart';
+ import 'package:omi/backend/http/api_result.dart';
+ import 'package:omi/backend/schema/chat_session.dart';
+@@ -11,6 +12,10 @@ import 'package:omi/providers/message_provider.dart';
+ ChatSessionSummary session(String id) => ChatSessionSummary(id: id, title: 'Thread $id', updatedAt: DateTime.utc(2026));
+ ServerMessage message(String id) =>
+     ServerMessage(id, DateTime.utc(2026), id, MessageSender.human, MessageType.text, null, false, [], [], []);
++ServerMessage aboutConversation(String id, String conversationId) => ServerMessage.fromJson({
++      ...message(id).toJson(),
++      'page_context': {'type': 'conversation', 'id': conversationId}
++    });
+ 
+ class FakeSessions extends ChatSessionsApi {
+   int creates = 0;
+@@ -19,6 +24,15 @@ class FakeSessions extends ChatSessionsApi {
+   Future<ApiResult<ChatSessionSummary>> Function()? createResult;
+   Future<ApiResult<List<ServerMessage>>> Function(String, int)? readResult;
+   ApiResult<void> deleteResult = const ApiSuccess<void>(null);
++  final gets = <String>[];
++  Future<ApiResult<ChatSessionSummary>> Function(String)? getResult;
++
++  @override
++  Future<ApiResult<ChatSessionSummary>> get(String id) async {
++    gets.add(id);
++    return await getResult?.call(id) ?? ApiSuccess(session(id));
++  }
++
+   @override
+   Future<ApiResult<ChatSessionSummary>> create() async {
+     creates++;
+@@ -37,8 +51,19 @@ class FakeSessions extends ChatSessionsApi {
+     return deleteResult;
+   }
+ 
++  final titles = <String>[];
+   @override
+-  Future<ApiResult<String>> title(String id, List<ServerMessage> messages) async => const ApiSuccess('Title');
++  Future<ApiResult<String>> title(String id, List<ServerMessage> messages) async {
++    titles.add(id);
++    return const ApiSuccess('Title');
++  }
++}
++
++Stream<ServerMessageChunk> doneReply(String text,
++    {String? appId, List<String>? filesId, ChatPageContext? context, String? chatSessionId}) async* {
++  yield ServerMessageChunk('reply-$text', 'Reply', MessageChunkType.done,
++      message: ServerMessage('reply-$text', DateTime.utc(2026, 1, 2), 'Reply', MessageSender.ai, MessageType.text, null,
++          false, [], [], []));
+ }
+ 
+ void main() {
+@@ -46,6 +71,7 @@ void main() {
+   setUp(() async {
+     SharedPreferences.setMockInitialValues({});
+     await SharedPreferencesUtil.init();
++    SharedPreferencesUtil().uid = 'owner';
+   });
+ 
+   test('old caches with discarded provenance are rehydrated instead of rendered', () async {
+@@ -331,4 +357,275 @@ void main() {
+     provider.setSendingMessage(false);
+     expect(provider.canSwitchChat, isTrue);
+   });
++
++  test('a created or opened chat is remembered for the next start', () async {
++    final prefs = SharedPreferencesUtil();
++    final api = FakeSessions();
++    final provider = MessageProvider(sessionsApi: api);
++    addTearDown(provider.dispose);
++    provider.startFreshChat();
++    await provider.prepareChatSession();
++    expect(api.creates, 1);
++    expect(prefs.lastChatSessionId, 'new');
++    await provider.openChatSession(session('past'));
++    expect(prefs.lastChatSessionId, 'past');
++  });
++
++  test('a restart reopens the remembered chat; a chat deleted elsewhere falls back to the current thread', () async {
++    final prefs = SharedPreferencesUtil()..lastChatSessionId = 'past';
++    SharedPreferencesUtil().cachedMessages = [message('cached')];
++    var legacyReads = 0;
++    final api = FakeSessions();
++    final provider = MessageProvider(sessionsApi: api)
++      ..legacyMessagesLoader = ({appId, dropdownSelected = false}) async {
++        legacyReads++;
++        return [message('current')];
++      };
++    addTearDown(provider.dispose);
++    provider.setMessagesFromCache();
++    expect(provider.messages, isEmpty, reason: 'the unscoped cache is not the remembered chat');
++    await provider.refreshMessages();
++    expect(provider.chatSessionId, 'past');
++    expect(provider.messages.single.id, 'past');
++    expect(legacyReads, 0);
++
++    final restarted = MessageProvider(sessionsApi: api)
++      ..legacyMessagesLoader = ({appId, dropdownSelected = false}) async {
++        legacyReads++;
++        return [message('current')];
++      };
++    addTearDown(restarted.dispose);
++    api.readResult = (_, __) async => const ApiFailure(ApiProblem(ApiProblemKind.notFound, statusCode: 404));
++    await restarted.refreshMessages();
++    expect(restarted.chatSessionId, isNull);
++    expect(restarted.messages.single.id, 'current');
++    expect(prefs.lastChatSessionId, '');
++    expect(legacyReads, 1);
++  });
++
++  test('a remembered chat that fails to load for another reason stays the send target', () async {
++    SharedPreferencesUtil().lastChatSessionId = 'past';
++    final api = FakeSessions()..readResult = (_, __) async => const ApiFailure(ApiProblem(ApiProblemKind.transport));
++    final provider = MessageProvider(sessionsApi: api);
++    addTearDown(provider.dispose);
++    await provider.refreshMessages();
++    expect(provider.chatSessionId, 'past');
++    expect(provider.historyProblem, isNotNull);
++    expect(SharedPreferencesUtil().lastChatSessionId, 'past');
++  });
++
++  test('Ask Omi about a conversation starts a new chat, never the open one', () async {
++    final api = FakeSessions();
++    final provider = MessageProvider(sessionsApi: api);
++    addTearDown(provider.dispose);
++    await provider.openChatSession(session('psy'));
++    expect(await provider.openChatForConversation('arnaud-meeting'), isTrue);
++    expect(provider.isFreshChat, isTrue);
++    expect(provider.chatSessionId, isNull);
++    expect(provider.messages, isEmpty);
++    expect(api.gets, isEmpty);
++    // The first send creates the chat and ties it to the conversation it is about.
++    await provider.prepareChatSession();
++    provider.rememberChatContext(const ChatPageContext(type: 'conversation', id: 'arnaud-meeting', title: 'Arnaud'));
++    expect(SharedPreferencesUtil().chatForConversation('arnaud-meeting'), 'new');
++  });
++
++  test('Ask Omi about the same conversation resumes its chat', () async {
++    SharedPreferencesUtil().setChatForConversation('arnaud-meeting', 'arnaud');
++    final api = FakeSessions();
++    final provider = MessageProvider(sessionsApi: api);
++    addTearDown(provider.dispose);
++    await provider.openChatSession(session('psy'));
++    expect(await provider.openChatForConversation('arnaud-meeting'), isTrue);
++    expect(api.gets, ['arnaud']);
++    expect(provider.chatSessionId, 'arnaud');
++    expect(provider.messages.single.id, 'arnaud');
++    // Already open: nothing is read again.
++    expect(await provider.openChatForConversation('arnaud-meeting'), isTrue);
++    expect(api.gets, ['arnaud']);
++  });
++
++  test('a conversation chat deleted elsewhere is forgotten and a new chat starts', () async {
++    final prefs = SharedPreferencesUtil()..setChatForConversation('arnaud-meeting', 'gone');
++    final api = FakeSessions()
++      ..getResult = (_) async => const ApiFailure(ApiProblem(ApiProblemKind.notFound, statusCode: 404));
++    final provider = MessageProvider(sessionsApi: api);
++    addTearDown(provider.dispose);
++    await provider.openChatSession(session('psy'));
++    expect(await provider.openChatForConversation('arnaud-meeting'), isTrue);
++    expect(provider.isFreshChat, isTrue);
++    expect(prefs.chatForConversation('arnaud-meeting'), '');
++  });
++
++  test('a conversation chat that cannot be read keeps the open chat and says so', () async {
++    SharedPreferencesUtil().setChatForConversation('arnaud-meeting', 'arnaud');
++    final api = FakeSessions()..getResult = (_) async => const ApiFailure(ApiProblem(ApiProblemKind.transport));
++    final provider = MessageProvider(sessionsApi: api);
++    addTearDown(provider.dispose);
++    await provider.openChatSession(session('psy'));
++    expect(await provider.openChatForConversation('arnaud-meeting'), isFalse);
++    expect(provider.chatSessionId, 'psy');
++    expect(SharedPreferencesUtil().chatForConversation('arnaud-meeting'), 'arnaud');
++  });
++
++  test('switching to a conversation chat is refused while a reply is running', () async {
++    final provider = MessageProvider(sessionsApi: FakeSessions());
++    addTearDown(provider.dispose);
++    await provider.openChatSession(session('psy'));
++    provider.setSendingMessage(true);
++    expect(await provider.openChatForConversation('arnaud-meeting'), isFalse);
++    expect(provider.chatSessionId, 'psy');
++    provider.setSendingMessage(false);
++  });
++
++  test('a chat read in full teaches which conversations it was about; known ties win', () async {
++    final prefs = SharedPreferencesUtil()..setChatForConversation('known', 'other');
++    final api = FakeSessions()
++      ..readResult = (id, _) async => ApiSuccess([
++            aboutConversation('q1', 'arnaud-meeting'),
++            aboutConversation('q2', 'known'),
++            ServerMessage.fromJson({...message('broken').toJson(), 'page_context': 'not a map'}),
++          ]);
++    final provider = MessageProvider(sessionsApi: api);
++    addTearDown(provider.dispose);
++    await provider.openChatSession(session('arnaud'));
++    expect(provider.messages, hasLength(3), reason: 'an unreadable context never hides a message');
++    expect(prefs.chatForConversation('arnaud-meeting'), 'arnaud');
++    expect(prefs.chatForConversation('known'), 'other');
++  });
++
++  test('page_context survives the local cache and is absent without context', () {
++    final about = aboutConversation('q', 'c1');
++    expect(about.pageContext?.type, 'conversation');
++    expect(about.pageContext?.id, 'c1');
++    final cached = ServerMessage.fromJson(about.toJson());
++    expect(cached.pageContext?.id, 'c1');
++    expect(message('plain').pageContext, isNull);
++    expect(ServerMessage.fromJson(message('plain').toJson()).pageContext, isNull);
++    final task = ServerMessage.fromJson({
++      ...message('n').toJson(),
++      'page_context': {'type': 'task', 'id': null}
++    });
++    expect(task.pageContext?.type, 'task');
++    expect(task.pageContext?.id, isNull);
++  });
++
++  test('a new chat left without a message gives the open chat back', () async {
++    SharedPreferencesUtil().lastChatSessionId = 'psy';
++    final provider = MessageProvider(sessionsApi: FakeSessions());
++    addTearDown(provider.dispose);
++    expect(provider.startFreshChat(), isTrue);
++    provider.leaveUnusedFreshChat();
++    expect(provider.isFreshChat, isFalse);
++    await provider.refreshMessages();
++    expect(provider.chatSessionId, 'psy');
++  });
++
++  test('a new chat with messages is kept when the popup closes', () async {
++    final provider = MessageProvider(sessionsApi: FakeSessions());
++    addTearDown(provider.dispose);
++    provider.startFreshChat();
++    provider.messages.add(message('typed'));
++    provider.leaveUnusedFreshChat();
++    expect(provider.isFreshChat, isTrue);
++  });
++
++  test('deleting a chat forgets it as the remembered chat and as a conversation chat', () async {
++    final prefs = SharedPreferencesUtil()
++      ..lastChatSessionId = 'arnaud'
++      ..setChatForConversation('arnaud-meeting', 'arnaud')
++      ..setChatForConversation('other-meeting', 'other');
++    final provider = MessageProvider(sessionsApi: FakeSessions());
++    addTearDown(provider.dispose);
++    expect(await provider.deleteChatSession('arnaud'), isTrue);
++    expect(prefs.lastChatSessionId, '');
++    expect(prefs.chatForConversation('arnaud-meeting'), '');
++    expect(prefs.chatForConversation('other-meeting'), 'other');
++  });
++
++  test('thread choices belong to the signed-in account', () async {
++    final prefs = SharedPreferencesUtil()
++      ..lastChatSessionId = 'mine'
++      ..setChatForConversation('meeting', 'mine');
++    prefs.uid = 'someone-else';
++    expect(prefs.lastChatSessionId, '');
++    expect(prefs.chatForConversation('meeting'), '');
++    prefs.uid = 'owner';
++    expect(prefs.lastChatSessionId, 'mine');
++    expect(prefs.chatForConversation('meeting'), 'mine');
++  });
++
++  test('conversation chats are bounded, newest kept', () {
++    final prefs = SharedPreferencesUtil();
++    for (var i = 0; i < 205; i++) {
++      prefs.setChatForConversation('c$i', 's$i');
++    }
++    expect(prefs.chatForConversation('c0'), '');
++    expect(prefs.chatForConversation('c4'), '');
++    expect(prefs.chatForConversation('c5'), 's5');
++    expect(prefs.chatForConversation('c204'), 's204');
++  });
++
++  test('a chat reopened at start keeps its title: no new title on its next exchange', () async {
++    SharedPreferencesUtil().lastChatSessionId = 'origine';
++    final api = FakeSessions();
++    final provider = MessageProvider(sessionsApi: api)..replyStreamOverride = doneReply;
++    addTearDown(provider.dispose);
++    await provider.refreshMessages(); // app start
++    expect(provider.chatSessionId, 'origine');
++    await provider.sendMessageStreamToServer('suite');
++    await pumpEventQueue();
++    expect(api.titles, isEmpty, reason: "« Discussion d'origine » must not be renamed at every launch");
++    // A new chat is still titled on its first exchange.
++    provider.startFreshChat();
++    await provider.sendMessageStreamToServer('nouvelle');
++    await pumpEventQueue();
++    expect(api.titles, ['new']);
++  });
++
++  test('a send from another chat never re-ties a conversation already tied to its own chat', () async {
++    SharedPreferencesUtil().setChatForConversation('meeting', 'arnaud');
++    final provider = MessageProvider(sessionsApi: FakeSessions());
++    addTearDown(provider.dispose);
++    await provider.openChatSession(session('psy'));
++    provider.rememberChatContext(const ChatPageContext(type: 'conversation', id: 'meeting', title: 'Arnaud'));
++    expect(SharedPreferencesUtil().chatForConversation('meeting'), 'arnaud');
++    // An untied conversation is tied to the chat it was first asked about.
++    provider.rememberChatContext(const ChatPageContext(type: 'conversation', id: 'other', title: 'Other'));
++    expect(SharedPreferencesUtil().chatForConversation('other'), 'psy');
++  });
++
++  test('reading a conversation chat hides the open one; a failed read shows it again', () async {
++    SharedPreferencesUtil().setChatForConversation('meeting', 'arnaud');
++    final read = Completer<ApiResult<ChatSessionSummary>>();
++    final api = FakeSessions()..getResult = (_) => read.future;
++    final provider = MessageProvider(sessionsApi: api);
++    addTearDown(provider.dispose);
++    await provider.openChatSession(session('psy'));
++    final opening = provider.openChatForConversation('meeting');
++    await pumpEventQueue();
++    expect(provider.isLoadingMessages, isTrue);
++    read.complete(const ApiFailure(ApiProblem(ApiProblemKind.transport)));
++    expect(await opening, isFalse);
++    expect(provider.isLoadingMessages, isFalse);
++    expect(provider.chatSessionId, 'psy');
++    expect(provider.messages.single.id, 'psy');
++  });
++
++  test('a chat chosen while the conversation chat is still being read stands', () async {
++    SharedPreferencesUtil().setChatForConversation('meeting', 'arnaud');
++    final read = Completer<ApiResult<ChatSessionSummary>>();
++    final api = FakeSessions()..getResult = (_) => read.future;
++    final provider = MessageProvider(sessionsApi: api);
++    addTearDown(provider.dispose);
++    await provider.openChatSession(session('psy'));
++    final opening = provider.openChatForConversation('meeting');
++    await pumpEventQueue();
++    expect(provider.startFreshChat(), isTrue); // the reader taps New chat meanwhile
++    read.complete(ApiSuccess(session('arnaud')));
++    expect(await opening, isTrue);
++    expect(provider.isFreshChat, isTrue);
++    expect(provider.isLoadingMessages, isFalse);
++    expect(api.offsets, [0], reason: 'the conversation chat is not read over the new chat');
++  });
+ }
+diff --git a/app/test/widgets/chat_continuity_navigation_test.dart b/app/test/widgets/chat_continuity_navigation_test.dart
+index bc0fd0530e..ad851d4b96 100644
+--- a/app/test/widgets/chat_continuity_navigation_test.dart
++++ b/app/test/widgets/chat_continuity_navigation_test.dart
+@@ -8,6 +8,7 @@ import 'package:shared_preferences/shared_preferences.dart';
+ import 'package:visibility_detector/visibility_detector.dart';
+ 
+ import 'package:omi/backend/http/api/chat_sessions.dart';
++import 'package:omi/backend/http/api/messages.dart' show ChatPageContext;
+ import 'package:omi/backend/http/api_result.dart';
+ import 'package:omi/backend/preferences.dart';
+ import 'package:omi/backend/schema/message.dart';
+@@ -78,6 +79,12 @@ class _HistoryServer {
+     if (uri.path == '/v2/messages') {
+       return transcript(uri.queryParameters['chat_session_id']!);
+     }
++    if (uri.path.startsWith('/v2/chat-sessions/')) {
++      final id = uri.pathSegments.last;
++      return http.Response(
++          jsonEncode({'id': id, 'title': 'Saved $id', 'message_count': 2, 'updated_at': '2026-09-29T01:01:00Z'}),
++          readStatus);
++    }
+     throw StateError('Unexpected request: ${uri.path}');
+   }
+ }
+@@ -90,7 +97,8 @@ void main() {
+     PlatformManager.initializeForLocalHarness();
+   });
+ 
+-  Future<_Messages> pumpChat(WidgetTester tester, _HistoryServer server, {String? draft, bool empty = false}) async {
++  Future<_Messages> pumpChat(WidgetTester tester, _HistoryServer server,
++      {String? draft, bool empty = false, ChatPageContext? about}) async {
+     final provider = _Messages(ChatSessionsApi(baseUrl: 'https://example.invalid/', send: server.send))
+       ..messages = [
+         ServerMessage('current', DateTime.utc(2026), 'Current conversation', MessageSender.human, MessageType.text,
+@@ -119,7 +127,8 @@ void main() {
+         home: Builder(
+             builder: (context) => Scaffold(
+                 body: TextButton(
+-                    onPressed: () => openChatSheet<void>(context, ChatPage(initialDraft: draft)),
++                    onPressed: () =>
++                        openChatSheet<void>(context, ChatPage(initialDraft: draft, initialChatContext: about)),
+                     child: const Text('Open chat')))),
+       ),
+     ));
+@@ -156,13 +165,73 @@ void main() {
+     await tester.pumpWidget(const SizedBox());
+   });
+ 
+-  testWidgets('single chat has no history control and keeps its dismissal handle centered', (tester) async {
+-    await pumpChat(tester, _HistoryServer());
+-    expect(find.byKey(const Key('chat_history')), findsNothing);
+-    expect(find.text('Past chats'), findsNothing);
+-    expect(find.text('New Chat'), findsNothing);
++  testWidgets('the header offers New chat and Past chats and keeps its dismissal handle centered', (tester) async {
++    final server = _HistoryServer();
++    await pumpChat(tester, server);
++    expect(find.byKey(const Key('chat_history')), findsOneWidget);
++    expect(find.byKey(const Key('chat_new')), findsOneWidget);
++    expect(find.byTooltip('Past chats'), findsOneWidget);
++    expect(find.byTooltip('New chat'), findsOneWidget);
+     expect(tester.getCenter(find.byKey(const Key('chat_drag_handle'))).dx,
+         closeTo(tester.getCenter(find.byType(ChatPage)).dx, 1));
++    expect(server.requests, isEmpty, reason: 'showing the controls reads nothing');
++    await tester.pumpWidget(const SizedBox());
++  });
++
++  testWidgets('Past chats opens a saved chat and New chat starts an empty one without a request', (tester) async {
++    final server = _HistoryServer();
++    final provider = await pumpChat(tester, server);
++    await tester.tap(find.byKey(const Key('chat_history')));
++    await tester.pumpAndSettle();
++    expect(find.text('Saved first'), findsOneWidget);
++    expect(find.text('Saved second'), findsOneWidget);
++    expect(find.byKey(const Key('chat_history_new')), findsOneWidget);
++    await tester.tap(find.text('Saved second'));
++    await tester.pumpAndSettle();
++    expect(provider.chatSessionId, 'second');
++    expect(find.text('Question from second'), findsOneWidget);
++    expect(find.text('Current conversation'), findsNothing);
++    final reads = server.requests.length;
++    await tester.tap(find.byKey(const Key('chat_new')));
++    await tester.pumpAndSettle();
++    expect(provider.isFreshChat, isTrue);
++    expect(provider.chatSessionId, isNull);
++    expect(provider.messages, isEmpty);
++    expect(server.requests.length, reads, reason: 'a session is created on the first send, not on New chat');
++    await tester.tap(find.byKey(const Key('chat_history')));
++    await tester.pumpAndSettle();
++    await tester.tap(find.text('Saved second'));
++    await tester.pumpAndSettle();
++    expect(provider.chatSessionId, 'second', reason: 'an earlier chat can be resumed');
++    await tester.pumpWidget(const SizedBox());
++  });
++
++  testWidgets('Ask Omi from a conversation resumes its own chat, not the open one', (tester) async {
++    SharedPreferencesUtil().uid = 'owner';
++    SharedPreferencesUtil().setChatForConversation('meeting', 'second');
++    final server = _HistoryServer();
++    final provider = await pumpChat(tester, server,
++        about: const ChatPageContext(type: 'conversation', id: 'meeting', title: 'Meeting with Arnaud'));
++    expect(provider.chatSessionId, 'second');
++    expect(find.text('Question from second'), findsOneWidget);
++    expect(find.text('Current conversation'), findsNothing);
++    expect(server.requests.map((r) => Uri.parse(r.url).path), ['/v2/chat-sessions/second', '/v2/messages']);
++    await tester.pumpWidget(const SizedBox());
++  });
++
++  testWidgets('Ask Omi about a new conversation starts an empty chat, given back when left unused', (tester) async {
++    SharedPreferencesUtil().uid = 'owner';
++    SharedPreferencesUtil().lastChatSessionId = 'first';
++    final server = _HistoryServer();
++    final provider = await pumpChat(tester, server,
++        about: const ChatPageContext(type: 'conversation', id: 'new-meeting', title: 'Meeting with Arnaud'));
++    expect(provider.isFreshChat, isTrue);
++    expect(provider.messages, isEmpty);
++    expect(find.text('Current conversation'), findsNothing);
++    expect(server.requests, isEmpty, reason: 'the chat is created on the first send');
++    await tester.tap(find.byKey(const Key('chat_close')));
++    await tester.pumpAndSettle();
++    expect(provider.isFreshChat, isFalse, reason: 'an unused new chat does not replace the open chat');
+     await tester.pumpWidget(const SizedBox());
+   });
+ 
+diff --git a/app/test/widgets/chat_discussion_switch_test.dart b/app/test/widgets/chat_discussion_switch_test.dart
+new file mode 100644
+index 0000000000..8b22c41fb1
+--- /dev/null
++++ b/app/test/widgets/chat_discussion_switch_test.dart
+@@ -0,0 +1,316 @@
++// Discussions séparées : changer de discussion ne mélange jamais deux sujets.
++// Tirés des preuves de la relecture du 2026-10-10 (défauts A, B, C et confirmation de la Discussion d'origine) :
++// chacun échouait avant le correctif.
++import 'dart:async';
++import 'dart:convert';
++
++import 'package:flutter/material.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:http/http.dart' as http;
++import 'package:provider/provider.dart';
++import 'package:shared_preferences/shared_preferences.dart';
++import 'package:visibility_detector/visibility_detector.dart';
++
++import 'package:omi/backend/http/api/chat_sessions.dart';
++import 'package:omi/backend/http/api/messages.dart' show ChatPageContext;
++import 'package:omi/backend/http/api_result.dart';
++import 'package:omi/backend/preferences.dart';
++import 'package:omi/backend/schema/chat_session.dart';
++import 'package:omi/backend/schema/message.dart';
++import 'package:omi/l10n/app_localizations.dart';
++import 'package:omi/pages/chat/chat_route.dart';
++import 'package:omi/pages/chat/page.dart';
++import 'package:omi/pages/chat/widgets/chat_history_sheet.dart';
++import 'package:omi/providers/app_provider.dart';
++import 'package:omi/providers/connectivity_provider.dart';
++import 'package:omi/providers/conversation_provider.dart';
++import 'package:omi/providers/home_provider.dart';
++import 'package:omi/providers/integration_provider.dart';
++import 'package:omi/providers/message_provider.dart';
++import 'package:omi/providers/voice_recorder_provider.dart';
++import 'package:omi/utils/platform/platform_manager.dart';
++
++/// uuid5(ESPACE_ORIGINE, « discussion-origine:owner »), calculé par omi-local/insights_regles.py.
++const _originId = '485b5c1b-c85b-5395-8e90-3112d02685fe';
++
++class _Messages extends MessageProvider {
++  _Messages(ChatSessionsApi api) : super(sessionsApi: api);
++  @override
++  Future<void> fetchChatApps() async {}
++}
++
++class _Server {
++  final requests = <ApiRequest>[];
++  Completer<void>? sessionGate;
++  List<Map<String, Object?>> sessions = [
++    for (final id in ['psy', 'arnaud'])
++      {'id': id, 'title': 'Saved $id', 'message_count': 2, 'updated_at': '2026-09-29T01:01:00Z'},
++  ];
++
++  Future<http.Response> send(ApiRequest request) async {
++    requests.add(request);
++    final uri = Uri.parse(request.url);
++    if (uri.path == '/v2/chat/generate-title') return http.Response(jsonEncode({'title': 'Generated'}), 200);
++    if (uri.path == '/v2/chat-sessions') return http.Response(jsonEncode(sessions), 200);
++    if (uri.path == '/v2/messages') {
++      final id = uri.queryParameters['chat_session_id']!;
++      return http.Response(
++          jsonEncode([
++            {
++              'id': '$id-q',
++              'text': 'Question from $id',
++              'sender': 'human',
++              'created_at': '2026-09-29T01:00:00Z',
++              'type': 'text'
++            },
++            {
++              'id': '$id-a',
++              'text': 'Answer from $id',
++              'sender': 'ai',
++              'created_at': '2026-09-29T01:01:00Z',
++              'type': 'text',
++              'content_blocks': [
++                {'type': 'followUp', 'text': 'Follow-up from $id?'}
++              ],
++            },
++          ]),
++          200);
++    }
++    if (uri.path.startsWith('/v2/chat-sessions/')) {
++      if (request.method == 'DELETE') return http.Response('', 204);
++      final gate = sessionGate;
++      if (gate != null) await gate.future;
++      final id = uri.pathSegments.last;
++      return http.Response(
++          jsonEncode({'id': id, 'title': 'Saved $id', 'message_count': 2, 'updated_at': '2026-09-29T01:01:00Z'}), 200);
++    }
++    throw StateError('Unexpected request: ${request.method} ${uri.path}');
++  }
++}
++
++ChatSessionSummary _session(String id) =>
++    ChatSessionSummary(id: id, title: 'Saved $id', updatedAt: DateTime.utc(2026), messageCount: 2);
++
++const _about = ChatPageContext(type: 'conversation', id: 'meeting', title: 'Meeting with Arnaud');
++
++Future<void> _pump(WidgetTester tester, _Messages provider,
++    {ChatPageContext? about, Locale locale = const Locale('en')}) async {
++  await tester.pumpWidget(MultiProvider(
++    providers: [
++      ChangeNotifierProvider<MessageProvider>.value(value: provider),
++      ChangeNotifierProvider(create: (_) => AppProvider()),
++      ChangeNotifierProvider(create: (_) => ConnectivityProvider()),
++      ChangeNotifierProvider(create: (_) => HomeProvider()),
++      ChangeNotifierProvider(create: (_) => VoiceRecorderProvider()),
++      ChangeNotifierProvider(create: (_) => ConversationProvider(isSignedIn: () => false)),
++      ChangeNotifierProvider(
++          create: (_) => IntegrationProvider(
++              fetchStatus: (_) async => null,
++              saveStatus: (_, __) async => false,
++              deleteStatus: (_) async => false,
++              persistPref: (_, __) async {})),
++    ],
++    child: MaterialApp(
++      locale: locale,
++      localizationsDelegates: AppLocalizations.localizationsDelegates,
++      supportedLocales: const [Locale('en'), Locale('fr')],
++      home: Builder(
++          builder: (context) => Scaffold(
++              body: TextButton(
++                  onPressed: () => openChatSheet<void>(context, ChatPage(initialChatContext: about)),
++                  child: const Text('Open chat')))),
++    ),
++  ));
++}
++
++typedef _Sent = (String text, String? session, String? contextId);
++
++List<_Sent> _captureSends(MessageProvider provider) {
++  final sends = <_Sent>[];
++  provider.replyStreamOverride = (text, {appId, filesId, context, chatSessionId}) async* {
++    sends.add((text, chatSessionId, context?.id));
++    yield ServerMessageChunk('r-${sends.length}', 'Reply', MessageChunkType.done,
++        message: ServerMessage('r-${sends.length}', DateTime.utc(2026, 9, 29, 3), 'Reply', MessageSender.ai,
++            MessageType.text, null, false, [], [], []));
++  };
++  return sends;
++}
++
++Future<void> _send(WidgetTester tester, String text) async {
++  await tester.enterText(find.byKey(const ValueKey('omi.chat.input')), text);
++  await tester.pump();
++  await tester.tap(find.byKey(const ValueKey('omi.chat.send')));
++  await tester.pumpAndSettle();
++}
++
++void main() {
++  setUp(() async {
++    SharedPreferences.setMockInitialValues({});
++    await SharedPreferencesUtil.init();
++    SharedPreferencesUtil().uid = 'owner';
++    VisibilityDetectorController.instance.updateInterval = Duration.zero;
++    PlatformManager.initializeForLocalHarness();
++  });
++
++  testWidgets('Ask Omi during a running reply opens the conversation\'s own chat once the reply ends', (tester) async {
++    SharedPreferencesUtil().setChatForConversation('meeting', 'arnaud');
++    final provider = _Messages(ChatSessionsApi(baseUrl: 'https://example.invalid/', send: _Server().send));
++    expect(await provider.openChatSession(_session('psy')), isTrue);
++    provider.setSendingMessage(true); // a reply of the psy chat is still streaming
++    await _pump(tester, provider, about: _about);
++    await tester.tap(find.text('Open chat'));
++    await tester.pumpAndSettle();
++    expect(provider.chatSessionId, 'psy', reason: 'never switched under a running reply');
++    provider.setSendingMessage(false);
++    await tester.pumpAndSettle();
++    expect(provider.chatSessionId, 'arnaud');
++    expect(find.text('Question from arnaud'), findsOneWidget);
++    expect(find.text('Question from psy'), findsNothing);
++    expect(find.text('About: Meeting with Arnaud'), findsOneWidget);
++    await tester.pump(const Duration(seconds: 5)); // the « wait for the reply » notice leaves
++    await tester.pumpAndSettle();
++    final sends = _captureSends(provider);
++    await _send(tester, 'Que proposer à Arnaud ?');
++    expect(sends, [('Que proposer à Arnaud ?', 'arnaud', 'meeting')]);
++    expect(SharedPreferencesUtil().chatForConversation('meeting'), 'arnaud');
++    await tester.pumpWidget(const SizedBox());
++  });
++
++  testWidgets('while the conversation\'s chat is read, the open chat and its follow-up are hidden', (tester) async {
++    SharedPreferencesUtil().setChatForConversation('meeting', 'arnaud');
++    final server = _Server()..sessionGate = Completer<void>();
++    final provider = _Messages(ChatSessionsApi(baseUrl: 'https://example.invalid/', send: server.send));
++    expect(await provider.openChatSession(_session('psy')), isTrue);
++    await _pump(tester, provider, about: _about);
++    await tester.tap(find.text('Open chat'));
++    for (var i = 0; i < 10; i++) {
++      await tester.pump(const Duration(milliseconds: 100));
++    }
++    // GET /v2/chat-sessions/arnaud has not answered yet.
++    expect(provider.isLoadingMessages, isTrue);
++    expect(find.text('Question from psy'), findsNothing);
++    expect(find.byKey(const Key('chat_followup_chip')), findsNothing);
++    server.sessionGate!.complete();
++    await tester.pumpAndSettle();
++    expect(provider.chatSessionId, 'arnaud');
++    expect(provider.isLoadingMessages, isFalse);
++    expect(find.text('Question from arnaud'), findsOneWidget);
++    expect(find.text('Follow-up from arnaud?'), findsOneWidget);
++    await tester.pumpWidget(const SizedBox());
++  });
++
++  testWidgets('a failed read of the conversation\'s chat shows the open chat again', (tester) async {
++    SharedPreferencesUtil().setChatForConversation('meeting', 'arnaud');
++    final server = _Server();
++    final provider = _Messages(ChatSessionsApi(
++        baseUrl: 'https://example.invalid/',
++        send: (request) => request.url.contains('/v2/chat-sessions/arnaud')
++            ? Future.value(http.Response('down', 503))
++            : server.send(request)));
++    expect(await provider.openChatSession(_session('psy')), isTrue);
++    await _pump(tester, provider, about: _about);
++    await tester.tap(find.text('Open chat'));
++    await tester.pumpAndSettle();
++    expect(provider.chatSessionId, 'psy');
++    expect(provider.isLoadingMessages, isFalse);
++    expect(find.text('Question from psy'), findsOneWidget);
++    expect(SharedPreferencesUtil().chatForConversation('meeting'), 'arnaud');
++    await tester.pump(const Duration(seconds: 5));
++    await tester.pumpWidget(const SizedBox());
++  });
++
++  testWidgets('choosing another chat drops the « About » chip; the conversation keeps its own chat', (tester) async {
++    SharedPreferencesUtil().setChatForConversation('meeting', 'arnaud');
++    final provider = _Messages(ChatSessionsApi(baseUrl: 'https://example.invalid/', send: _Server().send));
++    await _pump(tester, provider, about: _about);
++    await tester.tap(find.text('Open chat'));
++    await tester.pumpAndSettle();
++    expect(provider.chatSessionId, 'arnaud');
++    expect(find.text('About: Meeting with Arnaud'), findsOneWidget);
++    await tester.tap(find.byKey(const Key('chat_history')));
++    await tester.pumpAndSettle();
++    await tester.tap(find.text('Saved psy'));
++    await tester.pumpAndSettle();
++    expect(provider.chatSessionId, 'psy');
++    expect(find.text('About: Meeting with Arnaud'), findsNothing);
++    final sends = _captureSends(provider);
++    await _send(tester, 'Ce que la psy a dit mardi');
++    expect(sends, [('Ce que la psy a dit mardi', 'psy', null)]);
++    expect(SharedPreferencesUtil().chatForConversation('meeting'), 'arnaud');
++    await tester.pumpWidget(const SizedBox());
++  });
++
++  testWidgets('New chat from the header also drops the « About » chip', (tester) async {
++    SharedPreferencesUtil().setChatForConversation('meeting', 'arnaud');
++    final provider = _Messages(ChatSessionsApi(baseUrl: 'https://example.invalid/', send: _Server().send));
++    await _pump(tester, provider, about: _about);
++    await tester.tap(find.text('Open chat'));
++    await tester.pumpAndSettle();
++    expect(find.text('About: Meeting with Arnaud'), findsOneWidget);
++    await tester.tap(find.byKey(const Key('chat_new')));
++    await tester.pumpAndSettle();
++    expect(provider.isFreshChat, isTrue);
++    expect(find.text('About: Meeting with Arnaud'), findsNothing);
++    await tester.pumpWidget(const SizedBox());
++  });
++
++  test('the original chat is recognised by its fixed id or its title', () {
++    final byId = ChatSessionSummary(id: _originId, title: 'Renamed', updatedAt: DateTime.utc(2026));
++    expect(isOriginChat(byId, uid: 'owner'), isTrue);
++    expect(isOriginChat(byId, uid: 'someone-else'), isFalse);
++    expect(isOriginChat(ChatSessionSummary(id: 'x', title: "Discussion d'origine", updatedAt: DateTime.utc(2026))),
++        isTrue);
++    expect(isOriginChat(_session('psy')), isFalse);
++  });
++
++  for (final (locale, title, message) in [
++    (
++      const Locale('en'),
++      'Delete the original chat?',
++      'Your whole former chat thread (412 messages) will be deleted for good. This can’t be undone.'
++    ),
++    (
++      const Locale('fr'),
++      'Supprimer la Discussion d’origine ?',
++      'Tout votre ancien fil du chat (412 messages) sera supprimé définitivement. C’est irréversible.'
++    ),
++  ]) {
++    testWidgets('deleting the original chat says the whole old thread goes, with its count (${locale.languageCode})',
++        (tester) async {
++      final server = _Server()
++        ..sessions = [
++          {
++            'id': _originId,
++            'title': "Discussion d'origine",
++            'message_count': 412,
++            'updated_at': '2026-09-29T01:01:00Z'
++          },
++          {'id': 'psy', 'title': 'Saved psy', 'message_count': 2, 'updated_at': '2026-09-28T01:01:00Z'},
++        ];
++      final provider = _Messages(ChatSessionsApi(baseUrl: 'https://example.invalid/', send: server.send));
++      expect(await provider.openChatSession(_session('psy')), isTrue);
++      await _pump(tester, provider, locale: locale);
++      await tester.tap(find.text('Open chat'));
++      await tester.pumpAndSettle();
++      await tester.tap(find.byKey(const Key('chat_history')));
++      await tester.pumpAndSettle();
++      // An ordinary chat keeps the short confirmation.
++      await tester.longPress(find.text('Saved psy'));
++      await tester.pumpAndSettle();
++      await tester.tap(find.text(locale.languageCode == 'fr' ? 'Supprimer la discussion' : 'Delete chat').last);
++      await tester.pumpAndSettle();
++      expect(find.text(title), findsNothing);
++      expect(find.textContaining('412'), findsNothing);
++      await tester.tap(find.text(locale.languageCode == 'fr' ? 'Annuler' : 'Cancel').last);
++      await tester.pumpAndSettle();
++      await tester.longPress(find.text("Discussion d'origine"));
++      await tester.pumpAndSettle();
++      await tester.tap(find.text(locale.languageCode == 'fr' ? 'Supprimer la discussion' : 'Delete chat').last);
++      await tester.pumpAndSettle();
++      expect(find.text(title), findsOneWidget);
++      expect(find.text(message), findsOneWidget);
++      expect(server.requests.where((r) => r.method == 'DELETE'), isEmpty, reason: 'nothing deleted before confirming');
++      await tester.pumpWidget(const SizedBox());
++    });
++  }
++}
+-- 
+2.43.0
+
