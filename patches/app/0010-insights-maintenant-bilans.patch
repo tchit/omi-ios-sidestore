@@ -1,0 +1,4121 @@
+From 90ba5b1d53d8e2205ba62d6a382e88bc4520b07d Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 11 Oct 2026 10:48:27 +0000
+Subject: [PATCH] =?UTF-8?q?Insights=20:=20=C2=AB=20Maintenant=20=C2=BB=20(?=
+ =?UTF-8?q?le=20direct)=20en=20haut=20de=20l'onglet,=20et=20les=20=C2=AB?=
+ =?UTF-8?q?=20Bilans=20=C2=BB=20(la=20profondeur)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Pour que les Insights aident à suivre sa vie et à l'améliorer, au jour le jour et sur la durée, au lieu de
+seulement archiver (Mike, 2026-10-11). Le contenu est écrit par le traitement du clone ; l'app lit les routes
+du serveur du clone (/v1/insights/maintenant…, /v1/insights/bilans…) et ne peut que retirer. Aucun bouton
+« Garder », aucun nombre maximal : Omi juge combien de lignes, de sections et d'essais il faut.
+
+- Onglet Insights : en haut la carte « Maintenant », puis la carte du dernier bilan, puis les dossiers sous
+  leur titre « Dossiers » (aucun dossier : une phrase discrète au lieu de la page vide). Les trois se lisent
+  ensemble ; la panne de l'un est dite à sa place sans cacher les autres (Réessayer). Relus à l'ouverture de
+  l'onglet, au retour d'un dossier ou d'un bilan, et en tirant vers le bas.
+- « Maintenant » : le résumé en une phrase s'il y en a un, l'heure du dernier point, puis les lignes dans
+  l'ordre d'Omi (aucune : « Rien de particulier pour l'instant »). Chaque ligne montre sa nature par une
+  icône ET un libellé (Agir, À surveiller, Conseil, Bon signe ; un autre mot d'Omi reste affiché, en neutre),
+  son domaine, sa citation. La toucher ouvre sa source comme dans les dossiers : une seule à ouvrir s'ouvre
+  tout de suite, sinon une feuille montre toutes ses sources (discussions, conversations, planning, journal ;
+  une source supprimée reste listée « N'est plus disponible » et ne s'ouvre pas). Appui long : « Retirer »,
+  confirmé ; Omi ne la remettra plus (le serveur inscrit le refus) ; déjà partie : « Cette ligne n'est plus là ».
+- Carte « Dernier bilan » : titre, période, nombre d'essais ; aucune carte avant le premier bilan.
+- Page du bilan : les sections libres d'Omi, rendues avec le markdown des résumés de conversation ; le suivi
+  des essais précédents (Tenté, Pas tenté, Inconnu : icône et libellé, constat ; essai d'origine introuvable :
+  « Essai introuvable ») ; les essais pour la suite (À essayer, domaine, constat, sources ouvrables). La flèche
+  à côté du titre choisit un bilan précédent (comme les versions d'un résumé) ; appui long sur le titre :
+  retirer le bilan (confirmé, rien n'est effacé). Un bilan sans titre, sans période ou vide se lit quand même.
+- Lecture tolérante : ligne, section, essai ou source illisible écarté sans cacher le reste, champ inconnu
+  ignoré (insight_maintenant_bilan.dart, Dart pur).
+- Mike est daltonien et lit en thème clair : rien n'est porté par la couleur seule ; les nouvelles encres sont
+  textPrimary et textTertiary (au moins 4,5:1 sur les cartes ; textSecondary, translucide, n'y donne que 3,4:1).
+- La puce de source des dossiers devient publique (InsightSourceChip) et accepte une source sans rien à ouvrir.
+- Textes en anglais et en français (app_en.arb, app_fr.arb ; les app_localizations*.dart sont régénérés par
+  flutter pub get, comme pour 0006 à 0009).
+
+Relecture contradictoire du 2026-10-11 (vraie sortie du banc), corrigée ici :
+- la feuille « Sources » défile : sur la vraie ligne 1, les sources étaient coupées en grand texte (iPhone SE
+  à 1,3 : −40 px ; 320 à 1,3 : −284 px ; 390 à 2,0 : −485 px) ;
+- une source, une ligne, un essai, un élément ou un dossier reçus deux fois (conversation fusionnée dans sa
+  survivante) ne s'affichent qu'une fois : plus d'écran d'erreur « Duplicate keys » ;
+- la ligne sous le titre des dossiers (code de 0008) passe en textTertiary : 3,4:1 en textSecondary ; tout
+  l'onglet, le dossier et le bilan sont vérifiés à au moins 4,5:1 sur leur fond réel ;
+- le titre « Maintenant » a toute la largeur de la carte (il se coupait en plein mot en grand texte) ; l'heure
+  passe dessous quand les deux ne tiennent pas ;
+- la citation d'une ligne s'affiche en entier (elle n'était jamais lisible quand la seule source s'ouvre
+  directement) ;
+- « N'est plus disponible » a sa propre ligne dans la puce, jamais mangé par un long titre ; une discussion ou
+  une conversation supprimée sans titre s'appelle « Discussion supprimée » / « Conversation supprimée » ;
+- une source d'état inconnu (disponible null : au-delà de la borne du serveur) ne se dit plus « n'est plus
+  disponible » et reste ouvrable ;
+- les mots d'un autre que Mike, entendus dans une conversation enregistrée (origine « conversation »,
+  dit_par_autre), portent l'étiquette « Entendu dans une conversation » (icône et libellé, même style que
+  « piste d'Omi ») sur les éléments des dossiers et les lignes de « Maintenant », au lieu de passer pour une
+  note de Mike.
+
+Tests : test/widgets/insights_relecture_2026_10_11_test.dart (un test par défaut, sur la vraie sortie du banc
+test/fixtures/insights_maintenant_banc_2026-10-11.json ; tous échouaient sur la version précédente) ;
+test/unit/insights_maintenant_bilans_test.dart (formes du serveur, documents abîmés, API),
+test/widgets/insights_maintenant_bilans_test.dart (0, 1 et 12 lignes, iPhone étroit en grand texte, natures
+connues et inconnue, champs manquants, sources, retraits confirmés, ligne déjà partie, pannes, rafraîchissement,
+bilan : sections, suivi, essais, choix d'un précédent, retrait, bilan vide ou retiré, anglais, contrastes en thème
+clair) ; test/widgets/insights_pages_test.dart suit l'onglet à trois cartes.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ app/lib/backend/http/api/insights.dart        |  81 +-
+ app/lib/backend/schema/insight_dossier.dart   |  45 +-
+ .../schema/insight_maintenant_bilan.dart      | 344 +++++++++
+ app/lib/l10n/app_en.arb                       | 169 +++++
+ app/lib/l10n/app_fr.arb                       |  36 +
+ .../pages/insights/insight_bilan_page.dart    | 550 ++++++++++++++
+ .../pages/insights/insight_dossier_page.dart  | 127 +++-
+ app/lib/pages/insights/insight_labels.dart    |  68 ++
+ app/lib/pages/insights/insight_now_card.dart  | 364 +++++++++
+ app/lib/pages/insights/insights_page.dart     | 214 ++++--
+ .../insights_maintenant_banc_2026-10-11.json  | 113 +++
+ .../unit/insights_maintenant_bilans_test.dart | 372 ++++++++++
+ .../insights_maintenant_bilans_test.dart      | 699 ++++++++++++++++++
+ app/test/widgets/insights_pages_test.dart     |  22 +-
+ .../insights_relecture_2026_10_11_test.dart   | 427 +++++++++++
+ 15 files changed, 3533 insertions(+), 98 deletions(-)
+ create mode 100644 app/lib/backend/schema/insight_maintenant_bilan.dart
+ create mode 100644 app/lib/pages/insights/insight_bilan_page.dart
+ create mode 100644 app/lib/pages/insights/insight_now_card.dart
+ create mode 100644 app/test/fixtures/insights_maintenant_banc_2026-10-11.json
+ create mode 100644 app/test/unit/insights_maintenant_bilans_test.dart
+ create mode 100644 app/test/widgets/insights_maintenant_bilans_test.dart
+ create mode 100644 app/test/widgets/insights_relecture_2026_10_11_test.dart
+
+diff --git a/app/lib/backend/http/api/insights.dart b/app/lib/backend/http/api/insights.dart
+index 4da924bd92..7fa927c640 100644
+--- a/app/lib/backend/http/api/insights.dart
++++ b/app/lib/backend/http/api/insights.dart
+@@ -2,10 +2,11 @@ import 'dart:convert';
+ 
+ import 'package:omi/backend/http/api_result.dart';
+ import 'package:omi/backend/schema/insight_dossier.dart';
++import 'package:omi/backend/schema/insight_maintenant_bilan.dart';
+ import 'package:omi/env/env.dart';
+ 
+-/// Clone local : les quatre routes Insights du serveur du clone (lire, retirer). Aucune création : les
+-/// dossiers sont écrits par le traitement du clone. Les erreurs restent distinctes d'une liste vide.
++/// Clone local : les routes Insights du serveur du clone (dossiers, « Maintenant », bilans : lire, retirer).
++/// Aucune création : tout est écrit par le traitement du clone. Les erreurs restent distinctes d'une liste vide.
+ class InsightsApi {
+   InsightsApi({this.send, String? baseUrl}) : _baseUrl = baseUrl;
+   final ApiSend? send;
+@@ -30,9 +31,19 @@ class InsightsApi {
+ 
+   /// Les dossiers actifs, le plus récemment mis à jour d'abord. Une ligne illisible est écartée et comptée
+   /// dans [ApiSuccess.rejectedRows].
+-  Future<ApiResult<List<InsightDossierSummary>>> list() async {
++  Future<ApiResult<List<InsightDossierSummary>>> list() =>
++      _rows('v1/insights/dossiers', 'dossiers', InsightDossierSummary.fromJson, (row) => row.id);
++
++  /// Une liste `{key: [...]}` des seuls éléments actifs ; une ligne illisible est écartée et comptée, une liste
++  /// entièrement illisible est une erreur de lecture ; une ligne reçue deux fois (même id) n'est gardée qu'une fois.
++  Future<ApiResult<List<T>>> _rows<T>(
++    String path,
++    String key,
++    T Function(Map<String, dynamic>) row,
++    String Function(T) id,
++  ) async {
+     final response = await executeApi<String>(
+-      request: ApiRequest(url: _url('v1/insights/dossiers', {'statut': 'actif'}), method: 'GET'),
++      request: ApiRequest(url: _url(path, {'statut': 'actif'}), method: 'GET'),
+       send: send,
+       decode: (body) => body,
+     );
+@@ -41,20 +52,20 @@ class InsightsApi {
+         return ApiFailure(problem);
+       case ApiSuccess(:final data):
+         try {
+-          final rows = _object(data)['dossiers'];
++          final rows = _object(data)[key];
+           if (rows is! List) return const ApiFailure(ApiProblem(ApiProblemKind.decode));
+-          final kept = <InsightDossierSummary>[];
++          final kept = <T>[];
+           var rejected = 0;
+-          for (final row in rows) {
++          for (final item in rows) {
+             try {
+-              if (row is! Map<String, dynamic>) throw const FormatException('Invalid insight folder');
+-              kept.add(InsightDossierSummary.fromJson(row));
++              if (item is! Map<String, dynamic>) throw const FormatException('Invalid insight row');
++              kept.add(row(item));
+             } on FormatException {
+               rejected++;
+             }
+           }
+           if (kept.isEmpty && rejected > 0) return const ApiFailure(ApiProblem(ApiProblemKind.decode));
+-          return ApiSuccess(kept, rejectedRows: rejected);
++          return ApiSuccess(uniqueById(kept, id), rejectedRows: rejected);
+         } on FormatException {
+           return const ApiFailure(ApiProblem(ApiProblemKind.decode));
+         }
+@@ -96,4 +107,54 @@ class InsightsApi {
+           );
+         },
+       );
++
++  // --- « Maintenant » -------------------------------------------------------------------------------------------
++
++  /// Ce qui compte maintenant ; [InsightNow.empty] tant qu'Omi n'a rien écrit (ce n'est pas une erreur).
++  Future<ApiResult<InsightNow>> now() => executeApi(
++        request: ApiRequest(url: _url('v1/insights/maintenant'), method: 'GET'),
++        send: send,
++        decode: (body) => InsightNow.fromJson(_object(body)),
++      );
++
++  /// Retire une ligne (Omi ne la remettra pas). Rend « Maintenant » à jour ; 404 si elle n'existe plus.
++  Future<ApiResult<({bool alreadyRemoved, InsightNow now})>> removeNowLine(String lineId) => executeApi(
++        request: ApiRequest(
++          url: _url('v1/insights/maintenant/lignes/${Uri.encodeComponent(lineId)}'),
++          method: 'DELETE',
++        ),
++        send: send,
++        decode: (body) {
++          final json = _object(body);
++          return (alreadyRemoved: json['deja_retire'] == true, now: InsightNow.fromJson(_field(json, 'maintenant')));
++        },
++      );
++
++  // --- Bilans ---------------------------------------------------------------------------------------------------
++
++  String _bilan(String id) => 'v1/insights/bilans/${Uri.encodeComponent(id)}';
++
++  /// Les bilans actifs, le plus récent d'abord (ordre du serveur).
++  Future<ApiResult<List<InsightBilanSummary>>> bilans() =>
++      _rows('v1/insights/bilans', 'bilans', InsightBilanSummary.fromJson, (row) => row.id);
++
++  /// Un bilan en entier ; 404 ([ApiProblemKind.notFound]) s'il n'existe plus.
++  Future<ApiResult<InsightBilan>> bilan(String id) => executeApi(
++        request: ApiRequest(url: _url(_bilan(id)), method: 'GET'),
++        send: send,
++        decode: (body) => InsightBilan.fromJson(_object(body)),
++      );
++
++  /// Retire un bilan (rien n'est effacé côté serveur) : il quitte la liste.
++  Future<ApiResult<({bool alreadyRemoved, InsightBilanSummary bilan})>> removeBilan(String id) => executeApi(
++        request: ApiRequest(url: _url(_bilan(id)), method: 'DELETE'),
++        send: send,
++        decode: (body) {
++          final json = _object(body);
++          return (
++            alreadyRemoved: json['deja_retire'] == true,
++            bilan: InsightBilanSummary.fromJson(_field(json, 'bilan')),
++          );
++        },
++      );
+ }
+diff --git a/app/lib/backend/schema/insight_dossier.dart b/app/lib/backend/schema/insight_dossier.dart
+index e8b189e04a..6b43447a48 100644
+--- a/app/lib/backend/schema/insight_dossier.dart
++++ b/app/lib/backend/schema/insight_dossier.dart
+@@ -15,14 +15,15 @@ class InsightSessionSource {
+   final String id;
+   final String? title;
+ 
+-  /// False : la discussion a été supprimée ou ne se lit plus.
++  /// False : la discussion a été supprimée. Un état inconnu (`disponible` null : le serveur ne l'a pas cherchée)
++  /// compte pour disponible : rien n'est annoncé, et l'ouverture dira si elle n'existe plus.
+   final bool available;
+ 
+   static InsightSessionSource? tryParse(Object? json) {
+     if (json is! Map) return null;
+     final id = _string(json['id']);
+     if (id == null) return null;
+-    return InsightSessionSource(id: id, title: _string(json['titre']), available: json['disponible'] == true);
++    return InsightSessionSource(id: id, title: _string(json['titre']), available: json['disponible'] != false);
+   }
+ }
+ 
+@@ -33,7 +34,7 @@ class InsightConversationSource {
+   final String? title;
+   final DateTime? date;
+ 
+-  /// False : la conversation a été supprimée ou ne se lit plus.
++  /// False : la conversation a été supprimée ou ne se lit plus ; un état inconnu (null) compte pour disponible.
+   final bool available;
+ 
+   static InsightConversationSource? tryParse(Object? json) {
+@@ -44,7 +45,7 @@ class InsightConversationSource {
+       id: id,
+       title: _string(json['titre']),
+       date: _date(json['date']),
+-      available: json['disponible'] == true,
++      available: json['disponible'] != false,
+     );
+   }
+ }
+@@ -65,12 +66,25 @@ class InsightSources {
+       messages: messages is List ? messages.whereType<String>().toList() : const [],
+       session: InsightSessionSource.tryParse(json['session']),
+       conversations: conversations is List
+-          ? conversations.map(InsightConversationSource.tryParse).whereType<InsightConversationSource>().toList()
++          ? uniqueById(
++              conversations.map(InsightConversationSource.tryParse).whereType<InsightConversationSource>(),
++              (source) => source.id,
++            )
+           : const [],
+     );
+   }
+ }
+ 
++/// Le premier de chaque id, dans l'ordre : une même source (conversation fusionnée dans une autre aussi citée) ou
++/// une même ligne reçue deux fois ne s'affiche qu'une fois (deux clés égales feraient planter l'écran).
++List<T> uniqueById<T>(Iterable<T> items, String Function(T) id) {
++  final seen = <String>{};
++  return [
++    for (final item in items)
++      if (seen.add(id(item))) item
++  ];
++}
++
+ class InsightElement {
+   const InsightElement({
+     required this.id,
+@@ -78,6 +92,7 @@ class InsightElement {
+     this.type,
+     required this.origin,
+     required this.omiLead,
++    this.heardInConversation = false,
+     this.quote,
+     required this.status,
+     this.createdAt,
+@@ -95,6 +110,10 @@ class InsightElement {
+   /// Une idée venue d'Omi que Mike n'a pas contestée : affichée « piste d'Omi ».
+   final bool omiLead;
+ 
++  /// Les mots d'un autre que Mike, entendus dans une conversation enregistrée (origine `conversation`) : affichée
++  /// « Entendu dans une conversation », jamais comme une note de Mike.
++  final bool heardInConversation;
++
+   /// Extrait exact du message cité.
+   final String? quote;
+   final String status;
+@@ -114,6 +133,7 @@ class InsightElement {
+       type: _string(json['type']),
+       origin: origin,
+       omiLead: json['piste_omi'] is bool ? json['piste_omi'] as bool : origin == 'omi',
++      heardInConversation: json['dit_par_autre'] is bool ? json['dit_par_autre'] as bool : origin == 'conversation',
+       quote: _string(json['citation']),
+       status: _string(json['statut']) ?? 'actif',
+       createdAt: _date(json['cree']),
+@@ -202,10 +222,21 @@ class InsightDossier {
+ 
+   factory InsightDossier.fromJson(Map<String, dynamic> json) {
+     final sections = json['sections'];
++    final parsed = sections is List
++        ? sections.map(InsightSection.tryParse).whereType<InsightSection>().toList()
++        : <InsightSection>[];
++    // Un élément reçu deux fois (même id) ne s'affiche qu'une fois, dans sa première section.
++    final seen = <String>{};
+     return InsightDossier(
+       summary: InsightDossierSummary.fromJson(json),
+-      sections:
+-          sections is List ? sections.map(InsightSection.tryParse).whereType<InsightSection>().toList() : const [],
++      sections: [
++        for (final section in parsed)
++          InsightSection(
++            key: section.key,
++            name: section.name,
++            elements: section.elements.where((element) => seen.add(element.id)).toList(),
++          ),
++      ],
+     );
+   }
+ 
+diff --git a/app/lib/backend/schema/insight_maintenant_bilan.dart b/app/lib/backend/schema/insight_maintenant_bilan.dart
+new file mode 100644
+index 0000000000..25ca5018f5
+--- /dev/null
++++ b/app/lib/backend/schema/insight_maintenant_bilan.dart
+@@ -0,0 +1,344 @@
++/// Clone local : Insights « Maintenant » (le direct : ce qui compte dans l'immédiat) et « Bilans » (la
++/// profondeur : un bilan par période, des sections libres, des essais et leur suivi).
++///
++/// Formes rendues par les routes du serveur du clone (`/v1/insights/maintenant…`, `/v1/insights/bilans…`). Le
++/// contenu est écrit par le traitement du clone ; l'app le lit et ne peut que retirer (une ligne ou un bilan).
++/// Dart pur (sans Flutter) pour être testé seul. Lecture tolérante : une ligne, une section, un essai ou une
++/// source illisible est écarté sans cacher le reste ; un champ inconnu est ignoré. Aucun nombre maximal : le
++/// modèle juge combien de lignes, de sections et d'essais il faut.
++library;
++
++import 'package:omi/backend/schema/insight_dossier.dart';
++
++/// Les natures connues d'une ligne de « Maintenant » ; une autre reste affichée telle quelle (en neutre).
++const insightNatures = ['agir', 'surveiller', 'conseil', 'encourager'];
++
++/// Les statuts connus d'un essai ; un autre reste affiché tel quel (en neutre).
++const insightTrialStatuses = ['propose', 'tente', 'pas_tente', 'inconnu'];
++
++/// Les sources d'une ligne ou d'un essai : discussions du chat et conversations (ouvrables), et deux appuis
++/// sans rien à ouvrir (le planning, le journal).
++class InsightLinkedSources {
++  const InsightLinkedSources({
++    this.messages = const [],
++    this.sessions = const [],
++    this.conversations = const [],
++    this.planning = false,
++    this.journal = false,
++  });
++
++  final List<String> messages;
++  final List<InsightSessionSource> sessions;
++  final List<InsightConversationSource> conversations;
++  final bool planning;
++  final bool journal;
++
++  /// Rien à montrer (les messages seuls ne s'ouvrent pas).
++  bool get isEmpty => sessions.isEmpty && conversations.isEmpty && !planning && !journal;
++
++  /// Ce qui s'ouvre d'un toucher : les discussions et conversations encore là.
++  int get openableCount =>
++      sessions.where((source) => source.available).length + conversations.where((source) => source.available).length;
++
++  static InsightLinkedSources parse(Object? json) {
++    if (json is! Map) return const InsightLinkedSources();
++    final messages = json['messages'];
++    final sessions = json['sessions'];
++    final conversations = json['conversations'];
++    final single = InsightSessionSource.tryParse(json['session']);
++    return InsightLinkedSources(
++      messages: messages is List ? messages.whereType<String>().toList() : const [],
++      sessions: uniqueById([
++        if (sessions is List) ...sessions.map(InsightSessionSource.tryParse).whereType<InsightSessionSource>(),
++        if (single != null) single,
++      ], (source) => source.id),
++      conversations: conversations is List
++          ? uniqueById(
++              conversations.map(InsightConversationSource.tryParse).whereType<InsightConversationSource>(),
++              (source) => source.id,
++            )
++          : const [],
++      planning: json['planning'] == true,
++      journal: json['journal'] == true,
++    );
++  }
++}
++
++/// Une ligne de « Maintenant ».
++class InsightNowLine {
++  const InsightNowLine({
++    required this.id,
++    required this.text,
++    this.nature,
++    this.domain,
++    this.quote,
++    this.heardInConversation = false,
++    this.sources = const InsightLinkedSources(),
++  });
++
++  final String id;
++  final String text;
++
++  /// `agir`, `surveiller`, `conseil`, `encourager`, ou un autre mot choisi par Omi (affiché neutre).
++  final String? nature;
++
++  /// Domaine libre (pro, perso, santé, famille…).
++  final String? domain;
++
++  /// Extrait exact d'où vient la ligne.
++  final String? quote;
++
++  /// Les mots d'un autre que Mike, entendus dans une conversation enregistrée (origine `conversation`).
++  final bool heardInConversation;
++  final InsightLinkedSources sources;
++
++  static InsightNowLine? tryParse(Object? json) {
++    if (json is! Map) return null;
++    final id = _string(json['id']);
++    final text = _string(json['texte']);
++    if (id == null || text == null) return null;
++    final nature = _string(json['nature']);
++    return InsightNowLine(
++      id: id,
++      text: text,
++      nature: nature == null ? null : _known(nature, insightNatures),
++      domain: _string(json['domaine']),
++      quote: _string(json['citation']),
++      heardInConversation:
++          json['dit_par_autre'] is bool ? json['dit_par_autre'] as bool : _string(json['origine']) == 'conversation',
++      sources: InsightLinkedSources.parse(json['sources']),
++    );
++  }
++}
++
++/// « Maintenant » en entier : lignes dans l'ordre choisi par Omi, résumé éventuel, date du dernier point.
++class InsightNow {
++  const InsightNow({this.lines = const [], this.summary, this.updatedAt, this.version = 0});
++
++  static const empty = InsightNow();
++
++  final List<InsightNowLine> lines;
++
++  /// Une phrase qui résume le moment (peut manquer).
++  final String? summary;
++  final DateTime? updatedAt;
++  final int version;
++
++  bool get isEmpty => lines.isEmpty && summary == null;
++
++  factory InsightNow.fromJson(Map<String, dynamic> json) {
++    final lines = json['lignes'];
++    return InsightNow(
++      lines: lines is List
++          ? uniqueById(lines.map(InsightNowLine.tryParse).whereType<InsightNowLine>(), (line) => line.id)
++          : const [],
++      summary: _string(json['resume']),
++      updatedAt: _date(json['maj']),
++      version: _int(json['version']),
++    );
++  }
++
++  /// Sans la ligne [id] (affichage immédiat après un retrait).
++  InsightNow without(String id) => InsightNow(
++        lines: lines.where((line) => line.id != id).toList(),
++        summary: summary,
++        updatedAt: updatedAt,
++        version: version,
++      );
++}
++
++/// La période d'un bilan (l'une ou l'autre borne peut manquer).
++class InsightPeriod {
++  const InsightPeriod({this.start, this.end});
++
++  final DateTime? start;
++  final DateTime? end;
++
++  static InsightPeriod parse(Object? json) {
++    if (json is! Map) return const InsightPeriod();
++    return InsightPeriod(start: _date(json['debut']), end: _date(json['fin']));
++  }
++}
++
++/// Une ligne de la liste des bilans.
++class InsightBilanSummary {
++  const InsightBilanSummary({
++    required this.id,
++    this.title,
++    this.period = const InsightPeriod(),
++    this.updatedAt,
++    this.version = 0,
++    this.status = 'actif',
++    this.trialCount = 0,
++  });
++
++  final String id;
++
++  /// Choisi par Omi ; peut manquer (l'app montre alors « Bilan » et la période).
++  final String? title;
++  final InsightPeriod period;
++  final DateTime? updatedAt;
++  final int version;
++  final String status;
++  final int trialCount;
++
++  bool get isActive => status == 'actif';
++
++  /// Throws [FormatException] for a row without id.
++  factory InsightBilanSummary.fromJson(Map<String, dynamic> json) {
++    final id = _string(json['id']);
++    if (id == null) throw const FormatException('Invalid insight review');
++    return InsightBilanSummary(
++      id: id,
++      title: _string(json['titre']),
++      period: InsightPeriod.parse(json['periode']),
++      updatedAt: _date(json['maj']),
++      version: _int(json['version']),
++      status: _string(json['statut']) ?? 'actif',
++      trialCount: _int(json['nb_essais']),
++    );
++  }
++}
++
++/// Une section libre d'un bilan : un titre choisi par Omi (peut manquer) et du markdown.
++class InsightBilanSection {
++  const InsightBilanSection({this.title, required this.text});
++
++  final String? title;
++  final String text;
++
++  static InsightBilanSection? tryParse(Object? json) {
++    if (json is! Map) return null;
++    final text = _string(json['texte']);
++    if (text == null) return null;
++    return InsightBilanSection(title: _string(json['titre']), text: text);
++  }
++}
++
++/// Un essai concret proposé pour la période suivante.
++class InsightTrial {
++  const InsightTrial({
++    required this.id,
++    required this.text,
++    this.domain,
++    this.status = 'propose',
++    this.outcome,
++    this.sources = const InsightLinkedSources(),
++  });
++
++  final String id;
++  final String text;
++  final String? domain;
++
++  /// `propose`, `tente`, `pas_tente`, `inconnu`, ou un autre mot (affiché neutre).
++  final String status;
++
++  /// Le constat, quand il y en a un.
++  final String? outcome;
++  final InsightLinkedSources sources;
++
++  static InsightTrial? tryParse(Object? json) {
++    if (json is! Map) return null;
++    final id = _string(json['id']);
++    final text = _string(json['texte']);
++    if (id == null || text == null) return null;
++    return InsightTrial(
++      id: id,
++      text: text,
++      domain: _string(json['domaine']),
++      status: _known(_string(json['statut']) ?? 'propose', insightTrialStatuses),
++      outcome: _string(json['constat']),
++      sources: InsightLinkedSources.parse(json['sources']),
++    );
++  }
++}
++
++/// Ce qu'est devenu un essai d'un bilan précédent.
++class InsightTrialFollowUp {
++  const InsightTrialFollowUp({
++    this.trialId,
++    this.bilanId,
++    this.text,
++    this.domain,
++    this.available = false,
++    this.status = 'inconnu',
++    this.outcome,
++  });
++
++  final String? trialId;
++  final String? bilanId;
++
++  /// Le texte de l'essai d'origine (null s'il ne se lit plus).
++  final String? text;
++  final String? domain;
++
++  /// False : le bilan d'origine ne se lit plus (le texte peut venir du suivi lui-même).
++  final bool available;
++  final String status;
++  final String? outcome;
++
++  static InsightTrialFollowUp? tryParse(Object? json) {
++    if (json is! Map) return null;
++    final trialId = _string(json['essai_id']);
++    final text = _string(json['texte']);
++    if (trialId == null && text == null) return null;
++    return InsightTrialFollowUp(
++      trialId: trialId,
++      bilanId: _string(json['bilan_id']),
++      text: text,
++      domain: _string(json['domaine']),
++      available: json['disponible'] == true,
++      status: _known(_string(json['statut']) ?? 'inconnu', insightTrialStatuses),
++      outcome: _string(json['constat']),
++    );
++  }
++}
++
++/// Un bilan lu en entier.
++class InsightBilan {
++  const InsightBilan({
++    required this.summary,
++    this.sections = const [],
++    this.trials = const [],
++    this.followUps = const [],
++  });
++
++  final InsightBilanSummary summary;
++  final List<InsightBilanSection> sections;
++  final List<InsightTrial> trials;
++  final List<InsightTrialFollowUp> followUps;
++
++  String get id => summary.id;
++
++  bool get isEmpty => sections.isEmpty && trials.isEmpty && followUps.isEmpty;
++
++  factory InsightBilan.fromJson(Map<String, dynamic> json) {
++    final sections = json['sections'];
++    final trials = json['essais'];
++    final followUps = json['suivi'];
++    return InsightBilan(
++      summary: InsightBilanSummary.fromJson(json),
++      sections: sections is List
++          ? sections.map(InsightBilanSection.tryParse).whereType<InsightBilanSection>().toList()
++          : const [],
++      trials: trials is List
++          ? uniqueById(trials.map(InsightTrial.tryParse).whereType<InsightTrial>(), (trial) => trial.id)
++          : const [],
++      followUps: followUps is List
++          ? followUps.map(InsightTrialFollowUp.tryParse).whereType<InsightTrialFollowUp>().toList()
++          : const [],
++    );
++  }
++}
++
++/// Une valeur connue écrite autrement (« Agir », « pas tenté ») ramenée à sa clé ; sinon gardée telle quelle.
++String _known(String value, List<String> keys) {
++  final key = value.trim().toLowerCase().replaceAll(RegExp(r'[\s-]+'), '_').replaceAll('é', 'e');
++  return keys.contains(key) ? key : value.trim();
++}
++
++String? _string(Object? value) => value is String && value.trim().isNotEmpty ? value.trim() : null;
++
++DateTime? _date(Object? value) => value is String ? DateTime.tryParse(value) : null;
++
++int _int(Object? value) => value is num ? value.toInt() : 0;
+diff --git a/app/lib/l10n/app_en.arb b/app/lib/l10n/app_en.arb
+index f5c3bd84a0..37483fcb82 100644
+--- a/app/lib/l10n/app_en.arb
++++ b/app/lib/l10n/app_en.arb
+@@ -3191,6 +3191,175 @@
+     "@insightSectionOpenQuestions": {
+         "description": "Insights topic folder section"
+     },
++    "insightNowTitle": "Now",
++    "@insightNowTitle": {
++        "description": "Insights: title of the card at the top, what matters right now (to act on, to watch, advice, good signs)"
++    },
++    "insightNowUpdated": "Updated {when}",
++    "@insightNowUpdated": {
++        "description": "Insights, Now card: when Omi last took stock (a time, 'Yesterday at …' or a date)",
++        "placeholders": {
++            "when": {
++                "type": "String"
++            }
++        }
++    },
++    "insightNowEmpty": "Nothing in particular right now",
++    "@insightNowEmpty": {
++        "description": "Insights, Now card: nothing to show right now"
++    },
++    "insightNowLoadError": "Couldn’t load “Now”.",
++    "@insightNowLoadError": {
++        "description": "Insights, Now card: it failed to load"
++    },
++    "insightNatureAct": "Act",
++    "@insightNatureAct": {
++        "description": "Insights, Now card: a line about something to do"
++    },
++    "insightNatureWatch": "Keep an eye on",
++    "@insightNatureWatch": {
++        "description": "Insights, Now card: a line about something to watch"
++    },
++    "insightNatureAdvice": "Advice",
++    "@insightNatureAdvice": {
++        "description": "Insights, Now card: a line of advice"
++    },
++    "insightNatureEncourage": "Good sign",
++    "@insightNatureEncourage": {
++        "description": "Insights, Now card: a line about something going well"
++    },
++    "insightNowRemoveQuestion": "Remove this line?",
++    "@insightNowRemoveQuestion": {
++        "description": "Insights, Now card: confirm removing a line"
++    },
++    "insightNowRemoveMessage": "Omi will not bring it back.",
++    "@insightNowRemoveMessage": {
++        "description": "Insights, Now card: what removing a line does"
++    },
++    "insightNowLineGone": "This line is no longer there.",
++    "@insightNowLineGone": {
++        "description": "Insights, Now card: the line was already gone (Omi took stock again meanwhile)"
++    },
++    "insightSourcePlanning": "Schedule",
++    "@insightSourcePlanning": {
++        "description": "Insights: a source that is your schedule (nothing to open)"
++    },
++    "insightSourceJournal": "Journal",
++    "@insightSourceJournal": {
++        "description": "Insights: a source that is your journal (nothing to open)"
++    },
++    "insightBilanTitle": "Review",
++    "@insightBilanTitle": {
++        "description": "Insights: a periodic review (usually weekly), and its page title"
++    },
++    "insightBilanLatest": "Latest review",
++    "@insightBilanLatest": {
++        "description": "Insights: marks the most recent review"
++    },
++    "insightBilanTrialCount": "{count, plural, =0{nothing to try} =1{1 thing to try} other{{count} things to try}}",
++    "@insightBilanTrialCount": {
++        "description": "Insights: number of things to try proposed by a review",
++        "placeholders": {
++            "count": {
++                "type": "int"
++            }
++        }
++    },
++    "insightBilanLoadError": "Couldn’t load your reviews.",
++    "@insightBilanLoadError": {
++        "description": "Insights: the reviews failed to load"
++    },
++    "insightBilanGone": "This review is no longer there.",
++    "@insightBilanGone": {
++        "description": "Insights: the review was removed"
++    },
++    "insightBilanTrialsTitle": "To try next",
++    "@insightBilanTrialsTitle": {
++        "description": "Insights, review page: things to try during the next period"
++    },
++    "insightBilanFollowUpTitle": "How the last trials went",
++    "@insightBilanFollowUpTitle": {
++        "description": "Insights, review page: what became of the things to try from the previous review"
++    },
++    "insightBilanEmpty": "Nothing in this review.",
++    "@insightBilanEmpty": {
++        "description": "Insights, review page: the review has no content"
++    },
++    "insightBilanChoose": "Reviews",
++    "@insightBilanChoose": {
++        "description": "Insights, review page: menu to choose an earlier review"
++    },
++    "insightBilanRemoveQuestion": "Remove this review?",
++    "@insightBilanRemoveQuestion": {
++        "description": "Insights, review page: confirm removing the review"
++    },
++    "insightBilanRemoveMessage": "It will no longer show in Insights. Nothing is erased.",
++    "@insightBilanRemoveMessage": {
++        "description": "Insights, review page: what removing a review does"
++    },
++    "insightBilanUnknownTrial": "Trial no longer found",
++    "@insightBilanUnknownTrial": {
++        "description": "Insights, review page: the earlier thing to try can no longer be read"
++    },
++    "insightTrialProposed": "To try",
++    "@insightTrialProposed": {
++        "description": "Insights, review page: status of a thing to try, proposed"
++    },
++    "insightTrialTried": "Tried",
++    "@insightTrialTried": {
++        "description": "Insights, review page: status of a thing to try, it was tried"
++    },
++    "insightTrialNotTried": "Not tried",
++    "@insightTrialNotTried": {
++        "description": "Insights, review page: status of a thing to try, it was not tried"
++    },
++    "insightTrialUnknown": "Unknown",
++    "@insightTrialUnknown": {
++        "description": "Insights, review page: status of a thing to try, unknown"
++    },
++    "insightTrialOutcome": "What happened: {text}",
++    "@insightTrialOutcome": {
++        "description": "Insights, review page: what Omi observed about a thing to try",
++        "placeholders": {
++            "text": {
++                "type": "String"
++            }
++        }
++    },
++    "insightPeriodFrom": "From {date}",
++    "@insightPeriodFrom": {
++        "description": "Insights: a review period with only a start date",
++        "placeholders": {
++            "date": {
++                "type": "String"
++            }
++        }
++    },
++    "insightPeriodUntil": "Until {date}",
++    "@insightPeriodUntil": {
++        "description": "Insights: a review period with only an end date",
++        "placeholders": {
++            "date": {
++                "type": "String"
++            }
++        }
++    },
++    "insightDossiersTitle": "Folders",
++    "@insightDossiersTitle": {
++        "description": "Insights: heading above the folders (by person, relationship or topic)"
++    },
++    "insightHeardInConversation": "Heard in a conversation",
++    "@insightHeardInConversation": {
++        "description": "Insights: marks a note made of someone else's words, heard in a recorded conversation (not something you said)"
++    },
++    "insightSourceChatDeleted": "Deleted chat",
++    "@insightSourceChatDeleted": {
++        "description": "Insights: a source chat that was deleted and had no title"
++    },
++    "insightSourceConversationDeleted": "Deleted conversation",
++    "@insightSourceConversationDeleted": {
++        "description": "Insights: a source conversation that was deleted and had no title or date"
++    },
+     "swipeTasksToIndent": "Swipe tasks to indent, drag between categories",
+     "@swipeTasksToIndent": {
+         "description": "Instructions for task management gestures"
+diff --git a/app/lib/l10n/app_fr.arb b/app/lib/l10n/app_fr.arb
+index 7aa0230e57..a6105fa77b 100644
+--- a/app/lib/l10n/app_fr.arb
++++ b/app/lib/l10n/app_fr.arb
+@@ -840,6 +840,42 @@
+     "insightSectionWhatHelps": "Ce qui m’aide",
+     "insightSectionIdeas": "Idées",
+     "insightSectionOpenQuestions": "Questions ouvertes",
++    "insightNowTitle": "Maintenant",
++    "insightNowUpdated": "Mis à jour : {when}",
++    "insightNowEmpty": "Rien de particulier pour l’instant",
++    "insightNowLoadError": "Impossible de charger « Maintenant ».",
++    "insightNatureAct": "Agir",
++    "insightNatureWatch": "À surveiller",
++    "insightNatureAdvice": "Conseil",
++    "insightNatureEncourage": "Bon signe",
++    "insightNowRemoveQuestion": "Retirer cette ligne ?",
++    "insightNowRemoveMessage": "Omi ne la remettra plus.",
++    "insightNowLineGone": "Cette ligne n’est plus là.",
++    "insightSourcePlanning": "Planning",
++    "insightSourceJournal": "Journal",
++    "insightBilanTitle": "Bilan",
++    "insightBilanLatest": "Dernier bilan",
++    "insightBilanTrialCount": "{count, plural, =0{aucun essai} =1{1 essai} other{{count} essais}}",
++    "insightBilanLoadError": "Impossible de charger les bilans.",
++    "insightBilanGone": "Ce bilan n’est plus là.",
++    "insightBilanTrialsTitle": "Essais pour la suite",
++    "insightBilanFollowUpTitle": "Suivi des essais précédents",
++    "insightBilanEmpty": "Rien dans ce bilan.",
++    "insightBilanChoose": "Bilans",
++    "insightBilanRemoveQuestion": "Retirer ce bilan ?",
++    "insightBilanRemoveMessage": "Il ne s’affichera plus dans Insights. Rien n’est effacé.",
++    "insightBilanUnknownTrial": "Essai introuvable",
++    "insightTrialProposed": "À essayer",
++    "insightTrialTried": "Tenté",
++    "insightTrialNotTried": "Pas tenté",
++    "insightTrialUnknown": "Inconnu",
++    "insightTrialOutcome": "Constat : {text}",
++    "insightPeriodFrom": "Depuis le {date}",
++    "insightPeriodUntil": "Jusqu’au {date}",
++    "insightDossiersTitle": "Dossiers",
++    "insightHeardInConversation": "Entendu dans une conversation",
++    "insightSourceChatDeleted": "Discussion supprimée",
++    "insightSourceConversationDeleted": "Conversation supprimée",
+     "swipeTasksToIndent": "Balayez les tâches pour indenter, faites glisser entre les catégories",
+     "create": "Créer",
+     "noTasksYet": "Aucune tâche pour l'instant",
+diff --git a/app/lib/pages/insights/insight_bilan_page.dart b/app/lib/pages/insights/insight_bilan_page.dart
+new file mode 100644
+index 0000000000..9f71e88649
+--- /dev/null
++++ b/app/lib/pages/insights/insight_bilan_page.dart
+@@ -0,0 +1,550 @@
++import 'dart:async';
++
++import 'package:flutter/material.dart';
++
++import 'package:omi/backend/http/api/insights.dart';
++import 'package:omi/backend/http/api_result.dart';
++import 'package:omi/backend/schema/insight_maintenant_bilan.dart';
++import 'package:omi/pages/conversation_detail/widgets/conversation_markdown_widget.dart';
++import 'package:omi/pages/insights/insight_labels.dart';
++import 'package:omi/pages/insights/insight_now_card.dart';
++import 'package:omi/pages/insights/insight_sources.dart';
++import 'package:omi/ui/ui.dart';
++import 'package:omi/utils/l10n_extensions.dart';
++import 'package:omi/utils/other/temp.dart';
++
++/// Clone local : la carte « Bilan » de l'onglet Insights, le plus récent (titre, période, nombre d'essais).
++/// La toucher ouvre le bilan, où les précédents se choisissent par la flèche.
++class InsightBilanCard extends StatelessWidget {
++  const InsightBilanCard({super.key, required this.bilan, required this.onTap});
++
++  final InsightBilanSummary bilan;
++  final VoidCallback onTap;
++
++  @override
++  Widget build(BuildContext context) {
++    final l10n = context.l10n;
++    return Semantics(
++      button: true,
++      child: Material(
++        color: OmiColors.surface1,
++        borderRadius: OmiRadius.mdAll,
++        child: InkWell(
++          key: const ValueKey('insight_bilan_card'),
++          borderRadius: OmiRadius.mdAll,
++          onTap: onTap,
++          child: ConstrainedBox(
++            constraints: const BoxConstraints(minHeight: 64),
++            child: Padding(
++              padding: const EdgeInsets.symmetric(horizontal: OmiSpacing.md, vertical: OmiSpacing.sm),
++              child: Row(
++                children: [
++                  ExcludeSemantics(
++                    child: Icon(Icons.auto_stories_outlined, size: 22, color: OmiColors.textTertiary),
++                  ),
++                  const SizedBox(width: OmiSpacing.sm),
++                  Expanded(
++                    child: Column(
++                      crossAxisAlignment: CrossAxisAlignment.start,
++                      mainAxisSize: MainAxisSize.min,
++                      children: [
++                        Text(
++                          l10n.insightBilanLatest,
++                          style: OmiType.footnote.copyWith(color: OmiColors.textTertiary, fontWeight: FontWeight.w600),
++                        ),
++                        const SizedBox(height: 2),
++                        Text(
++                          insightBilanTitle(l10n, bilan),
++                          maxLines: 2,
++                          overflow: TextOverflow.ellipsis,
++                          style: OmiType.headline,
++                        ),
++                        const SizedBox(height: 2),
++                        Text(
++                          insightBilanMeta(l10n, OmiDateFormat.of(context), bilan),
++                          style: OmiType.footnote.copyWith(color: OmiColors.textTertiary),
++                        ),
++                      ],
++                    ),
++                  ),
++                  const SizedBox(width: OmiSpacing.xs),
++                  ExcludeSemantics(child: Icon(Icons.chevron_right_rounded, size: 20, color: OmiColors.textTertiary)),
++                ],
++              ),
++            ),
++          ),
++        ),
++      ),
++    );
++  }
++}
++
++/// Ouvre un bilan par-dessus l'accueil ; [bilans] (le plus récent d'abord) nourrit le choix des précédents. Se
++/// termine quand on en revient.
++Future<void> routeToInsightBilan(
++  BuildContext context,
++  InsightBilanSummary bilan, {
++  List<InsightBilanSummary> bilans = const [],
++  InsightsApi? api,
++  InsightSourceOpener sources = const InsightSourceOpener(),
++}) {
++  return routeToPage(context, InsightBilanPage(initial: bilan, bilans: bilans, api: api, sources: sources));
++}
++
++/// Clone local : un bilan en entier. Ses sections libres (titres choisis par Omi, rendues comme les résumés des
++/// conversations), le suivi des essais du bilan précédent, puis les essais proposés pour la suite, chacun avec son
++/// statut (icône et libellé) et son constat ; les sources s'ouvrent. La flèche à côté du titre choisit un bilan
++/// précédent ; appui long sur le titre : retirer le bilan.
++class InsightBilanPage extends StatefulWidget {
++  const InsightBilanPage({
++    super.key,
++    required this.initial,
++    this.bilans = const [],
++    this.api,
++    this.sources = const InsightSourceOpener(),
++  });
++
++  final InsightBilanSummary initial;
++  final List<InsightBilanSummary> bilans;
++  final InsightsApi? api;
++  final InsightSourceOpener sources;
++
++  @override
++  State<InsightBilanPage> createState() => _InsightBilanPageState();
++}
++
++class _InsightBilanPageState extends State<InsightBilanPage> {
++  late final InsightsApi _api = widget.api ?? InsightsApi();
++  late List<InsightBilanSummary> _bilans = widget.bilans.isEmpty ? [widget.initial] : widget.bilans;
++  late InsightBilanSummary _current = widget.initial;
++  InsightBilan? _bilan;
++  ApiProblem? _problem;
++
++  /// Une réponse arrivée après le choix d'un autre bilan est ignorée.
++  int _request = 0;
++
++  @override
++  void initState() {
++    super.initState();
++    unawaited(_load());
++    unawaited(_refreshList());
++  }
++
++  Future<void> _load({bool reportFailure = false}) async {
++    final request = ++_request;
++    final result = await _api.bilan(_current.id);
++    if (!mounted || request != _request) return;
++    final shown = _bilan != null;
++    setState(() {
++      switch (result) {
++        case ApiSuccess(:final data):
++          _bilan = data;
++          _problem = null;
++        case ApiFailure(:final problem):
++          // Un bilan retiré entre-temps ne se montre plus ; une autre panne garde ce qui est affiché.
++          if (problem.kind == ApiProblemKind.notFound) _bilan = null;
++          _problem = problem;
++      }
++    });
++    if (reportFailure && shown && _bilan != null && result is ApiFailure) {
++      OmiFeedback.error(context, context.l10n.insightBilanLoadError);
++    }
++  }
++
++  /// La liste des bilans pour la flèche (un bilan a pu arriver depuis l'ouverture de l'onglet).
++  Future<void> _refreshList() async {
++    final result = await _api.bilans();
++    if (!mounted) return;
++    if (result case ApiSuccess(:final data) when data.isNotEmpty) setState(() => _bilans = data);
++  }
++
++  Future<void> _choose() async {
++    OmiHaptics.selection();
++    final chosen = await showInsightBilanChooser(context, bilans: _bilans, currentId: _current.id);
++    if (chosen == null || chosen.id == _current.id || !mounted) return;
++    setState(() {
++      _current = chosen;
++      _bilan = null;
++      _problem = null;
++    });
++    await _load();
++  }
++
++  Future<void> _showMenu(InsightBilanSummary bilan) async {
++    final l10n = context.l10n;
++    final chosen = Completer<bool>();
++    await showOmiRowMenu(context, title: insightBilanTitle(l10n, bilan), actions: [
++      OmiMenuAction(
++        icon: Icons.remove_circle_outline_rounded,
++        label: l10n.insightRemove,
++        isDestructive: true,
++        onSelected: () => chosen.complete(true),
++      ),
++    ]);
++    if (!chosen.isCompleted || !mounted) return;
++    final confirmed = await showOmiConfirm(
++      context,
++      title: l10n.insightBilanRemoveQuestion,
++      message: l10n.insightBilanRemoveMessage,
++      confirmLabel: l10n.insightRemove,
++      destructive: true,
++    );
++    if (!confirmed || !mounted) return;
++    final result = await _api.removeBilan(bilan.id);
++    if (!mounted) return;
++    // Déjà retiré ailleurs (404 ou deja_retire) : il n'a plus sa place non plus.
++    final removed = switch (result) {
++      ApiSuccess() => true,
++      ApiFailure(:final problem) => problem.kind == ApiProblemKind.notFound,
++    };
++    if (!removed) {
++      OmiFeedback.error(context, l10n.somethingWentWrong);
++      return;
++    }
++    OmiHaptics.success();
++    OmiFeedback.confirm(context, l10n.insightRemoved);
++    Navigator.of(context).pop(true);
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    return Scaffold(
++      backgroundColor: OmiColors.surface0,
++      appBar: AppBar(
++        backgroundColor: OmiColors.surface0,
++        leading: const OmiBackButton(),
++        title: Text(context.l10n.insightBilanTitle, style: OmiType.headline),
++      ),
++      body: _body(context),
++    );
++  }
++
++  Widget _body(BuildContext context) {
++    final l10n = context.l10n;
++    final bilan = _bilan;
++    if (bilan == null || !bilan.summary.isActive) {
++      final problem = _problem;
++      if (bilan == null && problem == null) return const OmiLoadingState();
++      if (bilan != null || problem!.kind == ApiProblemKind.notFound) {
++        return OmiEmptyState(icon: Icons.event_busy_outlined, title: l10n.insightBilanGone);
++      }
++      return OmiErrorState(message: l10n.insightBilanLoadError, onRetry: _load);
++    }
++    final slivers = <Widget>[
++      SliverPadding(
++        padding: const EdgeInsets.fromLTRB(OmiSpacing.md, OmiSpacing.xs, OmiSpacing.md, 0),
++        sliver: SliverToBoxAdapter(
++          child: _InsightBilanHeader(
++            bilan: bilan.summary,
++            canChoose: _bilans.length > 1,
++            onChoose: () => unawaited(_choose()),
++            onLongPress: () => unawaited(_showMenu(bilan.summary)),
++          ),
++        ),
++      ),
++    ];
++    for (final (index, section) in bilan.sections.indexed) {
++      final title = section.title;
++      slivers.add(SliverPadding(
++        key: ValueKey('insight_bilan_section_$index'),
++        padding: const EdgeInsets.fromLTRB(OmiSpacing.md, OmiSpacing.xl, OmiSpacing.md, 0),
++        sliver: SliverToBoxAdapter(child: title != null ? OmiSectionHeader(title) : const SizedBox.shrink()),
++      ));
++      slivers.add(SliverPadding(
++        padding: const EdgeInsets.symmetric(horizontal: OmiSpacing.md + OmiSpacing.xxs),
++        sliver: ConversationMarkdownSliver(content: section.text),
++      ));
++    }
++    void openChat(String id) => unawaited(widget.sources.openChat(context, id));
++    void openConversation(String id) => unawaited(widget.sources.openConversation(context, id));
++    if (bilan.followUps.isNotEmpty) {
++      slivers.add(_sectionHeader(l10n.insightBilanFollowUpTitle));
++      slivers.add(_cards([
++        for (final (index, followUp) in bilan.followUps.indexed)
++          InsightFollowUpCard(key: ValueKey('insight_follow_up_$index'), followUp: followUp),
++      ]));
++    }
++    if (bilan.trials.isNotEmpty) {
++      slivers.add(_sectionHeader(l10n.insightBilanTrialsTitle));
++      slivers.add(_cards([
++        for (final trial in bilan.trials)
++          InsightTrialCard(trial: trial, onOpenChat: openChat, onOpenConversation: openConversation),
++      ]));
++    }
++    if (bilan.isEmpty) {
++      slivers.add(SliverPadding(
++        padding: const EdgeInsets.fromLTRB(OmiSpacing.md + OmiSpacing.xxs, OmiSpacing.xl, OmiSpacing.md, 0),
++        sliver: SliverToBoxAdapter(
++          child: Text(l10n.insightBilanEmpty, style: OmiType.subhead.copyWith(color: OmiColors.textTertiary)),
++        ),
++      ));
++    }
++    slivers.add(SliverPadding(
++      padding: EdgeInsets.only(bottom: OmiSpacing.xxl + MediaQuery.viewPaddingOf(context).bottom),
++    ));
++    return RefreshIndicator(
++      onRefresh: () => Future.wait([_load(reportFailure: true), _refreshList()]),
++      child: CustomScrollView(
++        key: ValueKey('insight_bilan_${bilan.id}'),
++        physics: const AlwaysScrollableScrollPhysics(),
++        slivers: slivers,
++      ),
++    );
++  }
++
++  Widget _sectionHeader(String title) => SliverPadding(
++        padding: const EdgeInsets.fromLTRB(OmiSpacing.md, OmiSpacing.xl, OmiSpacing.md, 0),
++        sliver: SliverToBoxAdapter(child: OmiSectionHeader(title)),
++      );
++
++  Widget _cards(List<Widget> cards) => SliverPadding(
++        padding: const EdgeInsets.symmetric(horizontal: OmiSpacing.md),
++        sliver: SliverList.separated(
++          itemCount: cards.length,
++          separatorBuilder: (_, __) => const SizedBox(height: OmiSpacing.xs),
++          itemBuilder: (_, index) => cards[index],
++        ),
++      );
++}
++
++class _InsightBilanHeader extends StatelessWidget {
++  const _InsightBilanHeader({
++    required this.bilan,
++    required this.canChoose,
++    required this.onChoose,
++    required this.onLongPress,
++  });
++
++  final InsightBilanSummary bilan;
++  final bool canChoose;
++  final VoidCallback onChoose;
++  final VoidCallback onLongPress;
++
++  @override
++  Widget build(BuildContext context) {
++    final l10n = context.l10n;
++    return GestureDetector(
++      key: const ValueKey('insight_bilan_header'),
++      behavior: HitTestBehavior.opaque,
++      onLongPress: onLongPress,
++      child: Padding(
++        padding: const EdgeInsets.symmetric(horizontal: OmiSpacing.xxs),
++        child: Column(
++          crossAxisAlignment: CrossAxisAlignment.start,
++          children: [
++            Row(
++              crossAxisAlignment: CrossAxisAlignment.center,
++              children: [
++                Flexible(
++                  child: Semantics(header: true, child: Text(insightBilanTitle(l10n, bilan), style: OmiType.title2)),
++                ),
++                if (canChoose) _InsightBilanChooserArrow(onTap: onChoose),
++              ],
++            ),
++            const SizedBox(height: OmiSpacing.xxs),
++            Text(
++              insightBilanMeta(l10n, OmiDateFormat.of(context), bilan),
++              style: OmiType.footnote.copyWith(color: OmiColors.textTertiary),
++            ),
++          ],
++        ),
++      ),
++    );
++  }
++}
++
++/// La flèche à côté du titre : les autres bilans (comme les versions d'un résumé).
++class _InsightBilanChooserArrow extends StatelessWidget {
++  const _InsightBilanChooserArrow({required this.onTap});
++
++  final VoidCallback onTap;
++
++  @override
++  Widget build(BuildContext context) {
++    return Semantics(
++      button: true,
++      label: context.l10n.insightBilanChoose,
++      excludeSemantics: true,
++      child: GestureDetector(
++        key: const ValueKey('insight_bilan_versions'),
++        behavior: HitTestBehavior.opaque,
++        onTap: onTap,
++        child: Padding(
++          padding: const EdgeInsetsDirectional.only(start: 4, end: 8, top: 10, bottom: 10),
++          child: Icon(Icons.keyboard_arrow_down_rounded, size: 24, color: OmiColors.textPrimary),
++        ),
++      ),
++    );
++  }
++}
++
++/// Le menu des bilans, le plus récent d'abord ; rend celui choisi (null : fermé sans choix).
++Future<InsightBilanSummary?> showInsightBilanChooser(
++  BuildContext context, {
++  required List<InsightBilanSummary> bilans,
++  required String currentId,
++}) {
++  final l10n = context.l10n;
++  final dates = OmiDateFormat.of(context);
++  return showOmiSheet<InsightBilanSummary>(
++    context: context,
++    title: l10n.insightBilanChoose,
++    padding: EdgeInsets.zero,
++    builder: (sheetContext) => ConstrainedBox(
++      constraints: BoxConstraints(maxHeight: MediaQuery.sizeOf(sheetContext).height * 0.7),
++      child: ListView.separated(
++        shrinkWrap: true,
++        itemCount: bilans.length,
++        separatorBuilder: (_, __) =>
++            Divider(height: 1, thickness: 0.5, color: OmiColors.border, indent: 16, endIndent: 16),
++        itemBuilder: (_, index) {
++          final bilan = bilans[index];
++          final selected = bilan.id == currentId;
++          return ListTile(
++            key: ValueKey('insight_bilan_choice_${bilan.id}'),
++            contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 2),
++            title: Text(
++              insightBilanTitle(l10n, bilan),
++              style: OmiType.callout.copyWith(fontWeight: selected ? FontWeight.w600 : FontWeight.w500),
++            ),
++            subtitle: Text(
++              [if (index == 0) l10n.insightBilanLatest, insightBilanMeta(l10n, dates, bilan)].join(' · '),
++              style: OmiType.footnote.copyWith(color: OmiColors.textTertiary),
++            ),
++            trailing: selected ? Icon(Icons.check_rounded, color: OmiColors.textPrimary, size: 20) : null,
++            selected: selected,
++            onTap: () => Navigator.of(sheetContext).pop(bilan),
++          );
++        },
++      ),
++    ),
++  );
++}
++
++/// Le statut d'un essai : une icône ET un libellé (jamais la couleur seule), à l'encre principale sur sa pastille,
++/// puis le domaine.
++class InsightTrialStatusTag extends StatelessWidget {
++  const InsightTrialStatusTag({super.key, required this.status, this.domain});
++
++  final String status;
++  final String? domain;
++
++  @override
++  Widget build(BuildContext context) {
++    final ink = OmiColors.textPrimary;
++    final domain = this.domain;
++    return Row(
++      children: [
++        Container(
++          padding: const EdgeInsets.symmetric(horizontal: OmiSpacing.xs, vertical: 3),
++          decoration: BoxDecoration(color: OmiColors.chipSurface, borderRadius: OmiRadius.smAll),
++          child: Row(
++            mainAxisSize: MainAxisSize.min,
++            children: [
++              ExcludeSemantics(child: Icon(insightTrialStatusIcon(status), size: 14, color: ink)),
++              const SizedBox(width: OmiSpacing.xxs),
++              Text(
++                insightTrialStatusLabel(context.l10n, status),
++                style: OmiType.footnote.copyWith(color: ink, fontWeight: FontWeight.w600),
++              ),
++            ],
++          ),
++        ),
++        if (domain != null) ...[
++          const SizedBox(width: OmiSpacing.xs),
++          Flexible(
++            child: Text(
++              domain,
++              maxLines: 1,
++              overflow: TextOverflow.ellipsis,
++              style: OmiType.footnote.copyWith(color: OmiColors.textTertiary),
++            ),
++          ),
++        ],
++      ],
++    );
++  }
++}
++
++/// Un essai proposé pour la suite : statut, texte, constat, sources.
++class InsightTrialCard extends StatelessWidget {
++  const InsightTrialCard({
++    super.key,
++    required this.trial,
++    required this.onOpenChat,
++    required this.onOpenConversation,
++  });
++
++  final InsightTrial trial;
++  final ValueChanged<String> onOpenChat;
++  final ValueChanged<String> onOpenConversation;
++
++  @override
++  Widget build(BuildContext context) {
++    final outcome = trial.outcome;
++    return Material(
++      key: ValueKey('insight_trial_${trial.id}'),
++      color: OmiColors.surface1,
++      borderRadius: OmiRadius.mdAll,
++      child: Padding(
++        padding: const EdgeInsets.all(OmiSpacing.md),
++        child: Column(
++          crossAxisAlignment: CrossAxisAlignment.start,
++          children: [
++            InsightTrialStatusTag(status: trial.status, domain: trial.domain),
++            const SizedBox(height: OmiSpacing.xs),
++            Text(trial.text, style: OmiType.body),
++            if (outcome != null) ...[
++              const SizedBox(height: OmiSpacing.xs),
++              Text(
++                context.l10n.insightTrialOutcome(outcome),
++                style: OmiType.subhead.copyWith(color: OmiColors.textTertiary),
++              ),
++            ],
++            InsightLinkedSourceChips(
++              sources: trial.sources,
++              onOpenChat: onOpenChat,
++              onOpenConversation: onOpenConversation,
++            ),
++          ],
++        ),
++      ),
++    );
++  }
++}
++
++/// Ce qu'est devenu un essai du bilan précédent : statut, l'essai (ou « Essai introuvable »), le constat.
++class InsightFollowUpCard extends StatelessWidget {
++  const InsightFollowUpCard({super.key, required this.followUp});
++
++  final InsightTrialFollowUp followUp;
++
++  @override
++  Widget build(BuildContext context) {
++    final l10n = context.l10n;
++    final text = followUp.text;
++    final outcome = followUp.outcome;
++    return Material(
++      color: OmiColors.surface1,
++      borderRadius: OmiRadius.mdAll,
++      child: Padding(
++        padding: const EdgeInsets.all(OmiSpacing.md),
++        child: Column(
++          crossAxisAlignment: CrossAxisAlignment.start,
++          children: [
++            InsightTrialStatusTag(status: followUp.status, domain: followUp.domain),
++            const SizedBox(height: OmiSpacing.xs),
++            Text(
++              text ?? l10n.insightBilanUnknownTrial,
++              style: text == null ? OmiType.body.copyWith(color: OmiColors.textTertiary) : OmiType.body,
++            ),
++            if (outcome != null) ...[
++              const SizedBox(height: OmiSpacing.xs),
++              Text(l10n.insightTrialOutcome(outcome), style: OmiType.subhead.copyWith(color: OmiColors.textTertiary)),
++            ],
++          ],
++        ),
++      ),
++    );
++  }
++}
+diff --git a/app/lib/pages/insights/insight_dossier_page.dart b/app/lib/pages/insights/insight_dossier_page.dart
+index f7b0d2d475..569696bfc9 100644
+--- a/app/lib/pages/insights/insight_dossier_page.dart
++++ b/app/lib/pages/insights/insight_dossier_page.dart
+@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
+ import 'package:omi/backend/http/api/insights.dart';
+ import 'package:omi/backend/http/api_result.dart';
+ import 'package:omi/backend/schema/insight_dossier.dart';
++import 'package:omi/l10n/app_localizations.dart';
+ import 'package:omi/pages/insights/insight_labels.dart';
+ import 'package:omi/pages/insights/insight_sources.dart';
+ import 'package:omi/ui/ui.dart';
+@@ -233,10 +234,11 @@ class _InsightDossierHeader extends StatelessWidget {
+             Row(
+               children: [
+                 ExcludeSemantics(
+-                  child: Icon(insightTemplateIcon(summary.template), size: 16, color: OmiColors.textSecondary),
++                  child: Icon(insightTemplateIcon(summary.template), size: 16, color: OmiColors.textTertiary),
+                 ),
+                 const SizedBox(width: OmiSpacing.xxs + 2),
+-                Expanded(child: Text(meta, style: OmiType.footnote.copyWith(color: OmiColors.textSecondary))),
++                // textTertiary : au moins 4,5:1 sur le fond en thème clair (textSecondary, translucide : 3,4:1).
++                Expanded(child: Text(meta, style: OmiType.footnote.copyWith(color: OmiColors.textTertiary))),
+               ],
+             ),
+           ],
+@@ -277,7 +279,13 @@ class InsightElementCard extends StatelessWidget {
+           child: Column(
+             crossAxisAlignment: CrossAxisAlignment.start,
+             children: [
+-              if (element.omiLead) ...[const InsightOmiLeadTag(), const SizedBox(height: OmiSpacing.xs)],
++              if (element.heardInConversation) ...[
++                const InsightHeardTag(),
++                const SizedBox(height: OmiSpacing.xs),
++              ] else if (element.omiLead) ...[
++                const InsightOmiLeadTag(),
++                const SizedBox(height: OmiSpacing.xs),
++              ],
+               Text(element.text, style: OmiType.body),
+               if (quote != null) ...[const SizedBox(height: OmiSpacing.xs), _InsightQuote(quote)],
+               _InsightSourceList(
+@@ -317,6 +325,35 @@ class InsightOmiLeadTag extends StatelessWidget {
+   }
+ }
+ 
++/// « Entendu dans une conversation » : les mots d'un autre que Mike, entendus dans une conversation enregistrée,
++/// jamais présentés comme une note de Mike. Même style que « piste d'Omi » : une icône et un libellé.
++class InsightHeardTag extends StatelessWidget {
++  const InsightHeardTag({super.key});
++
++  @override
++  Widget build(BuildContext context) {
++    final ink = OmiColors.textTertiary;
++    return Container(
++      key: const ValueKey('insight_heard_tag'),
++      padding: const EdgeInsets.symmetric(horizontal: OmiSpacing.xs, vertical: 3),
++      decoration: BoxDecoration(color: OmiColors.chipSurface, borderRadius: OmiRadius.smAll),
++      child: Row(
++        mainAxisSize: MainAxisSize.min,
++        children: [
++          ExcludeSemantics(child: Icon(Icons.hearing_outlined, size: 14, color: ink)),
++          const SizedBox(width: OmiSpacing.xxs),
++          Flexible(
++            child: Text(
++              context.l10n.insightHeardInConversation,
++              style: OmiType.footnote.copyWith(color: ink, fontWeight: FontWeight.w600),
++            ),
++          ),
++        ],
++      ),
++    );
++  }
++}
++
+ /// La citation exacte, en retrait derrière un filet.
+ class _InsightQuote extends StatelessWidget {
+   const _InsightQuote(this.quote);
+@@ -349,23 +386,9 @@ class _InsightSourceList extends StatelessWidget {
+     final dates = OmiDateFormat.of(context);
+     final session = sources.session;
+     final chips = <Widget>[
+-      if (session != null)
+-        _InsightSourceChip(
+-          key: ValueKey('insight_source_chat_${session.id}'),
+-          icon: Icons.chat_bubble_outline_rounded,
+-          label: session.title ?? l10n.untitledChat,
+-          available: session.available,
+-          onTap: () => onOpenChat(session.id),
+-        ),
++      if (session != null) insightChatSourceChip(l10n, session, onOpenChat),
+       for (final conversation in sources.conversations)
+-        _InsightSourceChip(
+-          key: ValueKey('insight_source_conversation_${conversation.id}'),
+-          icon: Icons.graphic_eq_rounded,
+-          label: conversation.title ??
+-              (conversation.date != null ? dates.date(conversation.date!.toLocal()) : l10n.untitledConversation),
+-          available: conversation.available,
+-          onTap: () => onOpenConversation(conversation.id),
+-        ),
++        insightConversationSourceChip(l10n, dates, conversation, onOpenConversation),
+     ];
+     if (chips.isEmpty) return const SizedBox.shrink();
+     return Padding(
+@@ -382,26 +405,64 @@ class _InsightSourceList extends StatelessWidget {
+   }
+ }
+ 
++/// La puce d'une discussion du chat ; supprimée et sans titre connu : « Discussion supprimée ».
++Widget insightChatSourceChip(AppLocalizations l10n, InsightSessionSource session, ValueChanged<String> onOpen) {
++  final title = session.title;
++  return InsightSourceChip(
++    key: ValueKey('insight_source_chat_${session.id}'),
++    icon: Icons.chat_bubble_outline_rounded,
++    label: title ?? (session.available ? l10n.untitledChat : l10n.insightSourceChatDeleted),
++    available: session.available,
++    // « Discussion supprimée » le dit déjà.
++    mentionUnavailable: title != null,
++    onTap: () => onOpen(session.id),
++  );
++}
++
++/// La puce d'une conversation (titre, sinon date) ; supprimée sans titre ni date : « Conversation supprimée ».
++Widget insightConversationSourceChip(
++  AppLocalizations l10n,
++  OmiDateFormat dates,
++  InsightConversationSource conversation,
++  ValueChanged<String> onOpen,
++) {
++  final named = conversation.title ?? (conversation.date != null ? dates.date(conversation.date!.toLocal()) : null);
++  return InsightSourceChip(
++    key: ValueKey('insight_source_conversation_${conversation.id}'),
++    icon: Icons.graphic_eq_rounded,
++    label: named ?? (conversation.available ? l10n.untitledConversation : l10n.insightSourceConversationDeleted),
++    available: conversation.available,
++    mentionUnavailable: named != null,
++    onTap: () => onOpen(conversation.id),
++  );
++}
++
+ /// Une source : touchée, elle ouvre la discussion ou la conversation. Supprimée depuis, elle reste listée (on
+-/// voit d'où venait l'élément) avec « N'est plus disponible », et ne s'ouvre pas.
+-class _InsightSourceChip extends StatelessWidget {
+-  const _InsightSourceChip({
++/// voit d'où venait l'élément) avec « N'est plus disponible » sur sa propre ligne, toujours lisible même quand un
++/// long titre est coupé, et ne s'ouvre pas. Sans [onTap] (le planning, le journal), elle dit seulement sur quoi
++/// l'élément s'appuie.
++class InsightSourceChip extends StatelessWidget {
++  const InsightSourceChip({
+     super.key,
+     required this.icon,
+     required this.label,
+     required this.available,
+-    required this.onTap,
++    this.mentionUnavailable = true,
++    this.onTap,
+   });
+ 
+   final IconData icon;
+   final String label;
+   final bool available;
+-  final VoidCallback onTap;
++
++  /// False quand le libellé dit déjà la suppression (« Discussion supprimée »).
++  final bool mentionUnavailable;
++  final VoidCallback? onTap;
+ 
+   @override
+   Widget build(BuildContext context) {
+     final ink = available ? OmiColors.textPrimary : OmiColors.textTertiary;
+-    final text = available ? label : '$label · ${context.l10n.insightSourceUnavailable}';
++    final style = OmiType.footnote.copyWith(color: ink);
+     final content = ConstrainedBox(
+       constraints: const BoxConstraints(minHeight: 36, maxWidth: 280),
+       child: Padding(
+@@ -412,21 +473,29 @@ class _InsightSourceChip extends StatelessWidget {
+             ExcludeSemantics(child: Icon(available ? icon : Icons.link_off_rounded, size: 16, color: ink)),
+             const SizedBox(width: 6),
+             Flexible(
+-              child: Text(text,
+-                  maxLines: 1, overflow: TextOverflow.ellipsis, style: OmiType.footnote.copyWith(color: ink)),
++              child: Column(
++                mainAxisSize: MainAxisSize.min,
++                crossAxisAlignment: CrossAxisAlignment.start,
++                children: [
++                  Text(label, maxLines: 1, overflow: TextOverflow.ellipsis, style: style),
++                  if (!available && mentionUnavailable)
++                    Text(context.l10n.insightSourceUnavailable, style: style.copyWith(fontWeight: FontWeight.w600)),
++                ],
++              ),
+             ),
+           ],
+         ),
+       ),
+     );
++    final tap = available ? onTap : null;
+     return Semantics(
+-      button: available,
++      button: tap != null,
+       enabled: available,
+       child: Material(
+         color: OmiColors.chipSurface,
+         shape: const StadiumBorder(),
+         clipBehavior: Clip.antiAlias,
+-        child: available ? InkWell(onTap: onTap, child: content) : content,
++        child: tap != null ? InkWell(onTap: tap, child: content) : content,
+       ),
+     );
+   }
+diff --git a/app/lib/pages/insights/insight_labels.dart b/app/lib/pages/insights/insight_labels.dart
+index 1cde508a65..9014a036ce 100644
+--- a/app/lib/pages/insights/insight_labels.dart
++++ b/app/lib/pages/insights/insight_labels.dart
+@@ -1,6 +1,10 @@
+ import 'package:flutter/material.dart';
+ 
++import 'package:intl/intl.dart';
++
++import 'package:omi/backend/schema/insight_maintenant_bilan.dart';
+ import 'package:omi/l10n/app_localizations.dart';
++import 'package:omi/ui/ui.dart';
+ 
+ /// Clone local : libellés traduits des gabarits et des sections d'Insights. Le serveur envoie une clé fixe
+ /// (`gabarit`, `cle`) et un nom français ; une clé inconnue garde ce nom.
+@@ -50,3 +54,67 @@ String insightDossierMeta(
+       if (count != null) l10n.insightElementCount(count),
+       if (updatedAt != null) l10n.insightUpdated(formatDate(updatedAt.toLocal())),
+     ].join(' · ');
++
++/// L'icône de la nature d'une ligne de « Maintenant » ; toujours montrée avec son libellé (Mike est daltonien :
++/// ni couleur seule, ni icône seule). Une nature inconnue a une étiquette neutre, une ligne sans nature une puce.
++IconData insightNatureIcon(String? nature) => switch (nature) {
++      'agir' => Icons.bolt_rounded,
++      'surveiller' => Icons.visibility_outlined,
++      'conseil' => Icons.tips_and_updates_outlined,
++      'encourager' => Icons.thumb_up_alt_outlined,
++      null => Icons.circle_outlined,
++      _ => Icons.label_outline_rounded,
++    };
++
++/// Le libellé de la nature ; une nature inconnue garde le mot choisi par Omi (avec sa majuscule) ; sans nature,
++/// null.
++String? insightNatureLabel(AppLocalizations l10n, String? nature) => switch (nature) {
++      'agir' => l10n.insightNatureAct,
++      'surveiller' => l10n.insightNatureWatch,
++      'conseil' => l10n.insightNatureAdvice,
++      'encourager' => l10n.insightNatureEncourage,
++      null => null,
++      _ => _capitalized(nature),
++    };
++
++/// L'icône du statut d'un essai (à essayer, tenté, pas tenté, inconnu), toujours avec son libellé.
++IconData insightTrialStatusIcon(String status) => switch (status) {
++      'propose' => Icons.science_outlined,
++      'tente' => Icons.check_circle_outline_rounded,
++      'pas_tente' => Icons.radio_button_unchecked_rounded,
++      'inconnu' => Icons.help_outline_rounded,
++      _ => Icons.label_outline_rounded,
++    };
++
++String insightTrialStatusLabel(AppLocalizations l10n, String status) => switch (status) {
++      'propose' => l10n.insightTrialProposed,
++      'tente' => l10n.insightTrialTried,
++      'pas_tente' => l10n.insightTrialNotTried,
++      'inconnu' => l10n.insightTrialUnknown,
++      _ => _capitalized(status),
++    };
++
++/// « rappel » → « Rappel » : un mot choisi par Omi s'affiche comme les libellés connus.
++String _capitalized(String word) => word.isEmpty ? word : word[0].toUpperCase() + word.substring(1);
++
++/// « 5 oct. – 11 oct. 2026 » (l'année une fois quand elle est la même), « Depuis le … », « Jusqu'au … » ; null
++/// sans aucune date.
++String? insightPeriodLabel(AppLocalizations l10n, OmiDateFormat dates, InsightPeriod period) {
++  final start = period.start?.toLocal();
++  final end = period.end?.toLocal();
++  if (start == null && end == null) return null;
++  if (start == null) return l10n.insightPeriodUntil(dates.date(end!));
++  if (end == null) return l10n.insightPeriodFrom(dates.date(start));
++  if (start.year == end.year && start.month == end.month && start.day == end.day) return dates.date(end);
++  final startText = start.year == end.year ? DateFormat.MMMd(dates.localeName).format(start) : dates.date(start);
++  return '$startText – ${dates.date(end)}';
++}
++
++/// Le titre d'un bilan : celui choisi par Omi, sinon « Bilan ».
++String insightBilanTitle(AppLocalizations l10n, InsightBilanSummary bilan) => bilan.title ?? l10n.insightBilanTitle;
++
++/// La ligne sous le titre d'un bilan : « 5 oct. – 11 oct. 2026 · 3 essais ».
++String insightBilanMeta(AppLocalizations l10n, OmiDateFormat dates, InsightBilanSummary bilan) => [
++      if (insightPeriodLabel(l10n, dates, bilan.period) case final period?) period,
++      l10n.insightBilanTrialCount(bilan.trialCount),
++    ].join(' · ');
+diff --git a/app/lib/pages/insights/insight_now_card.dart b/app/lib/pages/insights/insight_now_card.dart
+new file mode 100644
+index 0000000000..f92597a905
+--- /dev/null
++++ b/app/lib/pages/insights/insight_now_card.dart
+@@ -0,0 +1,364 @@
++import 'dart:async';
++
++import 'package:flutter/material.dart';
++
++import 'package:omi/backend/http/api/insights.dart';
++import 'package:omi/backend/http/api_result.dart';
++import 'package:omi/backend/schema/insight_maintenant_bilan.dart';
++import 'package:omi/pages/insights/insight_dossier_page.dart';
++import 'package:omi/pages/insights/insight_labels.dart';
++import 'package:omi/pages/insights/insight_sources.dart';
++import 'package:omi/ui/ui.dart';
++import 'package:omi/utils/l10n_extensions.dart';
++
++/// Clone local : la carte « Maintenant », en haut de l'onglet Insights. Ce qui compte dans l'immédiat (agir,
++/// surveiller, un conseil, un bon signe…), tenu à jour par Omi après chaque conversation ou discussion et chaque
++/// matin. Autant de lignes qu'Omi le juge (aucune, une, douze…), dans son ordre. Chaque ligne montre sa nature par
++/// une icône ET un libellé (jamais la couleur seule) ; la toucher ouvre sa source ; appui long : la retirer.
++/// Encres : textPrimary et textTertiary, au moins 4,5:1 sur la carte en thème clair (textSecondary, translucide,
++/// n'y donne que 3,4:1 ; Mike lit en thème clair).
++class InsightNowCard extends StatelessWidget {
++  const InsightNowCard({
++    super.key,
++    required this.now,
++    this.problem,
++    required this.onRetry,
++    required this.onOpenLine,
++    required this.onRemoveLine,
++  });
++
++  /// Null tant que rien n'a été lu.
++  final InsightNow? now;
++
++  /// La dernière lecture a échoué (ce qui était affiché reste).
++  final ApiProblem? problem;
++  final VoidCallback onRetry;
++  final ValueChanged<InsightNowLine> onOpenLine;
++  final ValueChanged<InsightNowLine> onRemoveLine;
++
++  @override
++  Widget build(BuildContext context) {
++    final l10n = context.l10n;
++    final now = this.now;
++    final updatedAt = now?.updatedAt;
++    final summary = now?.summary;
++    final children = <Widget>[
++      Padding(
++        padding: const EdgeInsets.fromLTRB(OmiSpacing.md, OmiSpacing.md, OmiSpacing.md, OmiSpacing.xs),
++        // Le titre en entier, l'heure à droite ; en grand texte, l'heure passe dessous plutôt que de couper le titre.
++        child: Wrap(
++          alignment: WrapAlignment.spaceBetween,
++          crossAxisAlignment: WrapCrossAlignment.end,
++          spacing: OmiSpacing.sm,
++          children: [
++            Semantics(header: true, child: Text(l10n.insightNowTitle, style: OmiType.headline)),
++            if (updatedAt != null)
++              Text(
++                l10n.insightNowUpdated(OmiDateFormat.of(context).timestamp(updatedAt.toLocal())),
++                style: OmiType.footnote.copyWith(color: OmiColors.textTertiary),
++              ),
++          ],
++        ),
++      ),
++      if (summary != null)
++        Padding(
++          padding: const EdgeInsets.fromLTRB(OmiSpacing.md, 0, OmiSpacing.md, OmiSpacing.xs),
++          child: Text(summary, style: OmiType.subhead),
++        ),
++    ];
++    if (now == null && problem == null) {
++      children.add(const Padding(
++        padding: EdgeInsets.all(OmiSpacing.md),
++        child: Center(child: OmiSpinner(size: OmiSpinnerSize.small)),
++      ));
++    } else if (now == null) {
++      children.add(_InsightNowFailure(onRetry: onRetry));
++    } else if (now.lines.isEmpty) {
++      children.add(Padding(
++        key: const ValueKey('insight_now_empty'),
++        padding: const EdgeInsets.fromLTRB(OmiSpacing.md, 0, OmiSpacing.md, OmiSpacing.md),
++        child: Text(l10n.insightNowEmpty, style: OmiType.subhead.copyWith(color: OmiColors.textTertiary)),
++      ));
++    } else {
++      for (final (index, line) in now.lines.indexed) {
++        if (index > 0) {
++          children.add(Divider(height: 1, thickness: 0.5, color: OmiColors.border, indent: 44, endIndent: 0));
++        }
++        children.add(InsightNowLineTile(
++          line: line,
++          onTap: () => onOpenLine(line),
++          onLongPress: () => onRemoveLine(line),
++        ));
++      }
++      children.add(const SizedBox(height: OmiSpacing.xs));
++    }
++    return Material(
++      key: const ValueKey('insight_now_card'),
++      color: OmiColors.surface1,
++      borderRadius: OmiRadius.mdAll,
++      clipBehavior: Clip.antiAlias,
++      child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, mainAxisSize: MainAxisSize.min, children: children),
++    );
++  }
++}
++
++class _InsightNowFailure extends StatelessWidget {
++  const _InsightNowFailure({required this.onRetry});
++
++  final VoidCallback onRetry;
++
++  @override
++  Widget build(BuildContext context) {
++    final l10n = context.l10n;
++    return Padding(
++      padding: const EdgeInsets.fromLTRB(OmiSpacing.md, 0, OmiSpacing.xs, OmiSpacing.xs),
++      child: Row(
++        children: [
++          ExcludeSemantics(child: Icon(Icons.cloud_off_rounded, size: 18, color: OmiColors.textTertiary)),
++          const SizedBox(width: OmiSpacing.xs),
++          Expanded(
++            child: Text(l10n.insightNowLoadError, style: OmiType.subhead.copyWith(color: OmiColors.textTertiary)),
++          ),
++          OmiButton.tertiary(label: l10n.tryAgain, size: OmiButtonSize.compact, onPressed: onRetry),
++        ],
++      ),
++    );
++  }
++}
++
++/// Une ligne de « Maintenant » : nature (icône et libellé) et domaine, le texte, la citation éventuelle. Toucher :
++/// ouvrir sa source ; appui long : la retirer.
++class InsightNowLineTile extends StatelessWidget {
++  const InsightNowLineTile({super.key, required this.line, required this.onTap, required this.onLongPress});
++
++  final InsightNowLine line;
++  final VoidCallback onTap;
++  final VoidCallback onLongPress;
++
++  @override
++  Widget build(BuildContext context) {
++    final l10n = context.l10n;
++    final label = insightNatureLabel(l10n, line.nature);
++    final meta = [if (label != null) label, if (line.domain != null) line.domain!].join(' · ');
++    final quote = line.quote;
++    final hasSources = !line.sources.isEmpty;
++    return InkWell(
++      key: ValueKey('insight_now_line_${line.id}'),
++      onTap: hasSources ? onTap : null,
++      onLongPress: onLongPress,
++      child: ConstrainedBox(
++        constraints: const BoxConstraints(minHeight: 48),
++        child: Padding(
++          padding: const EdgeInsets.fromLTRB(OmiSpacing.md, OmiSpacing.sm, OmiSpacing.xs, OmiSpacing.sm),
++          child: Row(
++            crossAxisAlignment: CrossAxisAlignment.start,
++            children: [
++              Padding(
++                padding: const EdgeInsets.only(top: 1),
++                child: ExcludeSemantics(
++                  child: Icon(insightNatureIcon(line.nature), size: 20, color: OmiColors.textTertiary),
++                ),
++              ),
++              const SizedBox(width: OmiSpacing.sm),
++              Expanded(
++                child: Column(
++                  crossAxisAlignment: CrossAxisAlignment.start,
++                  children: [
++                    if (meta.isNotEmpty)
++                      Text(
++                        meta,
++                        key: ValueKey('insight_now_meta_${line.id}'),
++                        maxLines: 1,
++                        overflow: TextOverflow.ellipsis,
++                        style: OmiType.footnote.copyWith(color: OmiColors.textTertiary, fontWeight: FontWeight.w600),
++                      ),
++                    if (line.heardInConversation) ...[
++                      const SizedBox(height: 2),
++                      const InsightHeardTag(),
++                      const SizedBox(height: 4),
++                    ],
++                    Text(line.text, style: OmiType.callout),
++                    // La citation en entier : quand la seule source s'ouvre d'un toucher, c'est ici qu'elle se lit.
++                    if (quote != null) ...[
++                      const SizedBox(height: 2),
++                      Text(
++                        quote,
++                        style: OmiType.footnote.copyWith(color: OmiColors.textTertiary, fontStyle: FontStyle.italic),
++                      ),
++                    ],
++                  ],
++                ),
++              ),
++              SizedBox(
++                width: 24,
++                child: hasSources
++                    ? ExcludeSemantics(
++                        child: Icon(Icons.chevron_right_rounded, size: 20, color: OmiColors.textTertiary),
++                      )
++                    : null,
++              ),
++            ],
++          ),
++        ),
++      ),
++    );
++  }
++}
++
++/// Toucher une ligne (ou un essai) : une seule source à ouvrir l'ouvre tout de suite ; sinon (plusieurs, aucune
++/// encore là, planning ou journal) une feuille montre le texte, sa citation et toutes ses sources.
++Future<void> openInsightLinkedSources(
++  BuildContext context, {
++  required String text,
++  String? quote,
++  required InsightLinkedSources sources,
++  required InsightSourceOpener opener,
++}) async {
++  OmiHaptics.selection();
++  if (sources.openableCount == 1) {
++    final session = sources.sessions.where((source) => source.available).firstOrNull;
++    if (session != null) return opener.openChat(context, session.id);
++    final conversation = sources.conversations.firstWhere((source) => source.available);
++    return opener.openConversation(context, conversation.id);
++  }
++  String? chosenChat;
++  String? chosenConversation;
++  await showOmiSheet<void>(
++    context: context,
++    title: context.l10n.insightSources,
++    // Elle défile : un long texte, sa citation et ses sources ne tiennent pas toujours (grand texte, petit écran).
++    builder: (sheetContext) => SingleChildScrollView(
++      padding: const EdgeInsets.only(bottom: OmiSpacing.lg),
++      child: Column(
++        mainAxisSize: MainAxisSize.min,
++        crossAxisAlignment: CrossAxisAlignment.start,
++        children: [
++          Text(text, style: OmiType.body),
++          if (quote != null) ...[
++            const SizedBox(height: OmiSpacing.xs),
++            Text(quote, style: OmiType.subhead.copyWith(color: OmiColors.textTertiary, fontStyle: FontStyle.italic)),
++          ],
++          InsightLinkedSourceChips(
++            sources: sources,
++            showTitle: false,
++            onOpenChat: (id) {
++              chosenChat = id;
++              Navigator.of(sheetContext).pop();
++            },
++            onOpenConversation: (id) {
++              chosenConversation = id;
++              Navigator.of(sheetContext).pop();
++            },
++          ),
++        ],
++      ),
++    ),
++  );
++  if (!context.mounted) return;
++  final chat = chosenChat;
++  final conversation = chosenConversation;
++  if (chat != null) return opener.openChat(context, chat);
++  if (conversation != null) return opener.openConversation(context, conversation);
++}
++
++/// Les sources d'une ligne ou d'un essai, en puces : discussions et conversations (ouvrables ; supprimées :
++/// « N'est plus disponible »), planning et journal (rien à ouvrir).
++class InsightLinkedSourceChips extends StatelessWidget {
++  const InsightLinkedSourceChips({
++    super.key,
++    required this.sources,
++    required this.onOpenChat,
++    required this.onOpenConversation,
++    this.showTitle = true,
++  });
++
++  final InsightLinkedSources sources;
++  final ValueChanged<String> onOpenChat;
++  final ValueChanged<String> onOpenConversation;
++  final bool showTitle;
++
++  @override
++  Widget build(BuildContext context) {
++    final l10n = context.l10n;
++    final dates = OmiDateFormat.of(context);
++    final chips = <Widget>[
++      for (final session in sources.sessions) insightChatSourceChip(l10n, session, onOpenChat),
++      for (final conversation in sources.conversations)
++        insightConversationSourceChip(l10n, dates, conversation, onOpenConversation),
++      if (sources.planning)
++        InsightSourceChip(
++          key: const ValueKey('insight_source_planning'),
++          icon: Icons.event_note_outlined,
++          label: l10n.insightSourcePlanning,
++          available: true,
++        ),
++      if (sources.journal)
++        InsightSourceChip(
++          key: const ValueKey('insight_source_journal'),
++          icon: Icons.menu_book_outlined,
++          label: l10n.insightSourceJournal,
++          available: true,
++        ),
++    ];
++    if (chips.isEmpty) return const SizedBox.shrink();
++    return Padding(
++      padding: const EdgeInsets.only(top: OmiSpacing.sm),
++      child: Column(
++        crossAxisAlignment: CrossAxisAlignment.start,
++        children: [
++          if (showTitle) ...[
++            Text(l10n.insightSources, style: OmiType.footnote.copyWith(color: OmiColors.textTertiary)),
++            const SizedBox(height: OmiSpacing.xxs),
++          ],
++          Wrap(spacing: OmiSpacing.xs, runSpacing: OmiSpacing.xs, children: chips),
++        ],
++      ),
++    );
++  }
++}
++
++/// Appui long sur une ligne : « Retirer », confirmé, puis retirée sur le serveur (Omi ne la remettra plus).
++/// Rend « Maintenant » à jour, ou null si rien n'a changé ici (annulé, échec ; une ligne déjà partie relit tout
++/// par [onGone]).
++Future<InsightNow?> removeInsightNowLine(
++  BuildContext context,
++  InsightsApi api,
++  InsightNowLine line, {
++  required VoidCallback onGone,
++}) async {
++  final chosen = Completer<bool>();
++  await showOmiRowMenu(context, title: line.text, actions: [
++    OmiMenuAction(
++      icon: Icons.remove_circle_outline_rounded,
++      label: context.l10n.insightRemove,
++      isDestructive: true,
++      onSelected: () => chosen.complete(true),
++    ),
++  ]);
++  if (!chosen.isCompleted || !context.mounted) return null;
++  final l10n = context.l10n;
++  final confirmed = await showOmiConfirm(
++    context,
++    title: l10n.insightNowRemoveQuestion,
++    message: l10n.insightNowRemoveMessage,
++    confirmLabel: l10n.insightRemove,
++    destructive: true,
++  );
++  if (!confirmed || !context.mounted) return null;
++  final result = await api.removeNowLine(line.id);
++  if (!context.mounted) return null;
++  switch (result) {
++    case ApiSuccess(:final data):
++      OmiHaptics.success();
++      OmiFeedback.confirm(context, l10n.insightRemoved);
++      return data.now;
++    case ApiFailure(:final problem) when problem.kind == ApiProblemKind.notFound:
++      // Déjà partie (Omi a refait le point entre-temps) : pas une panne ; relire montre l'état réel.
++      OmiFeedback.info(context, l10n.insightNowLineGone);
++      onGone();
++      return null;
++    case ApiFailure():
++      OmiFeedback.error(context, l10n.somethingWentWrong);
++      return null;
++  }
++}
+diff --git a/app/lib/pages/insights/insights_page.dart b/app/lib/pages/insights/insights_page.dart
+index a07a26a6c8..756277be65 100644
+--- a/app/lib/pages/insights/insights_page.dart
++++ b/app/lib/pages/insights/insights_page.dart
+@@ -5,17 +5,22 @@ import 'package:flutter/material.dart';
+ import 'package:omi/backend/http/api/insights.dart';
+ import 'package:omi/backend/http/api_result.dart';
+ import 'package:omi/backend/schema/insight_dossier.dart';
++import 'package:omi/backend/schema/insight_maintenant_bilan.dart';
++import 'package:omi/pages/insights/insight_bilan_page.dart';
+ import 'package:omi/pages/insights/insight_dossier_page.dart';
+ import 'package:omi/pages/insights/insight_labels.dart';
++import 'package:omi/pages/insights/insight_now_card.dart';
+ import 'package:omi/pages/insights/insight_sources.dart';
+ import 'package:omi/ui/ui.dart';
+ import 'package:omi/utils/l10n_extensions.dart';
+ import 'package:omi/utils/other/temp.dart';
+ import 'package:omi/widgets/home_bottom_bar.dart';
+ 
+-/// Clone local : le troisième onglet de l'accueil (Accueil, Tâches, Insights). Les dossiers vivants qu'Omi tient
+-/// à partir des discussions du chat, un par personne, relation ou thème, le plus récemment mis à jour d'abord.
+-/// Toucher un dossier l'ouvre ; appui long : le retirer. Lecture seule sinon : Omi décide seul de ce qui entre.
++/// Clone local : le troisième onglet de l'accueil (Accueil, Tâches, Insights). En haut, « Maintenant » (ce qui
++/// compte dans l'immédiat), puis le dernier « Bilan » (la profondeur : sections, essais et leur suivi), puis les
++/// dossiers vivants qu'Omi tient à partir des discussions du chat, un par personne, relation ou thème, le plus
++/// récemment mis à jour d'abord. Toucher ouvre ; appui long : retirer. Lecture seule sinon : Omi décide seul de
++/// ce qui entre. Les trois se lisent ensemble, et la panne de l'un ne cache pas les autres.
+ class InsightsPage extends StatefulWidget {
+   const InsightsPage({super.key, this.api, this.sources = const InsightSourceOpener()});
+ 
+@@ -33,6 +38,13 @@ class InsightsPageState extends State<InsightsPage> with AutomaticKeepAliveClien
+   /// Null tant que rien n'a été lu.
+   List<InsightDossierSummary>? _dossiers;
+   ApiProblem? _problem;
++  InsightNow? _now;
++  ApiProblem? _nowProblem;
++  List<InsightBilanSummary>? _bilans;
++  ApiProblem? _bilansProblem;
++
++  /// La première lecture des trois est terminée (avant : un seul indicateur d'attente, sans saut de mise en page).
++  bool _loaded = false;
+   Future<void>? _loading;
+ 
+   @override
+@@ -56,8 +68,8 @@ class InsightsPageState extends State<InsightsPage> with AutomaticKeepAliveClien
+     }
+   }
+ 
+-  /// Relit la liste (onglet rouvert, retour d'un dossier, tirer pour rafraîchir). Un échec garde ce qui est
+-  /// affiché ; [reportFailure] le dit alors par un message.
++  /// Relit « Maintenant », les bilans et les dossiers (onglet rouvert, retour d'un dossier ou d'un bilan, tirer
++  /// pour rafraîchir). Un échec garde ce qui est affiché ; [reportFailure] le dit alors par un message.
+   Future<void> refresh({bool reportFailure = false}) {
+     final running = _loading;
+     if (running != null) return running;
+@@ -67,19 +79,68 @@ class InsightsPageState extends State<InsightsPage> with AutomaticKeepAliveClien
+   }
+ 
+   Future<void> _load({required bool reportFailure}) async {
+-    final result = await _api.list();
++    final (dossiers, now, bilans) = await (_api.list(), _api.now(), _api.bilans()).wait;
+     if (!mounted) return;
+-    final hadRows = _dossiers != null;
++    final hadContent = _dossiers != null || _now != null || _bilans != null;
+     setState(() {
+-      switch (result) {
++      _loaded = true;
++      switch (dossiers) {
+         case ApiSuccess(:final data):
+           _dossiers = data;
+           _problem = null;
+         case ApiFailure(:final problem):
+           _problem = problem;
+       }
++      switch (now) {
++        case ApiSuccess(:final data):
++          _now = data;
++          _nowProblem = null;
++        case ApiFailure(:final problem):
++          _nowProblem = problem;
++      }
++      switch (bilans) {
++        case ApiSuccess(:final data):
++          _bilans = data;
++          _bilansProblem = null;
++        case ApiFailure(:final problem):
++          _bilansProblem = problem;
++      }
++    });
++    final failed = dossiers is ApiFailure || now is ApiFailure || bilans is ApiFailure;
++    if (reportFailure && hadContent && failed) OmiFeedback.error(context, context.l10n.insightsLoadError);
++  }
++
++  /// Relit seulement « Maintenant » (Réessayer sur la carte, ligne déjà partie).
++  Future<void> _reloadNow() async {
++    final result = await _api.now();
++    if (!mounted) return;
++    setState(() {
++      switch (result) {
++        case ApiSuccess(:final data):
++          _now = data;
++          _nowProblem = null;
++        case ApiFailure(:final problem):
++          _nowProblem = problem;
++      }
+     });
+-    if (reportFailure && hadRows && result is ApiFailure) OmiFeedback.error(context, context.l10n.insightsLoadError);
++  }
++
++  void _openLine(InsightNowLine line) => unawaited(
++        openInsightLinkedSources(context,
++            text: line.text, quote: line.quote, sources: line.sources, opener: widget.sources),
++      );
++
++  Future<void> _removeLine(InsightNowLine line) async {
++    final updated = await removeInsightNowLine(context, _api, line, onGone: () => unawaited(_reloadNow()));
++    if (updated == null || !mounted) return;
++    setState(() => _now = updated);
++  }
++
++  Future<void> _openBilan(InsightBilanSummary bilan) async {
++    OmiHaptics.selection();
++    await routeToInsightBilan(context, bilan, bilans: _bilans ?? const [], api: _api, sources: widget.sources);
++    // Le bilan a pu être retiré, ou un autre arriver.
++    if (mounted) unawaited(refresh());
+   }
+ 
+   Future<void> _open(InsightDossierSummary dossier) async {
+@@ -98,30 +159,102 @@ class InsightsPageState extends State<InsightsPage> with AutomaticKeepAliveClien
+   @override
+   Widget build(BuildContext context) {
+     super.build(context);
++    final slivers = <Widget>[const SliverPadding(padding: EdgeInsets.only(top: OmiSpacing.xs))];
++    if (!_loaded) {
++      slivers.add(const SliverFillRemaining(hasScrollBody: false, child: OmiLoadingState()));
++    } else {
++      slivers
++        ..add(_boxed(InsightNowCard(
++          now: _now,
++          problem: _nowProblem,
++          onRetry: () => unawaited(_reloadNow()),
++          onOpenLine: _openLine,
++          onRemoveLine: (line) => unawaited(_removeLine(line)),
++        )))
++        ..addAll(_bilanSlivers(context))
++        ..addAll(_dossierSlivers(context));
++    }
++    slivers.add(SliverPadding(padding: EdgeInsets.only(bottom: homeBottomClearance(context))));
++    return RefreshIndicator(
++      onRefresh: () {
++        OmiHaptics.medium();
++        return refresh(reportFailure: true);
++      },
++      child: CustomScrollView(
++        key: const ValueKey('insights_list'),
++        controller: _scrollController,
++        physics: const AlwaysScrollableScrollPhysics(),
++        slivers: slivers,
++      ),
++    );
++  }
++
++  Widget _boxed(Widget child, {double top = 0}) => SliverPadding(
++        padding: EdgeInsets.fromLTRB(OmiSpacing.md, top, OmiSpacing.md, 0),
++        sliver: SliverToBoxAdapter(child: child),
++      );
++
++  /// Le dernier bilan s'il y en a un ; aucune carte avant le premier ; une panne le dit sans cacher le reste.
++  List<Widget> _bilanSlivers(BuildContext context) {
++    final latest = _bilans?.firstOrNull;
++    if (latest != null) {
++      return [
++        _boxed(top: OmiSpacing.sm, InsightBilanCard(bilan: latest, onTap: () => unawaited(_openBilan(latest)))),
++      ];
++    }
++    if (_bilans == null && _bilansProblem != null) {
++      return [
++        _boxed(
++          top: OmiSpacing.sm,
++          Row(
++            key: const ValueKey('insight_bilans_failure'),
++            children: [
++              const SizedBox(width: OmiSpacing.xxs),
++              Expanded(
++                child: Text(
++                  context.l10n.insightBilanLoadError,
++                  style: OmiType.subhead.copyWith(color: OmiColors.textTertiary),
++                ),
++              ),
++              OmiButton.tertiary(
++                label: context.l10n.tryAgain,
++                size: OmiButtonSize.compact,
++                onPressed: () => unawaited(refresh()),
++              ),
++            ],
++          ),
++        ),
++      ];
++    }
++    return const [];
++  }
++
++  /// Les dossiers, sous leur titre ; aucun encore : une phrase discrète (« Maintenant » et le bilan restent au-dessus).
++  List<Widget> _dossierSlivers(BuildContext context) {
+     final l10n = context.l10n;
+     final dossiers = _dossiers;
+-    final Widget body;
++    final header = _boxed(top: OmiSpacing.xl, OmiSectionHeader(l10n.insightDossiersTitle));
+     if (dossiers == null) {
+-      body = SliverFillRemaining(
+-        hasScrollBody: false,
+-        child: _problem == null
++      return [
++        header,
++        _boxed(_problem == null
+             ? const OmiLoadingState()
+-            : OmiErrorState(message: l10n.insightsLoadError, onRetry: () => refresh()),
+-      );
+-    } else if (dossiers.isEmpty) {
+-      body = SliverFillRemaining(
+-        hasScrollBody: false,
+-        child: Padding(
+-          padding: const EdgeInsets.only(bottom: 120),
+-          child: OmiEmptyState(
+-            icon: Icons.lightbulb_outline_rounded,
+-            title: l10n.insightsEmptyTitle,
+-            message: l10n.insightsEmptyMessage,
+-          ),
+-        ),
+-      );
+-    } else {
+-      body = SliverPadding(
++            : OmiErrorState(message: l10n.insightsLoadError, onRetry: () => refresh())),
++      ];
++    }
++    if (dossiers.isEmpty) {
++      return [
++        header,
++        _boxed(Padding(
++          key: const ValueKey('insight_dossiers_empty'),
++          padding: const EdgeInsets.symmetric(horizontal: OmiSpacing.xxs),
++          child: Text(l10n.insightsEmptyMessage, style: OmiType.subhead.copyWith(color: OmiColors.textTertiary)),
++        )),
++      ];
++    }
++    return [
++      header,
++      SliverPadding(
+         padding: const EdgeInsets.symmetric(horizontal: OmiSpacing.md),
+         sliver: SliverList.separated(
+           itemCount: dossiers.length,
+@@ -135,24 +268,8 @@ class InsightsPageState extends State<InsightsPage> with AutomaticKeepAliveClien
+             );
+           },
+         ),
+-      );
+-    }
+-    return RefreshIndicator(
+-      onRefresh: () {
+-        OmiHaptics.medium();
+-        return refresh(reportFailure: true);
+-      },
+-      child: CustomScrollView(
+-        key: const ValueKey('insights_list'),
+-        controller: _scrollController,
+-        physics: const AlwaysScrollableScrollPhysics(),
+-        slivers: [
+-          const SliverPadding(padding: EdgeInsets.only(top: OmiSpacing.xs)),
+-          body,
+-          SliverPadding(padding: EdgeInsets.only(bottom: homeBottomClearance(context))),
+-        ],
+       ),
+-    );
++    ];
+   }
+ }
+ 
+@@ -200,7 +317,7 @@ class InsightDossierRow extends StatelessWidget {
+               child: Row(
+                 children: [
+                   ExcludeSemantics(
+-                    child: Icon(insightTemplateIcon(dossier.template), size: 22, color: OmiColors.textSecondary),
++                    child: Icon(insightTemplateIcon(dossier.template), size: 22, color: OmiColors.textTertiary),
+                   ),
+                   const SizedBox(width: OmiSpacing.sm),
+                   Expanded(
+@@ -210,7 +327,8 @@ class InsightDossierRow extends StatelessWidget {
+                       children: [
+                         Text(dossier.title, maxLines: 2, overflow: TextOverflow.ellipsis, style: OmiType.headline),
+                         const SizedBox(height: 2),
+-                        Text(meta, style: OmiType.footnote.copyWith(color: OmiColors.textSecondary)),
++                        // textTertiary : au moins 4,5:1 sur la carte en thème clair (textSecondary : 3,4:1).
++                        Text(meta, style: OmiType.footnote.copyWith(color: OmiColors.textTertiary)),
+                       ],
+                     ),
+                   ),
+diff --git a/app/test/fixtures/insights_maintenant_banc_2026-10-11.json b/app/test/fixtures/insights_maintenant_banc_2026-10-11.json
+new file mode 100644
+index 0000000000..baa46fff3f
+--- /dev/null
++++ b/app/test/fixtures/insights_maintenant_banc_2026-10-11.json
+@@ -0,0 +1,113 @@
++{
++ "_origine": "Réponse réelle de GET /v1/insights/maintenant sur la sortie du banc du 2026-10-11 (relecture contradictoire, /tmp/omi-audit/revue-mb/reponses/maintenant.json), lignes 1, 2 et 7, avant la correction du serveur : la ligne 1 porte encore la même conversation deux fois (fusionnée dans sa survivante).",
++ "lignes": [
++  {
++   "id": "56a52cfd-1649-4d5f-b6f7-1e292b5d4ea3",
++   "texte": "Demain, jeudi 8 oct., le tournage prend toute ta journée, et la proposition à Arnaud est attendue avant 16 h. Ne la lance pas maintenant : bloque un créneau court tôt demain, avant le tournage. Vise une version simple : deux ateliers courts, de trente minutes maximum, chiffrés séparément, qui aboutissent au comité du 20 octobre. Ça répond à sa peur du coût et à son besoin de résultat visible.",
++   "nature": "agir",
++   "domaine": "pro",
++   "citation": "Côté budget, je suis serré jusqu'à fin novembre, je ne peux pas signer un programme complet maintenant.",
++   "sources": {
++    "messages": [
++     "banc-3",
++     "banc-conv-reunion-s06",
++     "banc-conv-reunion-s11",
++     "banc-43",
++     "banc-conv-reunion-s10",
++     "banc-41",
++     "banc-conv-reunion-s02",
++     "banc-1",
++     "banc-4",
++     "banc-conv-reunion-s08"
++    ],
++    "sessions": [
++     {
++      "id": "banc-arnaud",
++      "titre": "Proposition pour Arnaud",
++      "disponible": true
++     },
++     {
++      "id": "banc-arnaud-2",
++      "titre": null,
++      "disponible": false
++     }
++    ],
++    "conversations": [
++     {
++      "id": "banc-conv-reunion",
++      "titre": "Réunion avec Arnaud et son équipe commerciale sur le programme de formation",
++      "date": "2026-10-07T06:00:00+00:00",
++      "disponible": true
++     },
++     {
++      "id": "banc-conv-reunion",
++      "titre": "Réunion avec Arnaud et son équipe commerciale sur le programme de formation",
++      "date": "2026-10-07T06:00:00+00:00",
++      "disponible": true
++     }
++    ],
++    "planning": true,
++    "journal": false
++   }
++  },
++  {
++   "id": "ea954ce4-3401-436b-b7d4-d6b21dfcf272",
++   "texte": "Pour que ta proposition parle à l'équipe d'Arnaud, appuie-toi sur leurs vrais clients. Le premier atelier pourrait par exemple porter sur un rendez-vous de Julien : s'il est convaincu, les autres suivront, et les deux ateliers permettent en plus de comparer les équipes.",
++   "nature": "conseil",
++   "domaine": "pro",
++   "citation": "Et surtout des exemples sur nos vrais clients, sinon ils décrochent au bout de cinq minutes.",
++   "sources": {
++    "messages": [
++     "banc-42",
++     "banc-conv-reunion-s12",
++     "banc-conv-reunion-s04"
++    ],
++    "sessions": [
++     {
++      "id": "banc-arnaud-2",
++      "titre": null,
++      "disponible": false
++     }
++    ],
++    "conversations": [
++     {
++      "id": "banc-conv-reunion",
++      "titre": "Réunion avec Arnaud et son équipe commerciale sur le programme de formation",
++      "date": "2026-10-07T06:00:00+00:00",
++      "disponible": true
++     }
++    ],
++    "planning": false,
++    "journal": false
++   }
++  },
++  {
++   "id": "a39dd230-5ac6-4f2a-a24a-1fc551325001",
++   "texte": "Mercredi 14 oct., tiens strictement les dix minutes de fractions et finis sur un exercice réussi. Il comprend en classe mais panique le jour du contrôle : ce qu'il lui faut, c'est de la confiance, pas plus d'exercices.",
++   "nature": "conseil",
++   "domaine": "famille",
++   "citation": "Je comprends en classe mais le jour du contrôle je panique et j'oublie tout.",
++   "sources": {
++    "messages": [
++     "banc-conv-diner-s10",
++     "banc-conv-diner-s11",
++     "banc-conv-diner-s06"
++    ],
++    "sessions": [],
++    "conversations": [
++     {
++      "id": "banc-conv-diner",
++      "titre": "Dîner en famille",
++      "date": "2026-10-07T15:00:00+00:00",
++      "disponible": true
++     }
++    ],
++    "planning": false,
++    "journal": false
++   }
++  }
++ ],
++ "resume": "Fin de journée dense : la proposition à Arnaud est à caser avant le tournage de demain, la date ferme pour le Client Bleu arrive vendredi, et ce soir le dialogue avec Hadrien s'est rouvert.",
++ "maj": "2026-10-07T18:31:13.071429+00:00",
++ "version": 1
++}
+diff --git a/app/test/unit/insights_maintenant_bilans_test.dart b/app/test/unit/insights_maintenant_bilans_test.dart
+new file mode 100644
+index 0000000000..c9eca1eafe
+--- /dev/null
++++ b/app/test/unit/insights_maintenant_bilans_test.dart
+@@ -0,0 +1,372 @@
++// Clone local : Insights « Maintenant » et « Bilans » (0010) — lecture des formes rendues par les routes du serveur
++// du clone (backend/routers/insights.py, utils/insights_maintenant_bilans.py : maintenant_detail, bilan_resume,
++// bilan_detail) et appels de l'API. Lecture tolérante : champ manquant ou inconnu ignoré, jamais une exception.
++import 'dart:convert';
++
++import 'package:flutter_test/flutter_test.dart';
++import 'package:http/http.dart' as http;
++
++import 'package:omi/backend/http/api/insights.dart';
++import 'package:omi/backend/http/api_result.dart';
++import 'package:omi/backend/schema/insight_dossier.dart';
++import 'package:omi/backend/schema/insight_maintenant_bilan.dart';
++
++Map<String, dynamic> _sources({
++  List<Map<String, dynamic>> sessions = const [],
++  List<Map<String, dynamic>> conversations = const [],
++  bool planning = false,
++  bool journal = false,
++}) =>
++    {
++      'messages': ['m-1'],
++      'sessions': sessions,
++      'conversations': conversations,
++      'planning': planning,
++      'journal': journal
++    };
++
++/// « Maintenant » tel que `maintenant_detail` le rend.
++Map<String, dynamic> _now() => {
++      'lignes': [
++        {
++          'id': 'l1',
++          'texte': 'Rappeler Arnaud avant midi',
++          'nature': 'agir',
++          'domaine': 'pro',
++          'citation': 'je dois rappeler Arnaud',
++          'sources': _sources(
++            sessions: [
++              {'id': 's-1', 'titre': 'Point du matin', 'disponible': true}
++            ],
++            conversations: [
++              {'id': 'c-1', 'titre': 'Réunion Arnaud', 'date': '2026-10-10T09:00:00+00:00', 'disponible': true},
++              {'id': 'c-2', 'titre': null, 'date': null, 'disponible': false},
++            ],
++          ),
++        },
++        {'id': 'l2', 'texte': 'Le sommeil remonte', 'nature': 'Rappel', 'sources': _sources(journal: true)},
++        // Illisibles : écartées sans cacher le reste.
++        {'id': 'sans texte'},
++        {'texte': 'sans id'},
++        'pas un objet',
++        null,
++      ],
++      'resume': 'Une journée chargée côté pro.',
++      'maj': '2026-10-11T04:12:00+00:00',
++      'version': 7,
++    };
++
++Map<String, dynamic> _bilanSummary(String id, {String? title, int trials = 1}) => {
++      'id': id,
++      'titre': title,
++      'periode': {'debut': '2026-10-05', 'fin': '2026-10-11T23:59:00+04:00'},
++      'maj': '2026-10-11T18:00:00+00:00',
++      'version': 2,
++      'statut': 'actif',
++      'nb_essais': trials,
++    };
++
++/// Un bilan tel que `bilan_detail` le rend.
++Map<String, dynamic> _bilan() => {
++      ..._bilanSummary('b-2', title: 'Semaine du 5 octobre'),
++      'sections': [
++        {'titre': 'Pro', 'texte': '- Devis envoyé\n- **Démo** calée'},
++        {'titre': null, 'texte': 'Sans titre'},
++        {'titre': 'Vide'},
++        'abîmée',
++      ],
++      'essais': [
++        {
++          'id': 'y1',
++          'texte': 'Marcher vingt minutes après le déjeuner',
++          'domaine': 'santé',
++          'statut': 'propose',
++          'constat': null,
++          'sources': _sources(conversations: [
++            {'id': 'c-1', 'titre': 'Réunion Arnaud', 'date': null, 'disponible': true}
++          ]),
++        },
++        {'id': 'y2', 'texte': 'Statut inconnu', 'statut': 'abandonné'},
++        {'texte': 'sans id'},
++      ],
++      'suivi': [
++        {
++          'essai_id': 'x1',
++          'bilan_id': 'b-1',
++          'texte': 'Couper les écrans à 22 h',
++          'domaine': 'santé',
++          'disponible': true,
++          'statut': 'tente',
++          'constat': 'Trois soirs sur sept.',
++        },
++        {'essai_id': 'x9', 'bilan_id': 'b-x', 'texte': null, 'disponible': false, 'statut': 'pas_tente'},
++        {'statut': 'tente'},
++      ],
++    };
++
++http.Response _json(Object body, [int status = 200]) =>
++    http.Response(jsonEncode(body), status, headers: {'content-type': 'application/json; charset=utf-8'});
++
++void main() {
++  group('lecture', () {
++    test('« Maintenant » : lignes dans l’ordre, nature, domaine, citation, sources, résumé et date', () {
++      final now = InsightNow.fromJson(_now());
++      expect(now.lines.map((line) => line.id), ['l1', 'l2']);
++      expect(now.summary, 'Une journée chargée côté pro.');
++      expect(now.updatedAt, DateTime.utc(2026, 10, 11, 4, 12));
++      expect(now.version, 7);
++      final l1 = now.lines.first;
++      expect((l1.nature, l1.domain, l1.quote), ('agir', 'pro', 'je dois rappeler Arnaud'));
++      expect(l1.sources.sessions.single.title, 'Point du matin');
++      expect(l1.sources.conversations.map((c) => c.available), [true, false]);
++      expect(l1.sources.openableCount, 2);
++      expect(l1.sources.messages, ['m-1']);
++      final l2 = now.lines.last;
++      expect(l2.nature, 'Rappel', reason: 'une nature inconnue garde le mot d’Omi');
++      expect(l2.sources.journal, isTrue);
++      expect(l2.sources.isEmpty, isFalse);
++      expect(l2.sources.openableCount, 0);
++    });
++
++    test('« Maintenant » vide ou abîmé : jamais d’exception', () {
++      expect(InsightNow.fromJson({'lignes': [], 'resume': null, 'maj': null, 'version': 0}).isEmpty, isTrue);
++      final damaged = InsightNow.fromJson({'lignes': 'abîmées', 'resume': 42, 'maj': 12, 'version': 'sept'});
++      expect(damaged.lines, isEmpty);
++      expect((damaged.summary, damaged.updatedAt, damaged.version), (null, null, 0));
++      final line = InsightNow.fromJson({
++        'lignes': [
++          {
++            'id': 'a',
++            'texte': 'A',
++            'nature': 3,
++            'sources': 'abîmées',
++            'domaine': ['x']
++          },
++        ],
++      }).lines.single;
++      expect((line.nature, line.domain, line.sources.isEmpty), (null, null, true));
++      // La forme des dossiers (une seule discussion, « session ») se lit aussi.
++      final single = InsightLinkedSources.parse({
++        'session': {'id': 's-9', 'titre': null, 'disponible': true}
++      });
++      expect(single.sessions.single.id, 's-9');
++    });
++
++    test('une nature connue écrite autrement est ramenée à sa clé', () {
++      InsightNowLine line(String nature) => InsightNowLine.tryParse({'id': 'x', 'texte': 'x', 'nature': nature})!;
++      expect(line('Agir').nature, 'agir');
++      expect(line(' SURVEILLER ').nature, 'surveiller');
++      expect(line('Bon signe').nature, 'Bon signe', reason: 'le serveur ramène les synonymes ; l’app garde le mot');
++    });
++
++    test('retirer une ligne de l’affichage garde le reste', () {
++      final now = InsightNow.fromJson(_now()).without('l1');
++      expect(now.lines.map((line) => line.id), ['l2']);
++      expect(now.summary, isNotNull);
++    });
++
++    test('un bilan : sections libres, essais, suivi ; tout ce qui est illisible est écarté', () {
++      final bilan = InsightBilan.fromJson(_bilan());
++      expect(bilan.summary.title, 'Semaine du 5 octobre');
++      expect(bilan.summary.period.start, DateTime(2026, 10, 5));
++      expect(bilan.summary.period.end, DateTime.utc(2026, 10, 11, 19, 59));
++      expect(bilan.summary.trialCount, 1);
++      expect(bilan.sections.map((s) => (s.title, s.text)), [
++        ('Pro', '- Devis envoyé\n- **Démo** calée'),
++        (null, 'Sans titre'),
++      ]);
++      expect(bilan.trials.map((t) => (t.id, t.status)), [('y1', 'propose'), ('y2', 'abandonné')]);
++      expect(bilan.trials.first.sources.conversations.single.title, 'Réunion Arnaud');
++      expect(bilan.followUps.length, 2);
++      final tried = bilan.followUps.first;
++      expect((
++        tried.text,
++        tried.status,
++        tried.outcome,
++        tried.available
++      ), (
++        'Couper les écrans à 22 h',
++        'tente',
++        'Trois soirs sur sept.',
++        true,
++      ));
++      final lost = bilan.followUps.last;
++      expect((lost.text, lost.status, lost.available), (null, 'pas_tente', false));
++      expect(bilan.isEmpty, isFalse);
++    });
++
++    test('un bilan sans titre, sans période, sans rien : se lit quand même', () {
++      final bilan = InsightBilan.fromJson({'id': 'b', 'periode': 'x', 'sections': 'x', 'essais': null});
++      expect((bilan.summary.title, bilan.summary.period.start, bilan.summary.period.end), (null, null, null));
++      expect(bilan.isEmpty, isTrue);
++      expect(bilan.summary.isActive, isTrue);
++      expect(() => InsightBilanSummary.fromJson({'titre': 'sans id'}), throwsFormatException);
++    });
++  });
++
++  group('relecture du 2026-10-11', () {
++    test('une source, une ligne, un essai ou un élément reçus deux fois ne sont gardés qu’une fois', () {
++      final conversation = {'id': 'c-1', 'titre': 'Réunion', 'date': null, 'disponible': true};
++      final sources = InsightLinkedSources.parse({
++        'sessions': [
++          {'id': 's-1', 'disponible': true},
++          {'id': 's-1', 'disponible': true},
++        ],
++        'session': {'id': 's-1', 'disponible': true},
++        'conversations': [conversation, conversation],
++      });
++      expect(sources.sessions.map((s) => s.id), ['s-1']);
++      expect(sources.conversations.map((c) => c.id), ['c-1']);
++      expect(
++          InsightSources.parse({
++            'conversations': [conversation, conversation]
++          }).conversations,
++          hasLength(1));
++
++      final now = InsightNow.fromJson({
++        'lignes': [
++          {'id': 'l1', 'texte': 'Premier'},
++          {'id': 'l1', 'texte': 'Doublon'},
++        ],
++      });
++      expect(now.lines.map((line) => line.text), ['Premier']);
++      final bilan = InsightBilan.fromJson({
++        'id': 'b',
++        'essais': [
++          {'id': 'y', 'texte': 'Premier'},
++          {'id': 'y', 'texte': 'Doublon'},
++        ],
++      });
++      expect(bilan.trials.map((trial) => trial.text), ['Premier']);
++      final dossier = InsightDossier.fromJson({
++        'id': 'd',
++        'titre': 'Arnaud',
++        'sections': [
++          {
++            'cle': 'besoins',
++            'elements': [
++              {'id': 'e', 'texte': 'Premier'},
++            ],
++          },
++          {
++            'cle': 'a_suivre',
++            'elements': [
++              {'id': 'e', 'texte': 'Doublon'},
++              {'id': 'f', 'texte': 'Autre'},
++            ],
++          },
++        ],
++      });
++      expect(dossier.sections.map((section) => section.elements.map((e) => e.text).toList()), [
++        ['Premier'],
++        ['Autre'],
++      ]);
++    });
++
++    test('disponible : false = supprimée ; null ou absent = inconnu, compté comme disponible (rien annoncé)', () {
++      InsightConversationSource parse(Object? disponible) =>
++          InsightConversationSource.tryParse({'id': 'c', if (disponible != 'absent') 'disponible': disponible})!;
++      expect(parse(false).available, isFalse);
++      expect(parse(true).available, isTrue);
++      expect(parse(null).available, isTrue);
++      expect(parse('absent').available, isTrue);
++      expect(InsightSessionSource.tryParse({'id': 's', 'disponible': null})!.available, isTrue);
++    });
++
++    test('les mots d’un autre (origine « conversation ») : dit_par_autre, sinon l’origine décide', () {
++      final element = InsightElement.tryParse({'id': 'e', 'texte': 'x', 'origine': 'conversation'})!;
++      expect((element.heardInConversation, element.omiLead), (true, false));
++      final explicit = InsightElement.tryParse({'id': 'e', 'texte': 'x', 'origine': 'mike', 'dit_par_autre': true})!;
++      expect(explicit.heardInConversation, isTrue);
++      expect(InsightElement.tryParse({'id': 'e', 'texte': 'x', 'origine': 'omi'})!.heardInConversation, isFalse);
++      expect(
++          InsightNowLine.tryParse({'id': 'l', 'texte': 'x', 'origine': 'conversation'})!.heardInConversation, isTrue);
++      expect(InsightNowLine.tryParse({'id': 'l', 'texte': 'x', 'dit_par_autre': false})!.heardInConversation, isFalse);
++    });
++  });
++
++  group('API', () {
++    late List<ApiRequest> requests;
++    late Map<String, http.Response Function()> routes;
++
++    InsightsApi api() => InsightsApi(
++          baseUrl: 'https://example.invalid/',
++          send: (request) async {
++            requests.add(request);
++            final key = '${request.method} ${Uri.parse(request.url).path}';
++            return (routes[key] ?? () => _json({'detail': 'Not Found'}, 404))();
++          },
++        );
++
++    setUp(() {
++      requests = [];
++      routes = {};
++    });
++
++    test('« Maintenant » : GET ; vide n’est pas une erreur ; panne et illisible restent distincts', () async {
++      routes['GET /v1/insights/maintenant'] = () => _json(_now());
++      final ok = await api().now();
++      expect((ok as ApiSuccess<InsightNow>).data.lines.length, 2);
++
++      routes['GET /v1/insights/maintenant'] = () => _json({'lignes': [], 'resume': null, 'maj': null, 'version': 0});
++      expect(((await api().now()) as ApiSuccess<InsightNow>).data.isEmpty, isTrue);
++
++      routes['GET /v1/insights/maintenant'] = () => _json({'detail': 'boom'}, 500);
++      expect(((await api().now()) as ApiFailure).problem.kind, ApiProblemKind.server);
++
++      routes['GET /v1/insights/maintenant'] = () => _json(['pas', 'un', 'objet']);
++      expect(((await api().now()) as ApiFailure).problem.kind, ApiProblemKind.decode);
++    });
++
++    test('retirer une ligne : DELETE sur la ligne, rend « Maintenant » à jour ; 404 se lit', () async {
++      routes['DELETE /v1/insights/maintenant/lignes/l%201'] = () => _json({
++            'status': 'ok',
++            'deja_retire': true,
++            'maintenant': {..._now(), 'lignes': []},
++          });
++      final result = await api().removeNowLine('l 1');
++      expect(Uri.parse(requests.single.url).path, '/v1/insights/maintenant/lignes/l%201');
++      final data = (result as ApiSuccess<({bool alreadyRemoved, InsightNow now})>).data;
++      expect(data.alreadyRemoved, isTrue);
++      expect(data.now.lines, isEmpty);
++      expect(((await api().removeNowLine('nope')) as ApiFailure).problem.kind, ApiProblemKind.notFound);
++    });
++
++    test('bilans : liste du serveur dans son ordre, une ligne illisible écartée et comptée', () async {
++      routes['GET /v1/insights/bilans'] = () => _json({
++            'bilans': [
++              _bilanSummary('b-2', title: 'Semaine 2'),
++              {'titre': 'sans id'},
++              _bilanSummary('b-1'),
++            ],
++          });
++      final result = await api().bilans();
++      expect(Uri.parse(requests.single.url).queryParameters['statut'], 'actif');
++      final ok = result as ApiSuccess<List<InsightBilanSummary>>;
++      expect(ok.data.map((b) => b.id), ['b-2', 'b-1']);
++      expect(ok.rejectedRows, 1);
++
++      routes['GET /v1/insights/bilans'] = () => _json({'bilans': []});
++      expect(((await api().bilans()) as ApiSuccess<List<InsightBilanSummary>>).data, isEmpty);
++      routes['GET /v1/insights/bilans'] = () => _json({'bilans': 'abîmé'});
++      expect(((await api().bilans()) as ApiFailure).problem.kind, ApiProblemKind.decode);
++    });
++
++    test('un bilan : GET ; 404 quand il n’existe plus ; retirer : DELETE, « déjà retiré » se lit', () async {
++      routes['GET /v1/insights/bilans/b-2'] = () => _json(_bilan());
++      expect(((await api().bilan('b-2')) as ApiSuccess<InsightBilan>).data.trials.length, 2);
++      expect(((await api().bilan('nope')) as ApiFailure).problem.kind, ApiProblemKind.notFound);
++
++      routes['DELETE /v1/insights/bilans/b-2'] = () => _json({
++            'status': 'ok',
++            'deja_retire': false,
++            'bilan': {..._bilanSummary('b-2'), 'statut': 'retire'},
++          });
++      final removed =
++          (await api().removeBilan('b-2')) as ApiSuccess<({bool alreadyRemoved, InsightBilanSummary bilan})>;
++      expect((removed.data.alreadyRemoved, removed.data.bilan.isActive), (false, false));
++      routes['DELETE /v1/insights/bilans/b-2'] = () => _json({'status': 'ok', 'deja_retire': true});
++      expect(((await api().removeBilan('b-2')) as ApiFailure).problem.kind, ApiProblemKind.decode);
++    });
++  });
++}
+diff --git a/app/test/widgets/insights_maintenant_bilans_test.dart b/app/test/widgets/insights_maintenant_bilans_test.dart
+new file mode 100644
+index 0000000000..f73e8802e4
+--- /dev/null
++++ b/app/test/widgets/insights_maintenant_bilans_test.dart
+@@ -0,0 +1,699 @@
++// Clone local : Insights « Maintenant » et « Bilans » (0010) — la carte « Maintenant » en haut de l'onglet (0, 1 ou
++// 12 lignes, nature par icône ET libellé, nature inconnue neutre, champs manquants, sources ouvrables, appui long →
++// Retirer), la carte du dernier bilan, la page du bilan (sections markdown, suivi, essais avec statut, choix d'un
++// bilan précédent, retrait), le rafraîchissement, l'anglais et la lisibilité en thème clair.
++import 'dart:convert';
++
++import 'package:flutter/material.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:http/http.dart' as http;
++
++import 'package:omi/backend/http/api/insights.dart';
++import 'package:omi/backend/http/api_result.dart';
++import 'package:omi/l10n/app_localizations.dart';
++import 'package:omi/pages/insights/insight_bilan_page.dart';
++import 'package:omi/pages/insights/insight_now_card.dart';
++import 'package:omi/pages/insights/insight_sources.dart';
++import 'package:omi/pages/insights/insights_page.dart';
++import 'package:omi/ui/ui.dart';
++
++Map<String, dynamic> _line(
++  String id,
++  String text, {
++  String? nature,
++  String? domain,
++  String? quote,
++  List<Map<String, dynamic>> sessions = const [],
++  List<Map<String, dynamic>> conversations = const [],
++  bool planning = false,
++  bool journal = false,
++}) =>
++    {
++      'id': id,
++      'texte': text,
++      'nature': nature,
++      'domaine': domain,
++      'citation': quote,
++      'sources': {
++        'messages': [],
++        'sessions': sessions,
++        'conversations': conversations,
++        'planning': planning,
++        'journal': journal,
++      },
++    };
++
++const _reunion = {'id': 'c-1', 'titre': 'Réunion Arnaud', 'date': '2026-10-10T09:00:00+00:00', 'disponible': true};
++const _point = {'id': 's-1', 'titre': 'Point du matin', 'disponible': true};
++const _supprime = {'id': 'c-2', 'titre': 'Appel supprimé', 'date': null, 'disponible': false};
++
++List<Map<String, dynamic>> _defaultLines() => [
++      _line('l1', 'Rappeler Arnaud avant midi',
++          nature: 'agir', domain: 'pro', quote: 'je dois rappeler Arnaud', conversations: [_reunion]),
++      _line('l2', 'Le sommeil remonte depuis trois jours',
++          nature: 'encourager',
++          domain: 'santé',
++          sessions: [_point],
++          conversations: [_reunion, _supprime],
++          planning: true),
++      _line('l3', 'Le dossier de la banque attend ta signature', nature: 'surveiller'),
++      _line('l4', 'Couper les écrans plus tôt ce soir', nature: 'conseil', journal: true),
++      _line('l5', 'Préparer la réunion de jeudi', nature: 'rappel'),
++      _line('l6', 'Ligne sans nature ni domaine'),
++    ];
++
++Map<String, dynamic> _summary(String id, String? title, String start, String end, int trials,
++        {String statut = 'actif'}) =>
++    {
++      'id': id,
++      'titre': title,
++      'periode': {'debut': start, 'fin': end},
++      'maj': '${end}T18:00:00+00:00',
++      'version': 1,
++      'statut': statut,
++      'nb_essais': trials,
++    };
++
++/// Un faux serveur du clone : mêmes formes que backend/routers/insights.py (« Maintenant », bilans, dossiers).
++class _Server {
++  final requests = <ApiRequest>[];
++  List<Map<String, dynamic>> lines = _defaultLines();
++  String? resume = 'Une journée chargée côté pro, le reste va mieux.';
++  String? maj = '2026-10-11T04:12:00+00:00';
++  bool failNow = false;
++  bool failBilans = false;
++  final removedLines = <String>{};
++  final goneLines = <String>{};
++  final removedBilans = <String>{};
++
++  late Map<String, Map<String, dynamic>> bilans = {
++    'b-2': {
++      ..._summary('b-2', 'Semaine du 5 octobre', '2026-10-05', '2026-10-11', 2),
++      'sections': [
++        {'titre': 'Pro', 'texte': '- Devis **envoyé**\n- Démo calée pour jeudi'},
++        {'titre': 'Santé', 'texte': 'Le sommeil est meilleur quand les écrans sont coupés tôt.'},
++      ],
++      'suivi': [
++        {
++          'essai_id': 'x1',
++          'bilan_id': 'b-1',
++          'texte': 'Couper les écrans à 22 h',
++          'domaine': 'santé',
++          'disponible': true,
++          'statut': 'tente',
++          'constat': 'Trois soirs sur sept.',
++        },
++        {'essai_id': 'x9', 'bilan_id': 'b-x', 'texte': null, 'disponible': false, 'statut': 'pas_tente'},
++        {'essai_id': 'x2', 'bilan_id': 'b-1', 'texte': 'Appeler mon fils le mercredi', 'statut': 'inconnu'},
++      ],
++      'essais': [
++        {
++          'id': 'y1',
++          'texte': 'Marcher vingt minutes après le déjeuner',
++          'domaine': 'santé',
++          'statut': 'propose',
++          'sources': {
++            'messages': [],
++            'sessions': [],
++            'conversations': [_reunion],
++            'planning': false,
++            'journal': false
++          },
++        },
++        {'id': 'y2', 'texte': 'Essai au statut inconnu', 'statut': 'abandonné'},
++      ],
++    },
++    'b-1': {
++      ..._summary('b-1', 'Semaine du 28 septembre', '2026-09-28', '2026-10-04', 1),
++      'sections': [
++        {'titre': 'Ce qui a bougé', 'texte': 'Le projet avance.'},
++      ],
++      'essais': [
++        {'id': 'x1', 'texte': 'Couper les écrans à 22 h', 'statut': 'propose'},
++      ],
++      'suivi': [],
++    },
++  };
++
++  static http.Response _json(Object body, [int status = 200]) =>
++      http.Response(jsonEncode(body), status, headers: {'content-type': 'application/json; charset=utf-8'});
++
++  Map<String, dynamic> _now() => {
++        'lignes': lines.where((line) => !removedLines.contains(line['id'])).toList(),
++        'resume': resume,
++        'maj': maj,
++        'version': 3 + removedLines.length,
++      };
++
++  Map<String, dynamic> _resume(Map<String, dynamic> bilan) => {
++        for (final key in ['id', 'titre', 'periode', 'maj', 'version', 'statut', 'nb_essais']) key: bilan[key],
++      };
++
++  int count(String method, String path) =>
++      requests.where((r) => r.method == method && Uri.parse(r.url).path == path).length;
++
++  Future<http.Response> send(ApiRequest request) async {
++    requests.add(request);
++    final segments = Uri.parse(request.url).pathSegments;
++    switch (segments[2]) {
++      case 'dossiers':
++        return _json({
++          'dossiers': [
++            {
++              'id': 'arnaud',
++              'titre': 'Arnaud',
++              'gabarit': 'pro',
++              'alias': [],
++              'statut': 'actif',
++              'version': 1,
++              'maj': '2026-10-09T18:30:00+00:00',
++              'nb_elements': 2,
++            },
++          ],
++        });
++      case 'maintenant':
++        if (request.method == 'GET') return failNow ? _json({'detail': 'boom'}, 500) : _json(_now());
++        final id = segments[4];
++        if (goneLines.contains(id)) return _json({'detail': 'Line not found'}, 404);
++        removedLines.add(id);
++        return _json({'status': 'ok', 'deja_retire': false, 'maintenant': _now()});
++      case 'bilans':
++        if (segments.length == 3) {
++          if (failBilans) return _json({'detail': 'boom'}, 500);
++          return _json({
++            'bilans': [
++              for (final bilan in bilans.values)
++                if (!removedBilans.contains(bilan['id'])) _resume(bilan)
++            ],
++          });
++        }
++        final bilan = bilans[segments[3]];
++        if (bilan == null) return _json({'detail': 'Bilan not found'}, 404);
++        if (request.method == 'GET') return _json(bilan);
++        removedBilans.add(segments[3]);
++        return _json({
++          'status': 'ok',
++          'deja_retire': false,
++          'bilan': {..._resume(bilan), 'statut': 'retire'}
++        });
++    }
++    return _json({'detail': 'Not Found'}, 404);
++  }
++}
++
++class _Opened {
++  final chats = <String>[];
++  final conversations = <String>[];
++
++  InsightSourceOpener get opener => InsightSourceOpener(
++        openChat: (_, id) async => chats.add(id),
++        openConversation: (_, id) async => conversations.add(id),
++      );
++}
++
++Future<void> _pump(
++  WidgetTester tester,
++  _Server server, {
++  _Opened? opened,
++  Locale locale = const Locale('fr'),
++  Size size = const Size(390, 3000),
++  GlobalKey<InsightsPageState>? key,
++}) async {
++  // Largeur d'iPhone, assez haut pour que tout soit construit (les listes sont paresseuses).
++  tester.view.physicalSize = size;
++  tester.view.devicePixelRatio = 1;
++  addTearDown(tester.view.reset);
++  await tester.pumpWidget(MaterialApp(
++    localizationsDelegates: AppLocalizations.localizationsDelegates,
++    supportedLocales: AppLocalizations.supportedLocales,
++    locale: locale,
++    home: Scaffold(
++      body: InsightsPage(
++        key: key,
++        api: InsightsApi(baseUrl: 'https://example.invalid/', send: server.send),
++        sources: (opened ?? _Opened()).opener,
++      ),
++    ),
++  ));
++  await tester.pumpAndSettle();
++}
++
++Finder _inLine(String id, Finder matching) =>
++    find.descendant(of: find.byKey(ValueKey('insight_now_line_$id')), matching: matching);
++
++/// Contraste WCAG d'une encre (éventuellement translucide) sur un fond opaque.
++double _contrast(Color ink, Color background) {
++  final blended = Color.alphaBlend(ink, background);
++  final a = blended.computeLuminance();
++  final b = background.computeLuminance();
++  return (a > b ? a + 0.05 : b + 0.05) / (a > b ? b + 0.05 : a + 0.05);
++}
++
++/// L'encre d'un texte rendu : la première couleur posée dans ses morceaux (le markdown la met sur les enfants).
++Color? _inkOf(RichText text) {
++  Color? ink;
++  text.text.visitChildren((span) {
++    ink = span.style?.color;
++    return ink == null;
++  });
++  return ink;
++}
++
++Future<void> _openBilan(WidgetTester tester) async {
++  await tester.tap(find.byKey(const ValueKey('insight_bilan_card')));
++  await tester.pumpAndSettle();
++}
++
++void main() {
++  setUp(() => OmiColors.active = OmiPalette.light);
++
++  group('« Maintenant »', () {
++    testWidgets('en haut de l’onglet, puis le dernier bilan, puis les dossiers', (tester) async {
++      final server = _Server();
++      await _pump(tester, server);
++
++      double top(Finder finder) => tester.getTopLeft(finder).dy;
++      expect(find.text('Maintenant'), findsOneWidget);
++      expect(top(find.text('Maintenant')), lessThan(top(find.byKey(const ValueKey('insight_bilan_card')))));
++      expect(top(find.byKey(const ValueKey('insight_bilan_card'))), lessThan(top(find.text('Dossiers'))));
++      expect(top(find.text('Dossiers')), lessThan(top(find.text('Arnaud'))));
++      expect(find.text('Une journée chargée côté pro, le reste va mieux.'), findsOneWidget);
++      expect(find.textContaining('Mis à jour : '), findsOneWidget);
++      // L'ordre d'Omi est gardé.
++      final order = ['l1', 'l2', 'l3', 'l4', 'l5', 'l6'];
++      for (var i = 1; i < order.length; i++) {
++        expect(top(find.byKey(ValueKey('insight_now_line_${order[i - 1]}'))),
++            lessThan(top(find.byKey(ValueKey('insight_now_line_${order[i]}')))));
++      }
++      // Les trois routes sont lues à l'ouverture.
++      expect(server.count('GET', '/v1/insights/maintenant'), 1);
++      expect(server.count('GET', '/v1/insights/bilans'), 1);
++      expect(server.count('GET', '/v1/insights/dossiers'), 1);
++    });
++
++    testWidgets('la nature se lit par une icône ET un libellé ; une nature inconnue reste neutre', (tester) async {
++      await _pump(tester, _Server());
++
++      expect(_inLine('l1', find.text('Agir · pro')), findsOneWidget);
++      expect(_inLine('l1', find.byIcon(Icons.bolt_rounded)), findsOneWidget);
++      expect(_inLine('l1', find.text('je dois rappeler Arnaud')), findsOneWidget);
++      expect(_inLine('l2', find.text('Bon signe · santé')), findsOneWidget);
++      expect(_inLine('l2', find.byIcon(Icons.thumb_up_alt_outlined)), findsOneWidget);
++      expect(_inLine('l3', find.text('À surveiller')), findsOneWidget);
++      expect(_inLine('l3', find.byIcon(Icons.visibility_outlined)), findsOneWidget);
++      expect(_inLine('l4', find.text('Conseil')), findsOneWidget);
++      expect(_inLine('l4', find.byIcon(Icons.tips_and_updates_outlined)), findsOneWidget);
++      // Inconnue : le mot d'Omi, une étiquette neutre.
++      expect(_inLine('l5', find.text('Rappel')), findsOneWidget);
++      expect(_inLine('l5', find.byIcon(Icons.label_outline_rounded)), findsOneWidget);
++      // Sans nature ni domaine : une puce, pas de ligne de nature.
++      expect(_inLine('l6', find.byIcon(Icons.circle_outlined)), findsOneWidget);
++      expect(find.byKey(const ValueKey('insight_now_meta_l6')), findsNothing);
++      // Aucune couleur ne porte seule le sens : toutes les icônes de nature ont la même encre.
++      final inks = {
++        for (final id in ['l1', 'l2', 'l3', 'l4', 'l5', 'l6'])
++          tester.widget<Icon>(_inLine(id, find.byType(Icon)).first).color,
++      };
++      expect(inks, {OmiPalette.light.textTertiary});
++      expect(find.textContaining('Garder'), findsNothing);
++    });
++
++    testWidgets('thème clair : la carte est blanche et chaque texte s’y lit (jamais noir sur noir)', (tester) async {
++      await _pump(tester, _Server());
++
++      final card = find.byKey(const ValueKey('insight_now_card'));
++      final surface = tester.widget<Material>(card).color!;
++      expect(surface, OmiPalette.light.surface1);
++      final texts = tester.widgetList<RichText>(find.descendant(of: card, matching: find.byType(RichText)));
++      expect(texts.length, greaterThan(10));
++      for (final text in texts) {
++        final ink = _inkOf(text);
++        if (ink == null) continue;
++        expect(_contrast(ink, surface), greaterThanOrEqualTo(4.5), reason: text.text.toPlainText());
++      }
++      final lineText = tester.widget<Text>(find.text('Rappeler Arnaud avant midi'));
++      expect(_contrast(lineText.style!.color!, surface), greaterThan(15));
++    });
++
++    testWidgets('aucune ligne : « Rien de particulier pour l’instant », discret', (tester) async {
++      final server = _Server()
++        ..lines = []
++        ..resume = null;
++      await _pump(tester, server);
++      expect(find.text('Maintenant'), findsOneWidget);
++      expect(find.text('Rien de particulier pour l’instant'), findsOneWidget);
++      expect(find.byType(InsightNowLineTile), findsNothing);
++      expect(find.byKey(const ValueKey('insight_bilan_card')), findsOneWidget);
++    });
++
++    testWidgets('une seule ligne', (tester) async {
++      final server = _Server()..lines = [_defaultLines().first];
++      await _pump(tester, server);
++      expect(find.byType(InsightNowLineTile), findsOneWidget);
++      expect(find.text('Rien de particulier pour l’instant'), findsNothing);
++    });
++
++    testWidgets('douze lignes longues sur un iPhone étroit en grand texte : toutes, sans débordement', (tester) async {
++      final server = _Server()
++        ..lines = [
++          for (var i = 0; i < 12; i++)
++            _line('n$i', 'Ligne $i : ${'une phrase assez longue pour passer à la ligne ' * 2}',
++                nature: ['agir', 'surveiller', 'conseil', 'encourager', 'quelque chose de très long'][i % 5],
++                domain: 'un domaine au nom très long numéro $i',
++                quote: 'une citation ${'qui ne finit pas ' * 6}',
++                conversations: [_reunion]),
++        ];
++      tester.platformDispatcher.textScaleFactorTestValue = 1.4;
++      addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
++      await _pump(tester, server, size: const Size(320, 6000));
++      expect(tester.takeException(), isNull);
++      expect(find.byType(InsightNowLineTile), findsNWidgets(12));
++      expect(find.textContaining('Ligne 11 :'), findsOneWidget);
++    });
++
++    testWidgets('champs manquants ou abîmés : la carte s’affiche quand même', (tester) async {
++      final server = _Server()
++        ..maj = null
++        ..resume = null
++        ..lines = [
++          {'id': 'ok', 'texte': 'Seule ligne lisible', 'sources': 'abîmées', 'nature': 7},
++          {'id': 'sans-texte'},
++          {'texte': 'sans id'},
++        ];
++      await _pump(tester, server);
++      expect(tester.takeException(), isNull);
++      expect(find.byType(InsightNowLineTile), findsOneWidget);
++      expect(find.text('Seule ligne lisible'), findsOneWidget);
++      final card = find.byKey(const ValueKey('insight_now_card'));
++      expect(find.descendant(of: card, matching: find.textContaining('Mis à jour')), findsNothing);
++      // Sans source : rien à ouvrir, pas de chevron ; le toucher ne fait rien.
++      expect(_inLine('ok', find.byIcon(Icons.chevron_right_rounded)), findsNothing);
++      await tester.tap(find.text('Seule ligne lisible'));
++      await tester.pumpAndSettle();
++      expect(find.text('Sources'), findsNothing);
++    });
++
++    testWidgets('une seule source à ouvrir : toucher la ligne l’ouvre tout de suite', (tester) async {
++      final opened = _Opened();
++      await _pump(tester, _Server(), opened: opened);
++      await tester.tap(find.text('Rappeler Arnaud avant midi'));
++      await tester.pumpAndSettle();
++      expect(opened.conversations, ['c-1']);
++      expect(opened.chats, isEmpty);
++      expect(find.text('Sources'), findsNothing);
++    });
++
++    testWidgets('plusieurs sources : une feuille les montre ; une source supprimée ne s’ouvre pas', (tester) async {
++      final opened = _Opened();
++      await _pump(tester, _Server(), opened: opened);
++      await tester.tap(find.text('Le sommeil remonte depuis trois jours'));
++      await tester.pumpAndSettle();
++
++      expect(find.text('Sources'), findsOneWidget);
++      expect(find.text('Point du matin'), findsOneWidget);
++      expect(find.text('Réunion Arnaud'), findsOneWidget);
++      final lost = find.byKey(const ValueKey('insight_source_conversation_c-2'));
++      expect(find.descendant(of: lost, matching: find.text('Appel supprimé')), findsOneWidget);
++      expect(find.descendant(of: lost, matching: find.text('N’est plus disponible')), findsOneWidget);
++      expect(find.text('Planning'), findsOneWidget);
++      await tester.tap(lost);
++      await tester.tap(find.text('Planning'));
++      await tester.pumpAndSettle();
++      expect(opened.conversations, isEmpty);
++      expect(find.text('Sources'), findsOneWidget, reason: 'rien ne s’est ouvert, la feuille reste');
++
++      await tester.tap(find.text('Point du matin'));
++      await tester.pumpAndSettle();
++      expect(opened.chats, ['s-1']);
++      expect(find.text('Sources'), findsNothing);
++    });
++
++    testWidgets('le journal seul : la feuille dit sur quoi la ligne s’appuie', (tester) async {
++      await _pump(tester, _Server());
++      await tester.tap(find.text('Couper les écrans plus tôt ce soir'));
++      await tester.pumpAndSettle();
++      expect(find.text('Journal'), findsOneWidget);
++    });
++
++    testWidgets('appui long → Retirer, confirmé, retirée sur le serveur ; Annuler ne retire rien', (tester) async {
++      final server = _Server();
++      await _pump(tester, server);
++
++      await tester.longPress(find.byKey(const ValueKey('insight_now_line_l3')));
++      await tester.pumpAndSettle();
++      await tester.tap(find.text('Retirer'));
++      await tester.pumpAndSettle();
++      expect(find.text('Retirer cette ligne ?'), findsOneWidget);
++      expect(find.text('Omi ne la remettra plus.'), findsOneWidget);
++      await tester.tap(find.text('Annuler'));
++      await tester.pumpAndSettle();
++      expect(server.requests.where((r) => r.method == 'DELETE'), isEmpty);
++      expect(find.text('Le dossier de la banque attend ta signature'), findsOneWidget);
++
++      await tester.longPress(find.byKey(const ValueKey('insight_now_line_l3')));
++      await tester.pumpAndSettle();
++      await tester.tap(find.text('Retirer'));
++      await tester.pumpAndSettle();
++      await tester.tap(find.text('Retirer'));
++      await tester.pumpAndSettle();
++
++      final delete = server.requests.singleWhere((r) => r.method == 'DELETE');
++      expect(Uri.parse(delete.url).path, '/v1/insights/maintenant/lignes/l3');
++      expect(find.text('Le dossier de la banque attend ta signature'), findsNothing);
++      expect(find.byType(InsightNowLineTile), findsNWidgets(5));
++      expect(find.text('Retiré'), findsOneWidget);
++    });
++
++    testWidgets('retirer une ligne déjà partie (404) : « Cette ligne n’est plus là », relue', (tester) async {
++      final server = _Server()..goneLines.add('l3');
++      await _pump(tester, server);
++      final before = server.count('GET', '/v1/insights/maintenant');
++
++      await tester.longPress(find.byKey(const ValueKey('insight_now_line_l3')));
++      await tester.pumpAndSettle();
++      await tester.tap(find.text('Retirer'));
++      await tester.pumpAndSettle();
++      await tester.tap(find.text('Retirer'));
++      await tester.pump();
++      expect(find.text('Cette ligne n’est plus là.'), findsOneWidget);
++      expect(find.text("Une erreur s'est produite ! Veuillez réessayer plus tard."), findsNothing);
++      await tester.pumpAndSettle();
++      expect(server.count('GET', '/v1/insights/maintenant'), before + 1);
++    });
++
++    testWidgets('panne de « Maintenant » : dite sur la carte, les dossiers restent ; Réessayer', (tester) async {
++      final server = _Server()..failNow = true;
++      await _pump(tester, server);
++      expect(find.text('Impossible de charger « Maintenant ».'), findsOneWidget);
++      expect(find.text('Arnaud'), findsOneWidget);
++      expect(find.byKey(const ValueKey('insight_bilan_card')), findsOneWidget);
++
++      server.failNow = false;
++      await tester.tap(find.text('Réessayer'));
++      await tester.pumpAndSettle();
++      expect(find.text('Impossible de charger « Maintenant ».'), findsNothing);
++      expect(find.byType(InsightNowLineTile), findsNWidgets(6));
++    });
++
++    testWidgets('relue à l’ouverture de l’onglet et en tirant vers le bas', (tester) async {
++      final server = _Server()..lines = [];
++      final key = GlobalKey<InsightsPageState>();
++      // Un écran de téléphone : tirer d'un quart de sa hauteur arme le rafraîchissement.
++      await _pump(tester, server, key: key, size: const Size(390, 1000));
++      expect(find.text('Rien de particulier pour l’instant'), findsOneWidget);
++
++      // Omi a fait le point entre-temps ; l'accueil appelle refresh() quand l'onglet est rouvert.
++      server.lines = [_defaultLines().first];
++      await key.currentState!.refresh();
++      await tester.pumpAndSettle();
++      expect(find.text('Rappeler Arnaud avant midi'), findsOneWidget);
++      expect(server.count('GET', '/v1/insights/maintenant'), 2);
++
++      server.lines = _defaultLines();
++      await tester.drag(find.byKey(const ValueKey('insights_list')), const Offset(0, 600));
++      await tester.pumpAndSettle();
++      expect(server.count('GET', '/v1/insights/maintenant'), 3);
++      expect(find.byType(InsightNowLineTile), findsNWidgets(6));
++    });
++  });
++
++  group('Bilans', () {
++    testWidgets('la carte montre le dernier bilan : titre, période, nombre d’essais', (tester) async {
++      await _pump(tester, _Server());
++      final card = find.byKey(const ValueKey('insight_bilan_card'));
++      expect(find.descendant(of: card, matching: find.text('Dernier bilan')), findsOneWidget);
++      expect(find.descendant(of: card, matching: find.text('Semaine du 5 octobre')), findsOneWidget);
++      expect(find.descendant(of: card, matching: find.textContaining('2 essais')), findsOneWidget);
++      expect(find.descendant(of: card, matching: find.textContaining('oct.')), findsOneWidget);
++      expect(find.text('Semaine du 28 septembre'), findsNothing);
++    });
++
++    testWidgets('aucun bilan : pas de carte', (tester) async {
++      final server = _Server()..bilans.clear();
++      await _pump(tester, server);
++      expect(find.byKey(const ValueKey('insight_bilan_card')), findsNothing);
++      expect(find.text('Impossible de charger les bilans.'), findsNothing);
++      expect(find.byType(InsightNowLineTile), findsNWidgets(6));
++    });
++
++    testWidgets('panne des bilans : dite sans cacher le reste ; Réessayer', (tester) async {
++      final failing = _Server()..failBilans = true;
++      await _pump(tester, failing);
++      expect(find.text('Impossible de charger les bilans.'), findsOneWidget);
++      expect(find.byKey(const ValueKey('insight_bilan_card')), findsNothing);
++      expect(find.byType(InsightNowLineTile), findsNWidgets(6));
++      expect(find.text('Arnaud'), findsOneWidget);
++
++      failing.failBilans = false;
++      await tester.tap(find.text('Réessayer'));
++      await tester.pumpAndSettle();
++      expect(find.text('Impossible de charger les bilans.'), findsNothing);
++      expect(find.byKey(const ValueKey('insight_bilan_card')), findsOneWidget);
++    });
++
++    testWidgets('la page : sections libres en markdown, suivi des essais, essais pour la suite', (tester) async {
++      final opened = _Opened();
++      final server = _Server();
++      await _pump(tester, server, opened: opened);
++      await _openBilan(tester);
++
++      expect(find.byType(InsightBilanPage), findsOneWidget);
++      expect(server.count('GET', '/v1/insights/bilans/b-2'), 1);
++      expect(find.text('Semaine du 5 octobre'), findsOneWidget);
++      expect(find.text('Pro'), findsOneWidget);
++      expect(find.text('Santé'), findsOneWidget);
++      expect(find.textContaining('Devis envoyé'), findsOneWidget, reason: 'le gras markdown est rendu, pas les **');
++      expect(find.textContaining('**'), findsNothing);
++      expect(find.text('Le sommeil est meilleur quand les écrans sont coupés tôt.'), findsOneWidget);
++
++      double top(Finder finder) => tester.getTopLeft(finder).dy;
++      expect(top(find.text('Pro')), lessThan(top(find.text('Suivi des essais précédents'))));
++      expect(top(find.text('Suivi des essais précédents')), lessThan(top(find.text('Essais pour la suite'))));
++
++      // Suivi : statut par icône ET libellé, constat ; un essai introuvable le dit.
++      final tried = find.byKey(const ValueKey('insight_follow_up_0'));
++      expect(find.descendant(of: tried, matching: find.text('Tenté')), findsOneWidget);
++      expect(find.descendant(of: tried, matching: find.byIcon(Icons.check_circle_outline_rounded)), findsOneWidget);
++      expect(find.descendant(of: tried, matching: find.text('Couper les écrans à 22 h')), findsOneWidget);
++      expect(find.descendant(of: tried, matching: find.text('Constat : Trois soirs sur sept.')), findsOneWidget);
++      final lost = find.byKey(const ValueKey('insight_follow_up_1'));
++      expect(find.descendant(of: lost, matching: find.text('Pas tenté')), findsOneWidget);
++      expect(find.descendant(of: lost, matching: find.byIcon(Icons.radio_button_unchecked_rounded)), findsOneWidget);
++      expect(find.descendant(of: lost, matching: find.text('Essai introuvable')), findsOneWidget);
++      final unknown = find.byKey(const ValueKey('insight_follow_up_2'));
++      expect(find.descendant(of: unknown, matching: find.text('Inconnu')), findsOneWidget);
++      expect(find.descendant(of: unknown, matching: find.byIcon(Icons.help_outline_rounded)), findsOneWidget);
++
++      // Essais : « À essayer », domaine, sources ouvrables ; un statut inconnu reste neutre avec son mot.
++      final trial = find.byKey(const ValueKey('insight_trial_y1'));
++      expect(find.descendant(of: trial, matching: find.text('À essayer')), findsOneWidget);
++      expect(find.descendant(of: trial, matching: find.byIcon(Icons.science_outlined)), findsOneWidget);
++      expect(find.descendant(of: trial, matching: find.text('santé')), findsOneWidget);
++      final odd = find.byKey(const ValueKey('insight_trial_y2'));
++      expect(find.descendant(of: odd, matching: find.text('Abandonné')), findsOneWidget);
++      expect(find.descendant(of: odd, matching: find.byIcon(Icons.label_outline_rounded)), findsOneWidget);
++      await tester.tap(find.descendant(of: trial, matching: find.text('Réunion Arnaud')));
++      await tester.pumpAndSettle();
++      expect(opened.conversations, ['c-1']);
++
++      // Thème clair : les statuts se lisent sur leur pastille.
++      final tag = tester.widget<Text>(find.descendant(of: trial, matching: find.text('À essayer')));
++      expect(_contrast(tag.style!.color!, OmiPalette.light.chipSurface), greaterThanOrEqualTo(4.5));
++      final markdown = tester.widget<RichText>(
++          find.byWidgetPredicate((w) => w is RichText && w.text.toPlainText().startsWith('Le sommeil est meilleur')));
++      expect(_contrast(_inkOf(markdown)!, OmiPalette.light.surface0), greaterThanOrEqualTo(4.5));
++      expect(find.textContaining('Garder'), findsNothing);
++    });
++
++    testWidgets('la flèche choisit un bilan précédent', (tester) async {
++      final server = _Server();
++      await _pump(tester, server);
++      await _openBilan(tester);
++
++      await tester.tap(find.byKey(const ValueKey('insight_bilan_versions')));
++      await tester.pumpAndSettle();
++      expect(find.text('Bilans'), findsOneWidget);
++      expect(find.byKey(const ValueKey('insight_bilan_choice_b-2')), findsOneWidget);
++      await tester.tap(find.byKey(const ValueKey('insight_bilan_choice_b-1')));
++      await tester.pumpAndSettle();
++
++      expect(server.count('GET', '/v1/insights/bilans/b-1'), 1);
++      expect(find.text('Semaine du 28 septembre'), findsOneWidget);
++      expect(find.text('Ce qui a bougé'), findsOneWidget);
++      expect(find.text('Pro'), findsNothing);
++      expect(find.textContaining('1 essai'), findsOneWidget);
++    });
++
++    testWidgets('un seul bilan : pas de flèche', (tester) async {
++      final server = _Server()..bilans.remove('b-1');
++      await _pump(tester, server);
++      await _openBilan(tester);
++      expect(find.byKey(const ValueKey('insight_bilan_versions')), findsNothing);
++    });
++
++    testWidgets('appui long sur le titre → Retirer, confirmé ; retour à l’onglet, le précédent devient le dernier',
++        (tester) async {
++      final server = _Server();
++      await _pump(tester, server);
++      await _openBilan(tester);
++
++      await tester.longPress(find.byKey(const ValueKey('insight_bilan_header')));
++      await tester.pumpAndSettle();
++      await tester.tap(find.text('Retirer'));
++      await tester.pumpAndSettle();
++      expect(find.text('Retirer ce bilan ?'), findsOneWidget);
++      expect(find.text('Il ne s’affichera plus dans Insights. Rien n’est effacé.'), findsOneWidget);
++      await tester.tap(find.text('Retirer'));
++      await tester.pumpAndSettle();
++
++      final delete = server.requests.singleWhere((r) => r.method == 'DELETE');
++      expect(Uri.parse(delete.url).path, '/v1/insights/bilans/b-2');
++      expect(find.byType(InsightBilanPage), findsNothing);
++      final card = find.byKey(const ValueKey('insight_bilan_card'));
++      expect(find.descendant(of: card, matching: find.text('Semaine du 28 septembre')), findsOneWidget);
++    });
++
++    testWidgets('un bilan sans titre, sans période ni contenu se lit quand même', (tester) async {
++      final server = _Server();
++      server.bilans
++        ..clear()
++        ..['b-0'] = {
++          'id': 'b-0',
++          'statut': 'actif',
++          'version': 0,
++          'nb_essais': 0,
++          'sections': 'abîmées',
++        };
++      await _pump(tester, server);
++      final card = find.byKey(const ValueKey('insight_bilan_card'));
++      expect(find.descendant(of: card, matching: find.text('Bilan')), findsOneWidget);
++      expect(find.descendant(of: card, matching: find.text('aucun essai')), findsOneWidget);
++      await _openBilan(tester);
++      expect(tester.takeException(), isNull);
++      expect(find.text('Rien dans ce bilan.'), findsOneWidget);
++    });
++
++    testWidgets('un bilan retiré ailleurs entre-temps : « Ce bilan n’est plus là »', (tester) async {
++      final server = _Server();
++      await _pump(tester, server);
++      server.bilans['b-2']!['statut'] = 'retire';
++      await _openBilan(tester);
++      expect(find.text('Ce bilan n’est plus là.'), findsOneWidget);
++    });
++  });
++
++  testWidgets('en anglais aussi', (tester) async {
++    await _pump(tester, _Server(), locale: const Locale('en'));
++    expect(find.text('Now'), findsOneWidget);
++    expect(_inLine('l1', find.text('Act · pro')), findsOneWidget);
++    expect(_inLine('l3', find.text('Keep an eye on')), findsOneWidget);
++    expect(find.text('Latest review'), findsOneWidget);
++    expect(find.textContaining('2 things to try'), findsOneWidget);
++    expect(find.text('Folders'), findsOneWidget);
++    await _openBilan(tester);
++    expect(find.text('To try next'), findsOneWidget);
++    expect(find.text('How the last trials went'), findsOneWidget);
++    expect(find.text('Tried'), findsOneWidget);
++    expect(find.text('What happened: Trois soirs sur sept.'), findsOneWidget);
++  });
++}
+diff --git a/app/test/widgets/insights_pages_test.dart b/app/test/widgets/insights_pages_test.dart
+index fc9afca00c..29db8d6b88 100644
+--- a/app/test/widgets/insights_pages_test.dart
++++ b/app/test/widgets/insights_pages_test.dart
+@@ -1,5 +1,6 @@
+ // Clone local : onglet Insights (0008) — liste des dossiers, détail par sections, citation, « piste d'Omi »,
+-// sources ouvrables, appui long → Retirer (élément ou dossier), troisième onglet de l'accueil.
++// sources ouvrables, appui long → Retirer (élément ou dossier), troisième onglet de l'accueil. Depuis 0010, l'onglet
++// lit aussi « Maintenant » et les bilans (vides ici : test/widgets/insights_maintenant_bilans_test.dart les couvre).
+ import 'dart:convert';
+ 
+ import 'package:flutter/material.dart';
+@@ -127,6 +128,9 @@ class _FakeServer {
+   Future<http.Response> send(ApiRequest request) async {
+     requests.add(request);
+     final segments = Uri.parse(request.url).pathSegments;
++    // 0010 : « Maintenant » et les bilans, rien d'écrit encore.
++    if (segments[2] == 'maintenant') return _json({'lignes': [], 'resume': null, 'maj': null, 'version': 0});
++    if (segments[2] == 'bilans') return _json({'bilans': []});
+     if (request.method == 'GET' && segments.length == 3) {
+       if (failList) return _json({'detail': 'boom'}, 500);
+       return _json({
+@@ -193,7 +197,8 @@ void main() {
+     expect(find.textContaining('Proche · 1 note · Mis à jour le'), findsOneWidget);
+     // L'ordre du serveur (le plus récemment mis à jour d'abord) est gardé.
+     expect(tester.getTopLeft(find.text('Arnaud')).dy, lessThan(tester.getTopLeft(find.text('Mon fils')).dy));
+-    expect(Uri.parse(server.requests.single.url).queryParameters['statut'], 'actif');
++    final list = server.requests.singleWhere((r) => Uri.parse(r.url).path == '/v1/insights/dossiers');
++    expect(Uri.parse(list.url).queryParameters['statut'], 'actif');
+     // Thème clair : texte noir sur carte blanche, jamais blanc sur blanc.
+     final title = tester.widget<Text>(find.text('Arnaud'));
+     expect(title.style?.color, OmiPalette.light.textPrimary);
+@@ -257,7 +262,10 @@ void main() {
+     expect(opened.conversations, ['c-1']);
+     expect(find.text('Point Arnaud'), findsOneWidget);
+     expect(find.text('Réunion avec Arnaud'), findsOneWidget);
+-    expect(find.text('Appel supprimé · N’est plus disponible'), findsOneWidget);
++    // 0010 : « N'est plus disponible » sur sa propre ligne, jamais mangé par un long titre.
++    final lost = find.byKey(const ValueKey('insight_source_conversation_c-2'));
++    expect(find.descendant(of: lost, matching: find.text('Appel supprimé')), findsOneWidget);
++    expect(find.descendant(of: lost, matching: find.text('N’est plus disponible')), findsOneWidget);
+   });
+ 
+   testWidgets('appui long sur un élément → Retirer, confirmé, retiré sur le serveur', (tester) async {
+@@ -366,7 +374,13 @@ void main() {
+       ..archived.addAll(['arnaud', 'fils']);
+     await tester.tap(find.text('Réessayer'));
+     await tester.pumpAndSettle();
+-    expect(find.text('Pas encore d’insights'), findsOneWidget);
++    // 0010 : sous « Maintenant », une phrase discrète au lieu de la page vide.
++    expect(find.text('Dossiers'), findsOneWidget);
++    expect(
++      find.text('Quand vous réfléchissez à quelque chose avec Omi dans le chat, il garde ici ce qui compte, '
++          'par personne ou par sujet.'),
++      findsOneWidget,
++    );
+   });
+ 
+   testWidgets('en anglais aussi', (tester) async {
+diff --git a/app/test/widgets/insights_relecture_2026_10_11_test.dart b/app/test/widgets/insights_relecture_2026_10_11_test.dart
+new file mode 100644
+index 0000000000..2acf571a6b
+--- /dev/null
++++ b/app/test/widgets/insights_relecture_2026_10_11_test.dart
+@@ -0,0 +1,427 @@
++// Clone local : relecture contradictoire du 2026-10-11 de l'onglet Insights (0008, 0010), sur la vraie sortie du
++// banc (test/fixtures/insights_maintenant_banc_2026-10-11.json). Chaque test échouait avant la correction :
++// 1. la feuille « Sources » ne défilait pas : sources coupées en grand texte (iPhone SE 1,3 : −40 px ; 320 1,3 :
++//    −284 px ; 390 2,0 : −485 px) ;
++// 2. une même source reçue deux fois (conversation fusionnée dans sa survivante) : écran d'erreur « Duplicate keys » ;
++// 3. la ligne sous le titre des dossiers en textSecondary : 3,4:1 sur la carte blanche ;
++// 4. le titre « Maintenant » coupé en plein mot en grand texte ;
++// 5. une citation tronquée à deux lignes, jamais lisible en entier quand la seule source s'ouvre directement ;
++// 6. « N'est plus disponible » mangé par les points de suspension d'un long titre ; une discussion supprimée
++//    s'appelait « Discussion sans titre » ;
++// 7. une source d'état inconnu (au-delà de la borne du serveur, disponible: null) dite « n'est plus disponible » ;
++// 8. les mots d'un autre, entendus dans une conversation (origine « conversation »), passaient pour une note de Mike.
++import 'dart:convert';
++import 'dart:io';
++
++import 'package:flutter/material.dart';
++import 'package:flutter/rendering.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:http/http.dart' as http;
++
++import 'package:omi/backend/http/api/insights.dart';
++import 'package:omi/backend/http/api_result.dart';
++import 'package:omi/l10n/app_localizations.dart';
++import 'package:omi/pages/insights/insight_bilan_page.dart';
++import 'package:omi/pages/insights/insight_dossier_page.dart';
++import 'package:omi/pages/insights/insight_now_card.dart';
++import 'package:omi/pages/insights/insight_sources.dart';
++import 'package:omi/pages/insights/insights_page.dart';
++import 'package:omi/ui/ui.dart';
++
++Map<String, dynamic> _banc() =>
++    jsonDecode(File('test/fixtures/insights_maintenant_banc_2026-10-11.json').readAsStringSync())
++        as Map<String, dynamic>;
++
++const _longTitle = 'Réunion avec Arnaud et son équipe commerciale sur le programme de formation';
++
++Map<String, dynamic> _sources({
++  List<Map<String, dynamic>> conversations = const [],
++  Map<String, dynamic>? session,
++}) =>
++    {'messages': [], 'session': session, 'conversations': conversations};
++
++/// Un faux serveur : « Maintenant » réel du banc, un dossier et un bilan qui portent les cas de la relecture.
++class _Server {
++  _Server() : now = _banc();
++
++  Map<String, dynamic> now;
++  final requests = <ApiRequest>[];
++
++  static http.Response _json(Object body, [int status = 200]) =>
++      http.Response(jsonEncode(body), status, headers: {'content-type': 'application/json; charset=utf-8'});
++
++  static const _resume = {
++    'id': 'arnaud',
++    'titre': 'Arnaud',
++    'gabarit': 'pro',
++    'alias': [],
++    'statut': 'actif',
++    'version': 2,
++    'maj': '2026-10-07T18:31:13+00:00',
++    'nb_elements': 3,
++  };
++
++  static Map<String, dynamic> _element(String id, String text, String origin, Map<String, dynamic> sources) => {
++        'id': id,
++        'texte': text,
++        'origine': origin,
++        'piste_omi': origin == 'omi',
++        'dit_par_autre': origin == 'conversation',
++        'citation': null,
++        'statut': 'actif',
++        'sources': sources,
++      };
++
++  static final _reunion = {
++    'id': 'banc-conv-reunion',
++    'titre': _longTitle,
++    'date': '2026-10-07T06:00:00+00:00',
++    'disponible': true
++  };
++
++  Map<String, dynamic> get _dossier => {
++        ..._resume,
++        'sections': [
++          {
++            'cle': 'besoins',
++            'nom': 'besoins',
++            'elements': [
++              _element('e1', 'Il ne peut pas signer un programme complet avant fin novembre.', 'conversation',
++                  _sources(conversations: [_reunion, _reunion])),
++              _element('e2', 'Proposer deux ateliers courts chiffrés séparément.', 'omi', _sources()),
++              _element(
++                'e3',
++                'Appuyer les ateliers sur leurs vrais clients.',
++                'mike',
++                _sources(
++                  session: {'id': 'banc-arnaud-2', 'titre': null, 'disponible': false},
++                  conversations: [
++                    {'id': 'c-perdue', 'titre': _longTitle, 'date': null, 'disponible': false},
++                    {'id': 'c-sans-titre', 'titre': null, 'date': null, 'disponible': false},
++                    {'id': 'c-inconnue', 'titre': 'Au-delà de la borne', 'date': null, 'disponible': null},
++                  ],
++                ),
++              ),
++            ],
++          },
++        ],
++      };
++
++  Map<String, dynamic> get _bilan => {
++        'id': 'b',
++        'titre': 'Semaine 41',
++        'periode': {'debut': '2026-10-05', 'fin': '2026-10-11'},
++        'maj': '2026-10-11T18:00:00+00:00',
++        'version': 1,
++        'statut': 'actif',
++        'nb_essais': 1,
++        'sections': [],
++        'suivi': [],
++        'essais': [
++          {
++            'id': 'y1',
++            'texte': 'Marcher vingt minutes vendredi',
++            'statut': 'propose',
++            'sources': {
++              'messages': [],
++              'sessions': [],
++              'conversations': [_reunion, _reunion],
++              'planning': true,
++              'journal': false
++            },
++          },
++          {'id': 'y1', 'texte': 'Le même essai, en double', 'statut': 'propose'},
++        ],
++      };
++
++  Future<http.Response> send(ApiRequest request) async {
++    requests.add(request);
++    final segments = Uri.parse(request.url).pathSegments;
++    switch (segments[2]) {
++      case 'maintenant':
++        return _json(now);
++      case 'bilans':
++        if (segments.length == 3) {
++          return _json({
++            'bilans': [_bilan, _bilan]
++          });
++        }
++        return _json(_bilan);
++      case 'dossiers':
++        if (segments.length == 3) {
++          return _json({
++            'dossiers': [_resume, _resume]
++          });
++        }
++        return _json(_dossier);
++    }
++    return _json({'detail': 'Not Found'}, 404);
++  }
++}
++
++class _Opened {
++  final chats = <String>[];
++  final conversations = <String>[];
++
++  InsightSourceOpener get opener => InsightSourceOpener(
++        openChat: (_, id) async => chats.add(id),
++        openConversation: (_, id) async => conversations.add(id),
++      );
++}
++
++Future<void> _pump(
++  WidgetTester tester,
++  _Server server, {
++  _Opened? opened,
++  Size size = const Size(390, 2400),
++  double scale = 1,
++}) async {
++  tester.view.physicalSize = size;
++  tester.view.devicePixelRatio = 1;
++  tester.platformDispatcher.textScaleFactorTestValue = scale;
++  addTearDown(tester.view.reset);
++  addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
++  await tester.pumpWidget(MaterialApp(
++    localizationsDelegates: AppLocalizations.localizationsDelegates,
++    supportedLocales: AppLocalizations.supportedLocales,
++    locale: const Locale('fr'),
++    home: Scaffold(
++      backgroundColor: OmiColors.surface0,
++      body: InsightsPage(
++        api: InsightsApi(baseUrl: 'https://example.invalid/', send: server.send),
++        sources: (opened ?? _Opened()).opener,
++      ),
++    ),
++  ));
++  await tester.pumpAndSettle();
++}
++
++Finder _line(String id) => find.byKey(ValueKey('insight_now_line_$id'));
++
++/// Fait défiler l'onglet (ou la page ouverte) jusqu'à [target], puis le touche.
++Future<void> _scrollAndTap(WidgetTester tester, Finder target) async {
++  await tester.scrollUntilVisible(target, 300, scrollable: find.byType(Scrollable).first);
++  await tester.pumpAndSettle();
++  await tester.tap(target);
++  await tester.pumpAndSettle();
++}
++
++String _lineId(int index) => (_banc()['lignes'] as List)[index]['id'] as String;
++
++double _contrast(Color ink, Color background) {
++  final blended = Color.alphaBlend(ink, background);
++  final a = blended.computeLuminance();
++  final b = background.computeLuminance();
++  return (a > b ? a + 0.05 : b + 0.05) / (a > b ? b + 0.05 : a + 0.05);
++}
++
++Color? _inkOf(RichText text) {
++  Color? ink;
++  text.text.visitChildren((span) {
++    ink = span.style?.color;
++    return ink == null;
++  });
++  return ink;
++}
++
++/// Le fond réel sous un texte : la première surface colorée au-dessus de lui.
++Color _backgroundOf(Element element) {
++  Color? found;
++  element.visitAncestorElements((ancestor) {
++    final widget = ancestor.widget;
++    if (widget is Material && widget.type != MaterialType.transparency && widget.color != null) {
++      found = widget.color;
++    } else if (widget is DecoratedBox) {
++      final decoration = widget.decoration;
++      if (decoration is BoxDecoration && decoration.color != null) found = decoration.color;
++    } else if (widget is Scaffold && widget.backgroundColor != null) {
++      found = widget.backgroundColor;
++    }
++    return found == null;
++  });
++  return found ?? OmiPalette.light.surface0;
++}
++
++/// Tout texte (icônes comprises) d'au moins 4,5:1 sur son fond réel, en thème clair.
++void _expectReadable(WidgetTester tester, {required int atLeast}) {
++  var checked = 0;
++  for (final element in find.byType(RichText).evaluate()) {
++    final text = element.widget as RichText;
++    final ink = _inkOf(text);
++    if (ink == null || ink.a == 0) continue;
++    checked++;
++    final background = _backgroundOf(element);
++    expect(_contrast(ink, background), greaterThanOrEqualTo(4.5),
++        reason: '« ${text.text.toPlainText()} » sur $background');
++  }
++  expect(checked, greaterThanOrEqualTo(atLeast));
++}
++
++void main() {
++  setUp(() => OmiColors.active = OmiPalette.light);
++
++  group('1-2. la feuille des sources de la vraie ligne 1 défile, sans clé en double', () {
++    const sizes = [
++      (Size(375, 667), 1.3), // iPhone SE
++      (Size(320, 568), 1.3),
++      (Size(390, 844), 1.6),
++      (Size(390, 844), 2.0),
++      (Size(375, 667), 2.0),
++    ];
++    for (final (size, scale) in sizes) {
++      testWidgets('${size.width.toInt()}x${size.height.toInt()} texte $scale', (tester) async {
++        final opened = _Opened();
++        await _pump(tester, _Server(), opened: opened, size: size, scale: scale);
++        await tester.ensureVisible(_line(_lineId(0)));
++        await tester.pumpAndSettle();
++        await tester.tapAt(tester.getTopLeft(_line(_lineId(0))) + const Offset(80, 16));
++        await tester.pumpAndSettle();
++
++        expect(tester.takeException(), isNull, reason: 'ni débordement, ni clés en double');
++        expect(find.text('Sources'), findsOneWidget);
++        final sheet = find.descendant(of: find.byType(BottomSheet), matching: find.byType(Scrollable));
++        expect(sheet, findsOneWidget, reason: 'la feuille défile');
++        await tester.scrollUntilVisible(find.text('Planning'), 120, scrollable: sheet);
++        expect(tester.getRect(find.text('Planning')).bottom, lessThanOrEqualTo(size.height));
++        // La conversation reçue deux fois ne fait qu'une puce.
++        expect(find.byKey(const ValueKey('insight_source_conversation_banc-conv-reunion')), findsOneWidget);
++        await tester.ensureVisible(find.text('Proposition pour Arnaud'));
++        await tester.pumpAndSettle();
++        await tester.tap(find.text('Proposition pour Arnaud'));
++        await tester.pumpAndSettle();
++        expect(opened.chats, ['banc-arnaud']);
++      });
++    }
++  });
++
++  testWidgets('2. une ligne, un essai, un dossier ou un élément reçus en double ne cassent rien', (tester) async {
++    final server = _Server();
++    final lines = server.now['lignes'] as List;
++    lines.add(Map<String, dynamic>.from(lines.first as Map));
++    await _pump(tester, server);
++    expect(tester.takeException(), isNull);
++    expect(_line(_lineId(0)), findsOneWidget);
++    expect(find.byType(InsightNowLineTile), findsNWidgets(3));
++    expect(find.text('Arnaud'), findsOneWidget, reason: 'le dossier reçu deux fois est montré une fois');
++
++    await _scrollAndTap(tester, find.text('Arnaud'));
++    expect(tester.takeException(), isNull);
++    expect(find.byKey(const ValueKey('insight_source_conversation_banc-conv-reunion')), findsOneWidget);
++    await tester.tap(find.byType(OmiBackButton));
++    await tester.pumpAndSettle();
++
++    await _scrollAndTap(tester, find.byKey(const ValueKey('insight_bilan_card')));
++    expect(tester.takeException(), isNull);
++    expect(find.byType(InsightTrialCard), findsOneWidget);
++    expect(find.byKey(const ValueKey('insight_source_conversation_banc-conv-reunion')), findsOneWidget);
++  });
++
++  testWidgets('3. tout l’onglet se lit en thème clair, dossiers compris (au moins 4,5:1)', (tester) async {
++    await _pump(tester, _Server());
++    _expectReadable(tester, atLeast: 20);
++    final meta = tester.widget<Text>(find.textContaining('Pro · 3 notes'));
++    expect(meta.style!.color, OmiPalette.light.textTertiary);
++  });
++
++  testWidgets('3. le dossier et le bilan aussi', (tester) async {
++    await _pump(tester, _Server());
++    await _scrollAndTap(tester, find.text('Arnaud'));
++    _expectReadable(tester, atLeast: 10);
++    await tester.tap(find.byType(OmiBackButton));
++    await tester.pumpAndSettle();
++    await _scrollAndTap(tester, find.byKey(const ValueKey('insight_bilan_card')));
++    _expectReadable(tester, atLeast: 5);
++  });
++
++  for (final (size, scale) in const [(Size(375, 667), 2.0), (Size(320, 568), 1.3), (Size(390, 844), 1.0)]) {
++    testWidgets('4. « Maintenant » a toute la largeur de la carte (${size.width.toInt()}, $scale)', (tester) async {
++      // Avant : une rangée moitié-moitié avec l'heure ; en grand texte, le titre se coupait en plein mot. Il dispose
++      // désormais de toute la largeur, et l'heure passe dessous quand les deux ne tiennent pas sur une ligne.
++      await _pump(tester, _Server(), size: Size(size.width, 4000), scale: scale);
++      final card = tester.getSize(find.byKey(const ValueKey('insight_now_card')));
++      final title = tester.renderObject<RenderParagraph>(find.text('Maintenant'));
++      expect(title.constraints.maxWidth, card.width - 2 * OmiSpacing.md);
++      final updated = find.descendant(
++          of: find.byKey(const ValueKey('insight_now_card')), matching: find.textContaining('Mis à jour'));
++      expect(updated, findsOneWidget);
++      expect(tester.getRect(updated).right,
++          lessThanOrEqualTo(tester.getRect(find.byKey(const ValueKey('insight_now_card'))).right));
++      expect(tester.takeException(), isNull);
++    });
++  }
++
++  testWidgets('5. la citation de la vraie ligne 7 se lit en entier, même sur un iPhone étroit', (tester) async {
++    await _pump(tester, _Server(), size: const Size(320, 4000), scale: 1.3);
++    final quote = (_banc()['lignes'] as List)[2]['citation'] as String;
++    final finder = find.descendant(of: _line(_lineId(2)), matching: find.text(quote));
++    expect(finder, findsOneWidget);
++    expect(tester.renderObject<RenderParagraph>(finder).didExceedMaxLines, isFalse);
++    expect(tester.widget<Text>(finder).maxLines, isNull);
++  });
++
++  testWidgets('6-7. « N’est plus disponible » toujours lisible ; supprimée se dit ; inconnue ne se dit pas',
++      (tester) async {
++    final opened = _Opened();
++    await _pump(tester, _Server(), opened: opened, size: const Size(390, 2400), scale: 1.3);
++    await _scrollAndTap(tester, find.text('Arnaud'));
++    expect(tester.takeException(), isNull);
++
++    final lost = find.byKey(const ValueKey('insight_source_conversation_c-perdue'));
++    final suffix = find.descendant(of: lost, matching: find.text('N’est plus disponible'));
++    expect(suffix, findsOneWidget);
++    expect(tester.renderObject<RenderParagraph>(suffix).didExceedMaxLines, isFalse);
++    expect(find.descendant(of: lost, matching: find.byIcon(Icons.link_off_rounded)), findsOneWidget);
++
++    // Supprimée et sans titre : elle le dit, sans redire « n'est plus disponible ».
++    final chat = find.byKey(const ValueKey('insight_source_chat_banc-arnaud-2'));
++    expect(find.descendant(of: chat, matching: find.text('Discussion supprimée')), findsOneWidget);
++    expect(find.descendant(of: chat, matching: find.text('N’est plus disponible')), findsNothing);
++    final untitled = find.byKey(const ValueKey('insight_source_conversation_c-sans-titre'));
++    expect(find.descendant(of: untitled, matching: find.text('Conversation supprimée')), findsOneWidget);
++
++    // État inconnu : aucune mention, et elle s'ouvre (l'ouverture dira si elle n'existe plus).
++    final unknown = find.byKey(const ValueKey('insight_source_conversation_c-inconnue'));
++    expect(find.descendant(of: unknown, matching: find.text('N’est plus disponible')), findsNothing);
++    await tester.tap(unknown);
++    await tester.pumpAndSettle();
++    expect(opened.conversations, ['c-inconnue']);
++  });
++
++  testWidgets('8. les mots d’un autre sont marqués « Entendu dans une conversation » (icône et libellé)',
++      (tester) async {
++    final server = _Server();
++    ((server.now['lignes'] as List)[1] as Map)['dit_par_autre'] = true;
++    await _pump(tester, server);
++
++    final tag = find.descendant(of: _line(_lineId(1)), matching: find.text('Entendu dans une conversation'));
++    expect(tag, findsOneWidget);
++    expect(find.descendant(of: _line(_lineId(1)), matching: find.byIcon(Icons.hearing_outlined)), findsOneWidget);
++    expect(find.descendant(of: _line(_lineId(0)), matching: find.text('Entendu dans une conversation')), findsNothing);
++
++    await _scrollAndTap(tester, find.text('Arnaud'));
++    final heard = find.byKey(const ValueKey('insight_element_e1'));
++    expect(find.descendant(of: heard, matching: find.text('Entendu dans une conversation')), findsOneWidget);
++    expect(find.descendant(of: heard, matching: find.byIcon(Icons.hearing_outlined)), findsOneWidget);
++    expect(find.descendant(of: heard, matching: find.text('piste d’Omi')), findsNothing);
++    final omi = find.byKey(const ValueKey('insight_element_e2'));
++    expect(find.descendant(of: omi, matching: find.text('piste d’Omi')), findsOneWidget);
++    expect(find.descendant(of: omi, matching: find.text('Entendu dans une conversation')), findsNothing);
++    final mike = find.byKey(const ValueKey('insight_element_e3'));
++    expect(find.descendant(of: mike, matching: find.text('Entendu dans une conversation')), findsNothing);
++    // Même lisibilité que « piste d'Omi » : encre au moins 4,5:1 sur sa pastille.
++    _expectReadable(tester, atLeast: 10);
++    expect(find.byType(InsightDossierPage), findsOneWidget);
++  });
++
++  testWidgets('7. sans « disponible » du tout (ancien serveur) : la source reste ouvrable, sans mention',
++      (tester) async {
++    final server = _Server();
++    final sources = ((server.now['lignes'] as List)[2] as Map)['sources'] as Map;
++    (sources['conversations'] as List).first.remove('disponible');
++    final opened = _Opened();
++    await _pump(tester, server, opened: opened);
++    await tester.tap(find.descendant(of: _line(_lineId(2)), matching: find.byType(Text)).at(1));
++    await tester.pumpAndSettle();
++    expect(opened.conversations, ['banc-conv-diner']);
++  });
++}
+-- 
+2.43.0
+

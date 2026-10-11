@@ -125,6 +125,8 @@ jobs:
           test/unit/summary_versions_test.dart test/widgets/summary_versions_tab_test.dart
           test/unit/insights_test.dart test/widgets/insights_pages_test.dart test/widgets/home_bottom_bar_test.dart
           test/unit/summary_correction_test.dart test/widgets/summary_correction_sheet_test.dart
+          test/unit/insights_maintenant_bilans_test.dart test/widgets/insights_maintenant_bilans_test.dart
+          test/widgets/insights_relecture_2026_10_11_test.dart
 
       - name: Test de connexion vers le serveur personnel
         working-directory: omi/app
