@@ -104,11 +104,6 @@ jobs:
           echo "Identifiant Firebase : ${final}"
           grep -c "iosBundleId: '${final}'" lib/firebase_options_local.dart
           grep API_BASE_URL .dev.env
-          # test de connexion de l'app (toutes les 10 s) : vers le serveur personnel au lieu d'api.omi.me et de
-          # Cloudflare — rien ne doit partir chez Omi
-          f=lib/services/connectivity_service.dart
-          sed -i '' "s#Uri.parse('https://api.omi.me/v1/health')#Uri.parse('\${Env.apiBaseUrl}v1/health')#; s#Uri.parse('https://one.one.one.one')#Uri.parse('\${Env.apiBaseUrl}v1/health')#" "$f"
-          ! grep -q "api.omi.me\|one.one.one.one" "$f"
 
       - name: Dépendances
         working-directory: omi/app
@@ -130,6 +125,19 @@ jobs:
           test/unit/summary_versions_test.dart test/widgets/summary_versions_tab_test.dart
           test/unit/insights_test.dart test/widgets/insights_pages_test.dart test/widgets/home_bottom_bar_test.dart
           test/unit/summary_correction_test.dart test/widgets/summary_correction_sheet_test.dart
+
+      - name: Test de connexion vers le serveur personnel
+        working-directory: omi/app
+        shell: bash
+        # test de connexion de l'app (toutes les 10 s) : vers le serveur personnel au lieu d'api.omi.me et de
+        # Cloudflare — rien ne doit partir chez Omi. APRÈS les tests (2026-10-10) : le service lit alors Env dès sa
+        # création, et les tests de widgets du chat (qui créent ConnectivityProvider sans Env.init) plantaient
+        # (LateInitializationError, 25 échecs) ; l'app compilée reste identique
+        run: |
+          set -euo pipefail
+          f=lib/services/connectivity_service.dart
+          sed -i '' "s#Uri.parse('https://api.omi.me/v1/health')#Uri.parse('\${Env.apiBaseUrl}v1/health')#; s#Uri.parse('https://one.one.one.one')#Uri.parse('\${Env.apiBaseUrl}v1/health')#" "$f"
+          ! grep -q "api.omi.me\|one.one.one.one" "$f"
 
       - name: Compilation sans signature
         working-directory: omi/app
