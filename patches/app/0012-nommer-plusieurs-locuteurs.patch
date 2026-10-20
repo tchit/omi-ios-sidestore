@@ -1,0 +1,1818 @@
+From 1e539009ec2458da8a34413c7f1364a53a52cc44 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 20 Oct 2026 21:03:07 +0000
+Subject: [PATCH] Nommer plusieurs locuteurs d'un coup (repris d'Omi)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Repris d'Omi 7d4da9750b (session d'étiquetage) : chaque nom donné à une voix est enregistré tout de suite,
+avec « Annuler » pour revenir au nom précédent ; le résumé n'est régénéré qu'une fois, à « Terminé », en
+quittant la page ou en passant l'app en arrière-plan, au lieu d'un minuteur de 4 s après chaque nom (qui
+relançait le résumé entre deux voix d'un enregistrement du Plaud).
+- Transcription : « Sélectionner » choisit plusieurs lignes (rond coché / rond vide, la forme suffit sans
+  la couleur) puis « Nommer le locuteur » les nomme en un appui (vous, les personnes déjà dans la
+  conversation, puis les plus récentes ; « Ajouter une personne »).
+- Une barre au-dessus de la transcription compte les lignes nommées, avec Annuler, Sélectionner et
+  Terminé ; la carte de suivi du dernier nom attend Terminé.
+- Nommer depuis le nom d'une ligne coche par défaut « toutes les lignes de cette voix ».
+
+Adapté au clone (comme 0005) : les champs du sélecteur rapide (nouveau nom, recherche) suivent la palette
+du thème, lisibles en thème clair. La feuille « Nommer le locuteur » du 0005 est inchangée.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../scenarios/speaker_labels.dart             |   4 +-
+ app/lib/pages/capture/widgets/widgets.dart    |   4 +
+ .../conversation_detail_provider.dart         | 164 ++++++++++++
+ app/lib/pages/conversation_detail/page.dart   |  20 +-
+ .../widgets/speaker_labeling_session_bar.dart | 103 ++++++++
+ .../widgets/speaker_quick_picker.dart         | 203 +++++++++++++++
+ .../widgets/speaker_summary_action.dart       |   3 +-
+ .../widgets/transcript_tab.dart               | 137 +++++++++-
+ app/lib/widgets/transcript.dart               | 137 ++++++----
+ .../speaker_summary_refresh_test.dart         | 202 +++++++++++++++
+ .../widgets/speaker_labeling_clone_test.dart  | 238 ++++++++++++++++++
+ .../speaker_labeling_session_test.dart        | 238 ++++++++++++++++++
+ 12 files changed, 1396 insertions(+), 57 deletions(-)
+ create mode 100644 app/lib/pages/conversation_detail/widgets/speaker_labeling_session_bar.dart
+ create mode 100644 app/lib/pages/conversation_detail/widgets/speaker_quick_picker.dart
+ create mode 100644 app/test/widgets/speaker_labeling_clone_test.dart
+ create mode 100644 app/test/widgets/speaker_labeling_session_test.dart
+
+diff --git a/app/integration_test/visual_audit/scenarios/speaker_labels.dart b/app/integration_test/visual_audit/scenarios/speaker_labels.dart
+index 0c0a519947..7177e3dedb 100644
+--- a/app/integration_test/visual_audit/scenarios/speaker_labels.dart
++++ b/app/integration_test/visual_audit/scenarios/speaker_labels.dart
+@@ -125,12 +125,14 @@ Future<void> _scrollToTop(AuditRun a) async {
+   await a.settle();
+ }
+ 
++/// Tapping a name names that voice's lines by default; the outcome card waits for the labeling
++/// pass to end, so Done follows the tag.
+ Future<void> _tagFirstSpeakerAsMaya(AuditRun a) async {
+   await _scrollToTop(a);
+   await a.tap(find.text('Speaker 1').first);
+   await a.tap(find.text('Maya Chen'));
+-  await a.tap(find.byType(Checkbox).first);
+   await a.tap(find.text('Save'));
++  await a.tap(find.byKey(const Key('speaker_labeling_done')));
+ }
+ 
+ /// The live page with one voice whose label was carried in from the previous conversation.
+diff --git a/app/lib/pages/capture/widgets/widgets.dart b/app/lib/pages/capture/widgets/widgets.dart
+index 2b0f7e5ea3..c4f6742bde 100644
+--- a/app/lib/pages/capture/widgets/widgets.dart
++++ b/app/lib/pages/capture/widgets/widgets.dart
+@@ -216,6 +216,8 @@ getTranscriptWidget(
+   int playbackFollowRequest = 0,
+   VoidCallback? onUserScroll,
+   ValueChanged<TranscriptSegment>? onTopVisibleSegmentChanged,
++  Set<String>? selectedSegmentIds,
++  ValueChanged<TranscriptSegment>? onToggleSegmentSelection,
+ }) {
+   if (conversationCreating) {
+     return const Padding(
+@@ -265,6 +267,8 @@ getTranscriptWidget(
+       playbackFollowRequest: playbackFollowRequest,
+       onUserScroll: onUserScroll,
+       onTopVisibleSegmentChanged: onTopVisibleSegmentChanged,
++      selectedSegmentIds: selectedSegmentIds,
++      onToggleSegmentSelection: onToggleSegmentSelection,
+     );
+   }
+ 
+diff --git a/app/lib/pages/conversation_detail/conversation_detail_provider.dart b/app/lib/pages/conversation_detail/conversation_detail_provider.dart
+index f19513ed68..c582f0b5d4 100644
+--- a/app/lib/pages/conversation_detail/conversation_detail_provider.dart
++++ b/app/lib/pages/conversation_detail/conversation_detail_provider.dart
+@@ -72,14 +72,144 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
+   bool get _savingSpeaker => _pendingSpeakerSaves > 0;
+   Future<void> _speakerSaveTail = Future.value();
+ 
++  /// The open conversation while the reader is labeling speakers in one pass. Its labels still save
++  /// one by one; only the summary regeneration waits for Done (or leaving the page) and runs once.
++  String? _labelingSessionId;
++  final List<_SpeakerLabelUndo> _labelingUndo = [];
++
++  /// Sessions confirmed while a label save was still in flight: regenerate as soon as they drain.
++  final Set<String> _confirmedSpeakerLabelingSessionIds = {};
++
+   @visibleForTesting
+   Set<String> get trackedSpeakerConversationIds => {
+         ..._speakerEditGenerationByConversation.keys,
+         ..._pendingSpeakerSavesByConversation.keys,
+         ..._automaticSpeakerSummaryRefreshIds,
+         ..._endedSpeakerLabelingSessionIds,
++        ..._confirmedSpeakerLabelingSessionIds,
+       };
+ 
++  bool get speakerLabelingSessionActive => _labelingSessionId != null && _labelingSessionId == conversationOrNull?.id;
++
++  /// Distinct lines this session relabeled, net of undone actions.
++  int get speakerLabelingSessionLineCount =>
++      !speakerLabelingSessionActive ? 0 : {for (final undo in _labelingUndo) ...undo.changedIds}.length;
++
++  bool get canUndoSpeakerLabel =>
++      speakerLabelingSessionActive && _labelingUndo.isNotEmpty && !loadingReprocessConversation;
++
++  /// Starts a labeling pass on the open conversation; a no-op while one is already running.
++  void beginSpeakerLabelingSession() {
++    final target = conversationOrNull;
++    if (target == null || _labelingSessionId == target.id) return;
++    _labelingSessionId = target.id;
++    _labelingUndo.clear();
++    _endedSpeakerLabelingSessionIds.remove(target.id);
++    _confirmedSpeakerLabelingSessionIds.remove(target.id);
++    _speakerSummaryRefreshTimer?.cancel();
++    _speakerSummaryRefreshTimer = null;
++    notifyListeners();
++  }
++
++  void _endLabelingSession() {
++    _labelingSessionId = null;
++    _labelingUndo.clear();
++  }
++
++  /// Done: ends the pass and regenerates the summary once, now or as soon as in-flight saves land.
++  /// A pass that changed nothing regenerates nothing. With [conversationId], only that
++  /// conversation's pass (a page under another detail page must not end the top one's).
++  void confirmSpeakerLabelingSession({String? conversationId}) {
++    if (!speakerLabelingSessionActive || (conversationId != null && conversationId != _labelingSessionId)) return;
++    final sessionId = _labelingSessionId!;
++    _endLabelingSession();
++    if ((_pendingSpeakerSavesByConversation[sessionId] ?? 0) != 0) {
++      _confirmedSpeakerLabelingSessionIds.add(sessionId);
++    } else if (_automaticSpeakerSummaryRefreshIds.contains(sessionId) && offerSpeakerSummaryRefresh) {
++      unawaited(reprocessConversation());
++    }
++    notifyListeners();
++  }
++
++  /// The detail page went away mid-pass: auto-confirm through the page-exit path, whose result never
++  /// touches whatever the provider shows next.
++  void leaveSpeakerLabelingSession(String conversationId) {
++    if (speakerLabelingSessionActive && _labelingSessionId == conversationId) _finishSpeakerLabelingSession();
++  }
++
++  /// Puts back the labels the last action in this pass replaced, and saves them again. Best effort:
++  /// a failed restore rolls the lines forward to what the server still has.
++  Future<bool> undoLastSpeakerLabel() {
++    final target = conversationOrNull;
++    if (target == null || !canUndoSpeakerLabel) return Future.value(false);
++    final undo = _labelingUndo.removeLast();
++    final byId = {for (final segment in target.transcriptSegments) segment.id: segment};
++    final restore = {
++      for (final entry in undo.before.entries)
++        if (byId[entry.key] case final segment?) segment: entry.value,
++    };
++    if (restore.isEmpty) {
++      notifyListeners();
++      return Future.value(false);
++    }
++    final current = {
++      for (final segment in restore.keys) segment: (segment.isUser, segment.personId, segment.speakerLabelSource),
++    };
++    final generation = ++_speakerEditGeneration;
++    _speakerEditGenerationByConversation[target.id] = generation;
++    _pendingSpeakerSaves++;
++    _pendingSpeakerSavesByConversation.update(target.id, (count) => count + 1, ifAbsent: () => 1);
++    for (final MapEntry(key: segment, value: original) in restore.entries) {
++      segment.isUser = original.$1;
++      segment.personId = original.$2;
++      segment.speakerLabelSource = original.$3;
++    }
++    conversationProvider?.updateConversation(target);
++    notifyListeners();
++    final pending = _persistSpeakerRestore(target, restore, current, generation, _speakerSaveTail);
++    _speakerSaveTail = pending.then((_) {});
++    _speakerSaveTail.ignore();
++    return pending;
++  }
++
++  Future<bool> _persistSpeakerRestore(
++    ServerConversation target,
++    Map<TranscriptSegment, (bool, String?, String?)> restore,
++    Map<TranscriptSegment, (bool, String?, String?)> current,
++    int generation,
++    Future<void> previousSave,
++  ) async {
++    try {
++      await previousSave;
++      if (_speakerEditGenerationByConversation[target.id] != generation) return false;
++      // One request per restored label: the lines an action covered may have carried different ones.
++      final groups = <(bool, String?), List<String>>{};
++      for (final MapEntry(key: segment, value: original) in restore.entries) {
++        groups.putIfAbsent((original.$1, original.$1 ? null : original.$2), () => []).add(segment.id);
++      }
++      for (final MapEntry(key: (isUser, personId), value: ids) in groups.entries) {
++        final saved = await _assignSpeaker(target.id, ids, isUser: isUser, personId: personId);
++        if (!saved) {
++          _rollbackSpeakerAssignment(target, restore.keys.toList(), current, generation, null);
++          return false;
++        }
++      }
++      if (_speakerConversationDeleted(target.id) || target.deleted) {
++        _dropSpeakerRefreshState(target.id);
++      } else if (target.status == ConversationStatus.completed && target.structured.overview.trim().isNotEmpty) {
++        _automaticSpeakerSummaryRefreshIds.add(target.id);
++        if (!_isDisposed && identical(conversationOrNull, target)) _speakerSummaryConversationId = target.id;
++      }
++      if (!_isDisposed && identical(conversationOrNull, target)) notifyListeners();
++      return true;
++    } catch (_) {
++      _rollbackSpeakerAssignment(target, restore.keys.toList(), current, generation, null);
++      return false;
++    } finally {
++      await _finishSpeakerSave(target);
++    }
++  }
++
+   bool _speakerConversationDeleted(String conversationId) =>
+       conversationProvider?.memoriesToDelete.containsKey(conversationId) == true ||
+       (_cachedConversation?.id == conversationId && _cachedConversation?.deleted == true);
+@@ -87,6 +217,7 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
+   void _dropSpeakerRefreshState(String conversationId) {
+     _automaticSpeakerSummaryRefreshIds.remove(conversationId);
+     _endedSpeakerLabelingSessionIds.remove(conversationId);
++    _confirmedSpeakerLabelingSessionIds.remove(conversationId);
+     if (_speakerSummaryConversationId == conversationId) _speakerSummaryConversationId = null;
+     _pruneSpeakerSessionState(conversationId);
+   }
+@@ -147,6 +278,16 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
+     final changed = selected.any((s) => s.isUser != self || s.personId != person);
+     final generation = ++_speakerEditGeneration;
+     _speakerEditGenerationByConversation[target.id] = generation;
++    if (changed && _labelingSessionId == target.id) {
++      _labelingUndo.add(_SpeakerLabelUndo(
++        generation: generation,
++        before: {for (final MapEntry(key: segment, value: original) in before.entries) segment.id: original},
++        changedIds: {
++          for (final segment in selected)
++            if (segment.isUser != self || segment.personId != person) segment.id,
++        },
++      ));
++    }
+     _pendingSpeakerSaves++;
+     _pendingSpeakerSavesByConversation.update(target.id, (count) => count + 1, ifAbsent: () => 1);
+     for (final segment in selected) {
+@@ -279,12 +420,19 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
+       _dropSpeakerRefreshState(conversationId);
+       return;
+     }
++    final confirmed = _confirmedSpeakerLabelingSessionIds.remove(conversationId);
+     if (!_automaticSpeakerSummaryRefreshIds.contains(conversationId)) return;
+     if (_endedSpeakerLabelingSessionIds.contains(conversationId) || _isDisposed) {
+       _flushEndedSpeakerLabelingSession(conversationId);
+       return;
+     }
++    // Mid-pass, the pass's end regenerates once; a pause between labels is not the end.
++    if (_labelingSessionId == conversationId) return;
+     if (conversationId != conversationOrNull?.id || !offerSpeakerSummaryRefresh) return;
++    if (confirmed && !_savingSpeaker) {
++      unawaited(reprocessConversation());
++      return;
++    }
+     _speakerSummaryRefreshTimer?.cancel();
+     _speakerSummaryRefreshTimer = Timer(_speakerSummaryQuietPeriod, () {
+       _speakerSummaryRefreshTimer = null;
+@@ -302,8 +450,10 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
+   void _finishSpeakerLabelingSession() {
+     _speakerSummaryRefreshTimer?.cancel();
+     _speakerSummaryRefreshTimer = null;
++    _endLabelingSession();
+     final conversationId = conversationOrNull?.id;
+     if (conversationId == null) return;
++    _confirmedSpeakerLabelingSessionIds.remove(conversationId);
+     if (_speakerConversationDeleted(conversationId)) {
+       _dropSpeakerRefreshState(conversationId);
+       return;
+@@ -443,6 +593,8 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
+     int generation,
+     VoidCallback? onFailed,
+   ) {
++    // An action that never saved has nothing to undo.
++    _labelingUndo.removeWhere((undo) => undo.generation == generation);
+     if (_isDisposed || generation != _speakerEditGeneration || !identical(conversationOrNull, target)) return;
+     for (final segment in selected) {
+       final original = before[segment]!;
+@@ -862,6 +1014,9 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
+     _speakerSummaryRefreshTimer = null;
+     final target = conversation;
+     _automaticSpeakerSummaryRefreshIds.remove(target.id);
++    _confirmedSpeakerLabelingSessionIds.remove(target.id);
++    // Any regeneration rewrites the summary from every saved label, so it also ends a labeling pass.
++    if (_labelingSessionId == target.id) _endLabelingSession();
+     final generation = _speakerEditGeneration;
+     final requireSpeakerReceipt = offerSpeakerSummaryRefresh;
+     Logger.debug('_reProcessConversation with appId: $appId');
+@@ -1379,3 +1534,12 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
+     super.dispose();
+   }
+ }
++
++/// One labeling action in a pass: the labels its lines had before, for Undo.
++class _SpeakerLabelUndo {
++  const _SpeakerLabelUndo({required this.generation, required this.before, required this.changedIds});
++
++  final int generation;
++  final Map<String, (bool, String?, String?)> before;
++  final Set<String> changedIds;
++}
+diff --git a/app/lib/pages/conversation_detail/page.dart b/app/lib/pages/conversation_detail/page.dart
+index 2e54deb305..fe5817c887 100644
+--- a/app/lib/pages/conversation_detail/page.dart
++++ b/app/lib/pages/conversation_detail/page.dart
+@@ -122,7 +122,8 @@ class ConversationDetailPage extends StatefulWidget {
+   State<ConversationDetailPage> createState() => ConversationDetailPageState();
+ }
+ 
+-class ConversationDetailPageState extends State<ConversationDetailPage> with TickerProviderStateMixin {
++class ConversationDetailPageState extends State<ConversationDetailPage>
++    with TickerProviderStateMixin, WidgetsBindingObserver {
+   final scaffoldKey = GlobalKey<ScaffoldState>();
+   final focusTitleField = FocusNode();
+   final focusOverviewField = FocusNode();
+@@ -136,6 +137,9 @@ class ConversationDetailPageState extends State<ConversationDetailPage> with Tic
+   // Page-owned playback state: the bar's player reports into it, the transcript
+   // highlights and follows from it.
+   late final ConversationPlaybackController _playbackController;
++
++  /// Held for dispose, when the page can no longer look the provider up.
++  late final ConversationDetailProvider _detailProvider;
+   bool _isSharing = false;
+   bool _reviewInterrupted = false;
+   bool _isTogglingStarred = false;
+@@ -250,6 +254,8 @@ class ConversationDetailPageState extends State<ConversationDetailPage> with Tic
+   @override
+   void initState() {
+     super.initState();
++    _detailProvider = context.read<ConversationDetailProvider>();
++    WidgetsBinding.instance.addObserver(this);
+     unawaited(
+       SiriIntegration.instance.setCurrentScreen("/conversation/${widget.conversation.id}", widget.conversation.id),
+     );
+@@ -396,8 +402,20 @@ class ConversationDetailPageState extends State<ConversationDetailPage> with Tic
+     _controller?.animateTo(_transcriptTabIndex);
+   }
+ 
++  /// Backgrounding the app ends a speaker-labeling pass like Done: one summary update, landing on
++  /// this page if the reader comes back.
++  @override
++  void didChangeAppLifecycleState(AppLifecycleState state) {
++    if (state == AppLifecycleState.paused) {
++      _detailProvider.confirmSpeakerLabelingSession(conversationId: widget.conversation.id);
++    }
++  }
++
+   @override
+   void dispose() {
++    WidgetsBinding.instance.removeObserver(this);
++    // Leaving mid-pass auto-confirms it: one summary update for the labels already saved.
++    _detailProvider.leaveSpeakerLabelingSession(widget.conversation.id);
+     unawaited(SiriIntegration.instance.setCurrentScreen("", null));
+     _cancelOwnedTimers();
+     _separation.dispose();
+diff --git a/app/lib/pages/conversation_detail/widgets/speaker_labeling_session_bar.dart b/app/lib/pages/conversation_detail/widgets/speaker_labeling_session_bar.dart
+new file mode 100644
+index 0000000000..706d7abca4
+--- /dev/null
++++ b/app/lib/pages/conversation_detail/widgets/speaker_labeling_session_bar.dart
+@@ -0,0 +1,103 @@
++import 'package:flutter/material.dart';
++
++import 'package:omi/ui/ui.dart';
++import 'package:omi/utils/l10n_extensions.dart';
++
++/// The bar over the transcript while the reader labels speakers in one pass: how many lines the
++/// pass relabeled, Undo, Select (choose lines to name together) and Done, which updates the summary
++/// once. While lines are being chosen it reads "N selected" with Cancel and Name Speaker.
++class SpeakerLabelingSessionBar extends StatelessWidget {
++  const SpeakerLabelingSessionBar({
++    super.key,
++    required this.linesRelabeled,
++    required this.selectedCount,
++    required this.onDone,
++    required this.onSelect,
++    required this.onCancelSelection,
++    required this.onAssign,
++    this.onUndo,
++  });
++
++  final int linesRelabeled;
++
++  /// Null outside selection mode.
++  final int? selectedCount;
++  final VoidCallback onDone;
++  final VoidCallback onSelect;
++  final VoidCallback onCancelSelection;
++  final VoidCallback onAssign;
++
++  /// Null when there is nothing to undo.
++  final VoidCallback? onUndo;
++
++  @override
++  Widget build(BuildContext context) {
++    final l10n = context.l10n;
++    final selected = selectedCount;
++    final title = selected == null ? l10n.speakerLabelLinesLabeled(linesRelabeled) : l10n.selectedCount(selected);
++    return Semantics(
++      container: true,
++      liveRegion: true,
++      child: Container(
++        key: const Key('speaker_labeling_session_bar'),
++        margin: const EdgeInsets.symmetric(vertical: OmiSpacing.xs),
++        padding: const EdgeInsets.fromLTRB(OmiSpacing.md, OmiSpacing.xxs, OmiSpacing.xs, OmiSpacing.xxs),
++        decoration: BoxDecoration(
++          color: OmiColors.surface1,
++          borderRadius: OmiRadius.lgAll,
++          border: Border.all(color: OmiColors.border),
++        ),
++        child: Row(
++          children: [
++            Expanded(
++              child: Text(
++                title,
++                key: const Key('speaker_labeling_session_title'),
++                maxLines: 1,
++                overflow: TextOverflow.ellipsis,
++                style: OmiType.subhead.copyWith(fontWeight: FontWeight.w600),
++              ),
++            ),
++            if (selected == null) ...[
++              OmiIconButton(
++                key: const Key('speaker_labeling_undo'),
++                icon: const Icon(Icons.undo, size: 20),
++                label: l10n.undo,
++                color: OmiColors.textSecondary,
++                onPressed: onUndo,
++              ),
++              OmiIconButton(
++                key: const Key('speaker_labeling_select'),
++                icon: const Icon(Icons.checklist, size: 20),
++                label: l10n.selectOption,
++                color: OmiColors.textSecondary,
++                onPressed: onSelect,
++              ),
++              const SizedBox(width: OmiSpacing.xxs),
++              OmiButton(
++                key: const Key('speaker_labeling_done'),
++                label: l10n.done,
++                size: OmiButtonSize.compact,
++                onPressed: onDone,
++              ),
++            ] else ...[
++              OmiButton.tertiary(
++                key: const Key('speaker_labeling_cancel_selection'),
++                label: l10n.cancel,
++                size: OmiButtonSize.compact,
++                onPressed: onCancelSelection,
++              ),
++              const SizedBox(width: OmiSpacing.xxs),
++              OmiButton(
++                key: const Key('speaker_labeling_assign'),
++                label: l10n.nameSpeakerTitle,
++                size: OmiButtonSize.compact,
++                onPressed: selected == 0 ? null : onAssign,
++              ),
++            ],
++          ],
++        ),
++      ),
++    );
++  }
++}
+diff --git a/app/lib/pages/conversation_detail/widgets/speaker_quick_picker.dart b/app/lib/pages/conversation_detail/widgets/speaker_quick_picker.dart
+new file mode 100644
+index 0000000000..931f4496ad
+--- /dev/null
++++ b/app/lib/pages/conversation_detail/widgets/speaker_quick_picker.dart
+@@ -0,0 +1,203 @@
++import 'package:flutter/material.dart';
++
++import 'package:provider/provider.dart';
++
++import 'package:omi/backend/preferences.dart';
++import 'package:omi/backend/schema/person.dart';
++import 'package:omi/backend/schema/transcript_segment.dart';
++import 'package:omi/providers/people_provider.dart';
++import 'package:omi/ui/ui.dart';
++import 'package:omi/utils/l10n_extensions.dart';
++
++/// Opens the one-tap picker that names the lines chosen in selection mode. [onPicked] gets the
++/// person's id ('user' for the owner, '' for a new person) and name; the sheet closes when it
++/// returns true.
++Future<void> showSpeakerQuickPicker(
++  BuildContext context, {
++  required List<TranscriptSegment> segments,
++  required bool Function(String personId, String personName) onPicked,
++}) {
++  return showOmiSheet<void>(
++    context: context,
++    title: context.l10n.nameSpeakerTitle,
++    builder: (_) => SpeakerQuickPicker(segments: segments, onPicked: onPicked),
++  );
++}
++
++/// "You", then the people already named in this conversation, then the ones named most recently,
++/// then everyone else by name; "Add Person" types a new name. One tap assigns — there is no Save.
++class SpeakerQuickPicker extends StatefulWidget {
++  const SpeakerQuickPicker({super.key, required this.segments, required this.onPicked});
++
++  final List<TranscriptSegment> segments;
++  final bool Function(String personId, String personName) onPicked;
++
++  /// The picker's order: in this conversation (most lines first), then most recently used, then
++  /// by name.
++  static List<Person> order(List<Person> people, List<TranscriptSegment> segments, Map<String, int> lastUsedMs) {
++    final lines = <String, int>{};
++    for (final segment in segments) {
++      final personId = segment.personId;
++      if (!segment.isUser && personId != null) lines.update(personId, (count) => count + 1, ifAbsent: () => 1);
++    }
++    return [...people.where((person) => person.name.trim().isNotEmpty)]..sort((a, b) {
++        final inA = lines[a.id] ?? 0;
++        final inB = lines[b.id] ?? 0;
++        if (inA != inB) return inB.compareTo(inA);
++        final usedA = lastUsedMs[a.id] ?? 0;
++        final usedB = lastUsedMs[b.id] ?? 0;
++        if (usedA != usedB) return usedB.compareTo(usedA);
++        return a.name.toLowerCase().compareTo(b.name.toLowerCase());
++      });
++  }
++
++  @override
++  State<SpeakerQuickPicker> createState() => _SpeakerQuickPickerState();
++}
++
++class _SpeakerQuickPickerState extends State<SpeakerQuickPicker> {
++  final TextEditingController _name = TextEditingController();
++  final TextEditingController _search = TextEditingController();
++  bool _adding = false;
++
++  @override
++  void dispose() {
++    _name.dispose();
++    _search.dispose();
++    super.dispose();
++  }
++
++  void _pick(String personId, String personName) {
++    if (personId.isNotEmpty) {
++      // Best-effort recency for the next picker; never blocks the label.
++      try {
++        SharedPreferencesUtil().speakerLabelLastUsedMs = {
++          ...SharedPreferencesUtil().speakerLabelLastUsedMs,
++          personId: DateTime.now().millisecondsSinceEpoch,
++        };
++      } catch (_) {}
++    }
++    if (widget.onPicked(personId, personName) && mounted) Navigator.pop(context);
++  }
++
++  String? _newNameProblem(List<Person> people) {
++    final name = _name.text.trim();
++    if (name.isEmpty) return null;
++    if (name.toLowerCase() == SharedPreferencesUtil().givenName.trim().toLowerCase()) {
++      return context.l10n.selectYouFromList;
++    }
++    if (people.any((person) => person.name.trim().toLowerCase() == name.toLowerCase())) {
++      return context.l10n.personNameAlreadyExists;
++    }
++    return null;
++  }
++
++  /// Clone local (comme 0005 pour « Nommer le locuteur ») : fond et texte suivent la palette du thème, pour que le
++  /// nom tapé reste lisible en thème clair.
++  InputDecoration _fieldDecoration({required String hintText, String? errorText, Widget? prefixIcon}) =>
++      InputDecoration(
++        hintText: hintText,
++        errorText: errorText,
++        prefixIcon: prefixIcon,
++        filled: true,
++        fillColor: OmiColors.surface2,
++        contentPadding: const EdgeInsets.symmetric(horizontal: 16),
++        border: const OutlineInputBorder(borderRadius: OmiRadius.smAll, borderSide: BorderSide.none),
++        hintStyle: TextStyle(color: OmiColors.textSecondary),
++      );
++
++  @override
++  Widget build(BuildContext context) {
++    final l10n = context.l10n;
++    final people = context.watch<PeopleProvider?>()?.people ?? SharedPreferencesUtil().cachedPeople;
++    final ordered = SpeakerQuickPicker.order(people, widget.segments, SharedPreferencesUtil().speakerLabelLastUsedMs);
++    final query = _search.text.trim().toLowerCase();
++    final visible = query.isEmpty ? ordered : ordered.where((p) => p.name.toLowerCase().contains(query)).toList();
++    final problem = _newNameProblem(people);
++    final newName = _name.text.trim();
++
++    return SingleChildScrollView(
++      padding: const EdgeInsets.only(bottom: OmiSpacing.md),
++      child: Column(
++        crossAxisAlignment: CrossAxisAlignment.start,
++        mainAxisSize: MainAxisSize.min,
++        children: [
++          if (_adding) ...[
++            TextField(
++              key: const Key('speaker_quick_picker_new_name'),
++              controller: _name,
++              autofocus: true,
++              textCapitalization: TextCapitalization.words,
++              onChanged: (_) => setState(() {}),
++              onSubmitted: (_) {
++                if (newName.isNotEmpty && problem == null) _pick('', newName);
++              },
++              style: TextStyle(color: OmiColors.textPrimary),
++              decoration: _fieldDecoration(hintText: l10n.enterPersonsName, errorText: problem),
++            ),
++            const SizedBox(height: OmiSpacing.sm),
++            Row(
++              children: [
++                OmiButton.tertiary(
++                  label: l10n.cancel,
++                  size: OmiButtonSize.compact,
++                  onPressed: () => setState(() {
++                    _adding = false;
++                    _name.clear();
++                  }),
++                ),
++                const Spacer(),
++                OmiButton(
++                  key: const Key('speaker_quick_picker_save_new'),
++                  label: l10n.save,
++                  size: OmiButtonSize.compact,
++                  onPressed: newName.isEmpty || problem != null ? null : () => _pick('', newName),
++                ),
++              ],
++            ),
++          ] else ...[
++            if (people.length > 10) ...[
++              TextField(
++                key: const Key('speaker_quick_picker_search'),
++                controller: _search,
++                onChanged: (_) => setState(() {}),
++                style: TextStyle(color: OmiColors.textPrimary),
++                decoration: _fieldDecoration(
++                  hintText: l10n.searchPeople,
++                  prefixIcon: Icon(Icons.search, size: 18, color: OmiColors.textSecondary),
++                ),
++              ),
++              const SizedBox(height: OmiSpacing.sm),
++            ],
++            Wrap(
++              spacing: OmiSpacing.xs,
++              runSpacing: OmiSpacing.xs,
++              children: [
++                OmiFilterChip(
++                  key: const Key('speaker_quick_picker_add'),
++                  label: l10n.addPerson,
++                  icon: Icons.add,
++                  selected: false,
++                  onSelected: () => setState(() => _adding = true),
++                ),
++                OmiFilterChip(
++                  key: const Key('speaker_quick_picker_user'),
++                  label: l10n.you,
++                  selected: false,
++                  onSelected: () => _pick('user', SharedPreferencesUtil().givenName),
++                ),
++                for (final person in visible)
++                  OmiFilterChip(
++                    key: Key('speaker_quick_picker_person_${person.id}'),
++                    label: person.name,
++                    selected: false,
++                    onSelected: () => _pick(person.id, person.name),
++                  ),
++              ],
++            ),
++          ],
++        ],
++      ),
++    );
++  }
++}
+diff --git a/app/lib/pages/conversation_detail/widgets/speaker_summary_action.dart b/app/lib/pages/conversation_detail/widgets/speaker_summary_action.dart
+index a7994af79b..71f41a8553 100644
+--- a/app/lib/pages/conversation_detail/widgets/speaker_summary_action.dart
++++ b/app/lib/pages/conversation_detail/widgets/speaker_summary_action.dart
+@@ -10,7 +10,8 @@ class SpeakerSummaryAction extends StatelessWidget {
+   @override
+   Widget build(BuildContext context) => ListenableBuilder(
+         listenable: provider,
+-        builder: (context, _) => !provider.offerSpeakerSummaryRefresh
++        // Mid-pass, the labeling bar's Done is the one summary update.
++        builder: (context, _) => !provider.offerSpeakerSummaryRefresh || provider.speakerLabelingSessionActive
+             ? const SizedBox.shrink()
+             : Align(
+                 alignment: Alignment.centerLeft,
+diff --git a/app/lib/pages/conversation_detail/widgets/transcript_tab.dart b/app/lib/pages/conversation_detail/widgets/transcript_tab.dart
+index 02c0577afe..06a39258b6 100644
+--- a/app/lib/pages/conversation_detail/widgets/transcript_tab.dart
++++ b/app/lib/pages/conversation_detail/widgets/transcript_tab.dart
+@@ -17,6 +17,8 @@ import 'package:omi/pages/conversation_detail/widgets/earlier_voice_matches_shee
+ import 'package:omi/pages/conversation_detail/widgets/conversation_detail_chip.dart';
+ import 'package:omi/pages/conversation_detail/widgets/edit_segment_sheet.dart';
+ import 'package:omi/pages/conversation_detail/widgets/name_speaker_sheet.dart';
++import 'package:omi/pages/conversation_detail/widgets/speaker_labeling_session_bar.dart';
++import 'package:omi/pages/conversation_detail/widgets/speaker_quick_picker.dart';
+ import 'package:omi/pages/conversation_detail/widgets/speaker_summary_action.dart';
+ import 'package:omi/pages/conversation_detail/widgets/speaker_tag_outcome.dart';
+ import 'package:omi/providers/connectivity_provider.dart';
+@@ -62,12 +64,80 @@ class _TranscriptWidgetsState extends State<TranscriptWidgets> with AutomaticKee
+   late final SpeakerTagOutcomeController _outcome =
+       context.read<SpeakerTagOutcomeController?>() ?? (_ownOutcome = SpeakerTagOutcomeController());
+ 
++  /// Lines chosen to name together; null outside selection mode.
++  Set<String>? _selection;
++
++  /// The last person tagged during a labeling pass. Its outcome card waits for Done instead of
++  /// interrupting every label.
++  ({String personId, String personName, int linesLabeled})? _deferredOutcome;
++
+   @override
+   void dispose() {
+     _ownOutcome?.dispose();
+     super.dispose();
+   }
+ 
++  void _beginSelection(ConversationDetailProvider provider) {
++    if (!_readyForTranscriptEdit(provider)) return;
++    provider.beginSpeakerLabelingSession();
++    setState(() => _selection = {});
++  }
++
++  void _toggleSelection(TranscriptSegment segment) {
++    final selection = _selection;
++    if (selection == null) return;
++    setState(() {
++      if (!selection.remove(segment.id)) selection.add(segment.id);
++    });
++  }
++
++  void _assignSelection(ConversationDetailProvider provider) {
++    final selection = _selection;
++    if (selection == null || selection.isEmpty || !_readyForTranscriptEdit(provider)) return;
++    final conversation = provider.conversation;
++    final lines = conversation.transcriptSegments.where((s) => selection.contains(s.id)).toList();
++    if (lines.isEmpty) return;
++    showSpeakerQuickPicker(
++      context,
++      segments: conversation.transcriptSegments,
++      onPicked: (personId, personName) {
++        final assigned = _startSpeakerAssignment(
++          provider,
++          conversation.id,
++          lines.first.speakerId,
++          personId,
++          personName,
++          [for (final line in lines) line.id],
++          false,
++        );
++        if (assigned && mounted) setState(() => _selection = null);
++        return assigned;
++      },
++    );
++  }
++
++  /// Done: one summary update for the whole pass, then the outcome of the last tag.
++  void _finishLabeling(ConversationDetailProvider provider) {
++    OmiHaptics.light();
++    setState(() => _selection = null);
++    provider.confirmSpeakerLabelingSession();
++    final deferred = _deferredOutcome;
++    _deferredOutcome = null;
++    if (deferred != null) {
++      _outcome.follow(
++        personId: deferred.personId,
++        personName: deferred.personName,
++        linesLabeled: deferred.linesLabeled,
++      );
++    }
++  }
++
++  Future<void> _undoLabel(ConversationDetailProvider provider) async {
++    OmiHaptics.light();
++    final undone = await provider.undoLastSpeakerLabel();
++    if (!undone && mounted) OmiFeedback.error(context, context.l10n.failedToSaveCheckConnection);
++  }
++
+   void _dismissSearchIfEmpty() {
+     FocusScope.of(context).unfocus();
+     if (widget.searchQuery.isEmpty) widget.onTapWhenSearchEmpty?.call();
+@@ -166,6 +236,8 @@ class _TranscriptWidgetsState extends State<TranscriptWidgets> with AutomaticKee
+       segmentId: segmentId,
+       segments: provider.conversation.transcriptSegments,
+       unresolvedSpeakers: provider.conversation.speakerResolution?.status == 'unavailable',
++      // The name heads a turn; naming it names that voice's lines, which the sheet lists to uncheck.
++      defaultApplyToSpeaker: true,
+       onSpeakerAssigned: (speakerId, personId, personName, segmentIds, applyToSpeaker) async {
+         return _startSpeakerAssignment(
+           provider,
+@@ -239,6 +311,9 @@ class _TranscriptWidgetsState extends State<TranscriptWidgets> with AutomaticKee
+     bool applyToSpeaker,
+   ) {
+     final peopleProvider = context.read<PeopleProvider>();
++    if (provider.conversationOrNull?.id != conversationId || provider.loadingReprocessConversation) return false;
++    // Every label joins a labeling pass, so the summary updates once at Done, not after each pause.
++    provider.beginSpeakerLabelingSession();
+     final newPerson = personId.isEmpty;
+     final temporaryId = newPerson ? 'optimistic-person:${DateTime.now().microsecondsSinceEpoch}' : null;
+     if (temporaryId != null) {
+@@ -289,7 +364,11 @@ class _TranscriptWidgetsState extends State<TranscriptWidgets> with AutomaticKee
+         if (saved) {
+           PlatformManager.instance.analytics.taggedSegment(resolvedId == 'user' ? 'User' : 'User Person');
+           if (mounted && resolvedId != 'user' && provider.conversationOrNull?.id == conversationId) {
+-            _outcome.follow(personId: resolvedId, personName: personName, linesLabeled: linesLabeled);
++            if (provider.speakerLabelingSessionActive) {
++              _deferredOutcome = (personId: resolvedId, personName: personName, linesLabeled: linesLabeled);
++            } else {
++              _outcome.follow(personId: resolvedId, personName: personName, linesLabeled: linesLabeled);
++            }
+           }
+         }
+       }),
+@@ -328,9 +407,20 @@ class _TranscriptWidgetsState extends State<TranscriptWidgets> with AutomaticKee
+               );
+             }
+ 
++            final selection = _selection;
+             return Column(
+               children: [
+                 SpeakerSummaryAction(provider: provider),
++                if (provider.speakerLabelingSessionActive || selection != null)
++                  SpeakerLabelingSessionBar(
++                    linesRelabeled: provider.speakerLabelingSessionLineCount,
++                    selectedCount: selection?.length,
++                    onDone: () => _finishLabeling(provider),
++                    onSelect: () => _beginSelection(provider),
++                    onCancelSelection: () => setState(() => _selection = null),
++                    onAssign: () => _assignSelection(provider),
++                    onUndo: provider.canUndoSpeakerLabel ? () => _undoLabel(provider) : null,
++                  ),
+                 ListenableBuilder(
+                   listenable: _outcome,
+                   builder: (context, _) {
+@@ -387,7 +477,15 @@ class _TranscriptWidgetsState extends State<TranscriptWidgets> with AutomaticKee
+           onConfirmSpeakerLabel: (segment) => _confirmSpeakerLabel(provider, segment),
+           onRejectSpeakerLabel: (segment) => _rejectSpeakerLabel(provider, segment),
+           startedAt: conversation.startedAt ?? conversation.createdAt,
+-          leadingItems: [if (segments.isNotEmpty) _TranscriptHeading(conversation: conversation)],
++          leadingItems: [
++            if (segments.isNotEmpty)
++              _TranscriptHeading(
++                conversation: conversation,
++                onSelect: provider.speakerLabelingSessionActive || _selection != null
++                    ? null
++                    : () => _beginSelection(provider),
++              ),
++          ],
+           leadingItemIds: [if (segments.isNotEmpty) 'transcript-heading'],
+           currentSegmentId: controller?.currentSegmentId,
+           followTargetSegmentId: controller?.followTargetSegmentId,
+@@ -399,6 +497,8 @@ class _TranscriptWidgetsState extends State<TranscriptWidgets> with AutomaticKee
+           playbackFollowRequest: controller?.followRequest ?? 0,
+           onUserScroll: controller?.suspendFollowing,
+           onTopVisibleSegmentChanged: controller?.readerMovedTo,
++          selectedSegmentIds: _selection,
++          onToggleSegmentSelection: _toggleSelection,
+         );
+       },
+     );
+@@ -408,10 +508,13 @@ class _TranscriptWidgetsState extends State<TranscriptWidgets> with AutomaticKee
+ /// "Transcript · 2 speakers" over the lines (Omi v8 transcript heading): how many voices took part,
+ /// counting the owner once. The length is in the header's date chip, so it is not repeated here.
+ class _TranscriptHeading extends StatelessWidget {
+-  const _TranscriptHeading({required this.conversation});
++  const _TranscriptHeading({required this.conversation, this.onSelect});
+ 
+   final ServerConversation conversation;
+ 
++  /// "Select": choose several lines and name their speaker at once. Null hides it (already labeling).
++  final VoidCallback? onSelect;
++
+   /// Missing or uncountable resolution omits the count, matching the header chip's uncounted
+   /// "others" rule.
+   static int? _speakerCount(ServerConversation conversation) {
+@@ -463,13 +566,27 @@ class _TranscriptHeading extends StatelessWidget {
+       child: Column(
+         crossAxisAlignment: CrossAxisAlignment.start,
+         children: [
+-          Align(
+-            alignment: AlignmentDirectional.centerStart,
+-            child: ConversationDetailChip(
+-              key: const Key('conversation_transcript_heading'),
+-              icon: const Icon(Icons.notes),
+-              label: label,
+-            ),
++          Row(
++            children: [
++              Expanded(
++                child: Align(
++                  alignment: AlignmentDirectional.centerStart,
++                  child: ConversationDetailChip(
++                    key: const Key('conversation_transcript_heading'),
++                    icon: const Icon(Icons.notes),
++                    label: label,
++                  ),
++                ),
++              ),
++              if (onSelect != null)
++                OmiButton.tertiary(
++                  key: const Key('transcript_select_lines'),
++                  label: l10n.selectOption,
++                  icon: Icons.checklist,
++                  size: OmiButtonSize.compact,
++                  onPressed: onSelect,
++                ),
++            ],
+           ),
+           if (_hasUnnamedVoice(conversation, people))
+             InkWell(
+diff --git a/app/lib/widgets/transcript.dart b/app/lib/widgets/transcript.dart
+index e42f8a78d8..3b806b59bf 100644
+--- a/app/lib/widgets/transcript.dart
++++ b/app/lib/widgets/transcript.dart
+@@ -72,6 +72,11 @@ class TranscriptWidget extends StatefulWidget {
+   final void Function(TranscriptSegment segment)? onConfirmSpeakerLabel;
+   final void Function(TranscriptSegment segment)? onRejectSpeakerLabel;
+ 
++  /// Selection mode of a saved conversation's lines: non-null [selectedSegmentIds] shows a check on
++  /// every line, and a tap anywhere on a line toggles it instead of playing, naming or selecting text.
++  final Set<String>? selectedSegmentIds;
++  final ValueChanged<TranscriptSegment>? onToggleSegmentSelection;
++
+   /// When the conversation started. A saved conversation's lines show their clock time
+   /// ("12:40 PM") from it; without it they show the offset into the recording.
+   final DateTime? startedAt;
+@@ -111,6 +116,8 @@ class TranscriptWidget extends StatefulWidget {
+     this.playbackFollowRequest = 0,
+     this.onUserScroll,
+     this.onTopVisibleSegmentChanged,
++    this.selectedSegmentIds,
++    this.onToggleSegmentSelection,
+   }) : assert(leadingItems.length == leadingItemIds.length);
+ 
+   @override
+@@ -872,8 +879,11 @@ class _TranscriptWidgetState extends State<TranscriptWidget> {
+                 Widget child = customSegment == null
+                     ? _buildSegmentItem(segmentIndex, people, names, askSegmentIds)
+                     : Container(key: _segmentKeys[segment.id], child: customSegment);
++                // Padding, not a Column: a Column centers by default and hands its child loose
++                // width, so a line narrower than the list (a short reply without a name row)
++                // rendered centered instead of at the start like every other line.
+                 if (widget.separator && segmentIndex > 0) {
+-                  child = Column(mainAxisSize: MainAxisSize.min, children: [const SizedBox(height: 4), child]);
++                  child = Padding(padding: const EdgeInsets.only(top: 4), child: child);
+                 }
+                 return KeyedSubtree(key: ValueKey('transcript-segment-${segment.id}'), child: child);
+               },
+@@ -1172,10 +1182,17 @@ class _TranscriptWidgetState extends State<TranscriptWidget> {
+         previous.speakerId != data.speakerId ||
+         previous.personId != data.personId ||
+         (data.speakerId == omiSpeakerId && !data.isUser);
++    final selected = widget.selectedSegmentIds;
++    final toggle = widget.onToggleSegmentSelection;
++    final selecting = selected != null && toggle != null;
+     final confirm = widget.onConfirmSpeakerLabel;
+     final reject = widget.onRejectSpeakerLabel;
+-    final asksToConfirm =
+-        person != null && confirm != null && reject != null && !isTagging && askSegmentIds.contains(data.id);
++    final asksToConfirm = !selecting &&
++        person != null &&
++        confirm != null &&
++        reject != null &&
++        !isTagging &&
++        askSegmentIds.contains(data.id);
+     final isOmi = data.speakerId == omiSpeakerId && !data.isUser;
+     final isCurrent = data.id == widget.currentSegmentId;
+     final unnamed = !data.isUser && !isOmi && (person == null || person.name.trim().isEmpty);
+@@ -1235,49 +1252,52 @@ class _TranscriptWidgetState extends State<TranscriptWidget> {
+             ],
+           );
+ 
+-    // The tap lives inside the selection area too: its own tap recognizer would otherwise win a tap
+-    // on the words over the line's. A long press still selects.
+-    final words = SelectionArea(
+-      child: GestureDetector(
+-        behavior: HitTestBehavior.translucent,
+-        onTap: seek == null ? null : play,
+-        onDoubleTap: widget.onEditSegmentText == null
+-            ? null
+-            : () {
+-                HapticFeedback.mediumImpact();
+-                widget.onEditSegmentText!(segmentIdx);
+-              },
+-        child: Column(
+-          crossAxisAlignment: CrossAxisAlignment.start,
+-          mainAxisSize: MainAxisSize.min,
+-          children: [
+-            _buildSegmentText(
+-              data,
+-              segmentIdx,
+-              data.isUser,
+-              style: OmiType.body.copyWith(
+-                color: data.isUser || isCurrent ? OmiColors.textPrimary : OmiColors.textPrimary.withValues(alpha: 0.8),
+-                letterSpacing: 0.0,
+-                height: 1.5,
++    final text = Column(
++      crossAxisAlignment: CrossAxisAlignment.start,
++      mainAxisSize: MainAxisSize.min,
++      children: [
++        _buildSegmentText(
++          data,
++          segmentIdx,
++          data.isUser,
++          style: OmiType.body.copyWith(
++            color: data.isUser || isCurrent ? OmiColors.textPrimary : OmiColors.textPrimary.withValues(alpha: 0.8),
++            letterSpacing: 0.0,
++            height: 1.5,
++          ),
++        ),
++        if (data.translations.isNotEmpty) ...[
++          for (final translation in data.translations)
++            Padding(
++              padding: const EdgeInsets.only(top: 4),
++              child: Text(
++                _getDecodedText(translation.text),
++                style: OmiType.subhead.copyWith(color: OmiColors.textSecondary, fontStyle: FontStyle.italic),
++                textAlign: TextAlign.left,
+               ),
+             ),
+-            if (data.translations.isNotEmpty) ...[
+-              for (final translation in data.translations)
+-                Padding(
+-                  padding: const EdgeInsets.only(top: 4),
+-                  child: Text(
+-                    _getDecodedText(translation.text),
+-                    style: OmiType.subhead.copyWith(color: OmiColors.textSecondary, fontStyle: FontStyle.italic),
+-                    textAlign: TextAlign.left,
+-                  ),
+-                ),
+-              const SizedBox(height: 4),
+-              _buildTranslationNotice(),
+-            ],
+-          ],
+-        ),
+-      ),
++          const SizedBox(height: 4),
++          _buildTranslationNotice(),
++        ],
++      ],
+     );
++    // The tap lives inside the selection area too: its own tap recognizer would otherwise win a tap
++    // on the words over the line's. A long press still selects.
++    final words = selecting
++        ? text
++        : SelectionArea(
++            child: GestureDetector(
++              behavior: HitTestBehavior.translucent,
++              onTap: seek == null ? null : play,
++              onDoubleTap: widget.onEditSegmentText == null
++                  ? null
++                  : () {
++                      HapticFeedback.mediumImpact();
++                      widget.onEditSegmentText!(segmentIdx);
++                    },
++              child: text,
++            ),
++          );
+ 
+     // 8 above and below, plus the list's 4 between segments: the design's 20 between lines.
+     Widget line = Padding(
+@@ -1295,7 +1315,36 @@ class _TranscriptWidgetState extends State<TranscriptWidget> {
+         ],
+       ),
+     );
+-    if (seek != null) {
++    if (selected != null && toggle != null) {
++      final isSelected = selected.contains(data.id);
++      // The line's own targets (the name, the words) stand down: a tap anywhere toggles the check.
++      line = Semantics(
++        button: true,
++        selected: isSelected,
++        child: GestureDetector(
++          key: ValueKey('transcript_select_${data.id}'),
++          behavior: HitTestBehavior.opaque,
++          onTap: () {
++            OmiHaptics.selection();
++            toggle(data);
++          },
++          child: Row(
++            crossAxisAlignment: CrossAxisAlignment.start,
++            children: [
++              Padding(
++                padding: const EdgeInsets.only(top: 8, right: OmiSpacing.sm),
++                child: Icon(
++                  isSelected ? Icons.check_circle : Icons.radio_button_unchecked,
++                  size: 22,
++                  color: isSelected ? OmiColors.accent : OmiColors.textTertiary,
++                ),
++              ),
++              Expanded(child: IgnorePointer(child: line)),
++            ],
++          ),
++        ),
++      );
++    } else if (seek != null) {
+       line = Semantics(
+         hint: context.l10n.playFromHere,
+         child: GestureDetector(
+diff --git a/app/test/providers/speaker_summary_refresh_test.dart b/app/test/providers/speaker_summary_refresh_test.dart
+index 907878bdf7..845d15d60f 100644
+--- a/app/test/providers/speaker_summary_refresh_test.dart
++++ b/app/test/providers/speaker_summary_refresh_test.dart
+@@ -515,4 +515,206 @@ void main() {
+     provider.dispose();
+     list.dispose();
+   });
++
++  group('labeling pass', () {
++    ServerConversation twoVoices({String id = 'c'}) {
++      final value = conversation(id: id);
++      value.transcriptSegments.add(
++        TranscriptSegment(
++          id: 's2',
++          text: 'Second synthetic voice',
++          speaker: 'SPEAKER_01',
++          isUser: false,
++          personId: null,
++          translations: [],
++          start: 4,
++          end: 7,
++        ),
++      );
++      return value;
++    }
++
++    ({ConversationDetailProvider provider, List<String> reprocessed, List<(String, bool?, String?)> saves}) harness({
++      Future<bool> Function()? save,
++    }) {
++      final reprocessed = <String>[];
++      final saves = <(String, bool?, String?)>[];
++      final provider = ConversationDetailProvider(
++        assignSpeaker: (id, ids, {isUser, personId, speakerId}) {
++          saves.add((ids.join(','), isUser, personId));
++          return save?.call() ?? Future.value(true);
++        },
++        fetchConversation: (id) async => twoVoices(id: id),
++        reprocess: (id, {appId, requireSpeakerReceipt = false}) async {
++          expectSync(requireSpeakerReceipt, isTrue);
++          reprocessed.add(id);
++          return twoVoices(id: id);
++        },
++      );
++      select(provider, twoVoices());
++      return (provider: provider, reprocessed: reprocessed, saves: saves);
++    }
++
++    testWidgets('pauses between labels never regenerate; Done regenerates once', (tester) async {
++      final h = harness();
++      h.provider.beginSpeakerLabelingSession();
++      expect(h.provider.speakerLabelingSessionActive, isTrue);
++      expect(await h.provider.assignSpeaker(['s'], 'maya'), isTrue);
++      await tester.pump(const Duration(seconds: 10));
++      expect(await h.provider.assignSpeaker(['s2'], 'jordan'), isTrue);
++      await tester.pump(const Duration(seconds: 10));
++      expect(h.reprocessed, isEmpty);
++      expect(h.provider.speakerLabelingSessionLineCount, 2);
++
++      h.provider.confirmSpeakerLabelingSession();
++      expect(h.provider.speakerLabelingSessionActive, isFalse);
++      expect(h.reprocessed, ['c']);
++      await tester.pump();
++      h.provider.confirmSpeakerLabelingSession();
++      h.provider.leaveSpeakerLabelingSession('c');
++      await tester.pump(const Duration(seconds: 10));
++      expect(h.reprocessed, ['c']);
++      h.provider.dispose();
++      await tester.pump();
++      expect(h.reprocessed, ['c']);
++    });
++
++    testWidgets('a pass that changed nothing regenerates nothing', (tester) async {
++      final h = harness();
++      h.provider.beginSpeakerLabelingSession();
++      h.provider.confirmSpeakerLabelingSession();
++      await tester.pump(const Duration(seconds: 10));
++      expect(h.reprocessed, isEmpty);
++      expect(h.provider.trackedSpeakerConversationIds, isEmpty);
++      h.provider.dispose();
++    });
++
++    testWidgets('Done while a save is in flight regenerates once, after it lands', (tester) async {
++      final save = Completer<bool>();
++      final h = harness(save: () => save.future);
++      h.provider.beginSpeakerLabelingSession();
++      final assignment = h.provider.assignSpeaker(['s'], 'maya');
++      h.provider.confirmSpeakerLabelingSession();
++      expect(h.reprocessed, isEmpty);
++      save.complete(true);
++      expect(await assignment, isTrue);
++      await tester.pump();
++      expect(h.reprocessed, ['c']);
++      await tester.pump(const Duration(seconds: 10));
++      expect(h.reprocessed, ['c']);
++      expect(h.provider.trackedSpeakerConversationIds, isEmpty);
++      h.provider.dispose();
++    });
++
++    testWidgets('leaving the page mid-pass auto-confirms once; Done afterwards is a no-op', (tester) async {
++      final h = harness();
++      h.provider.beginSpeakerLabelingSession();
++      expect(await h.provider.assignSpeaker(['s'], 'maya'), isTrue);
++      h.provider.leaveSpeakerLabelingSession('another-conversation');
++      expect(h.provider.speakerLabelingSessionActive, isTrue);
++      h.provider.leaveSpeakerLabelingSession('c');
++      expect(h.provider.speakerLabelingSessionActive, isFalse);
++      await tester.pump();
++      expect(h.reprocessed, ['c']);
++      h.provider.confirmSpeakerLabelingSession();
++      h.provider.dispose();
++      await tester.pump(const Duration(seconds: 10));
++      expect(h.reprocessed, ['c']);
++      expect(h.provider.trackedSpeakerConversationIds, isEmpty);
++    });
++
++    testWidgets('a page under another detail page cannot end the top one\'s pass', (tester) async {
++      final h = harness();
++      h.provider.beginSpeakerLabelingSession();
++      expect(await h.provider.assignSpeaker(['s'], 'maya'), isTrue);
++      h.provider.confirmSpeakerLabelingSession(conversationId: 'page-underneath');
++      expect(h.provider.speakerLabelingSessionActive, isTrue);
++      expect(h.reprocessed, isEmpty);
++      h.provider.confirmSpeakerLabelingSession(conversationId: 'c');
++      expect(h.reprocessed, ['c']);
++      await tester.pump();
++      h.provider.dispose();
++    });
++
++    testWidgets('labeling again after Done starts a new pass with its own single regeneration', (tester) async {
++      final h = harness();
++      h.provider.beginSpeakerLabelingSession();
++      expect(await h.provider.assignSpeaker(['s'], 'maya'), isTrue);
++      h.provider.confirmSpeakerLabelingSession();
++      await tester.pump();
++      expect(h.reprocessed, ['c']);
++
++      h.provider.beginSpeakerLabelingSession();
++      expect(h.provider.speakerLabelingSessionLineCount, 0);
++      expect(await h.provider.assignSpeaker(['s2'], 'jordan'), isTrue);
++      await tester.pump(const Duration(seconds: 10));
++      expect(h.reprocessed, ['c']);
++      h.provider.confirmSpeakerLabelingSession();
++      await tester.pump();
++      expect(h.reprocessed, ['c', 'c']);
++      h.provider.dispose();
++    });
++
++    testWidgets('switching conversations mid-pass flushes the old pass through the exit path', (tester) async {
++      final h = harness();
++      h.provider.beginSpeakerLabelingSession();
++      expect(await h.provider.assignSpeaker(['s'], 'maya'), isTrue);
++      select(h.provider, twoVoices(id: 'next'));
++      expect(h.provider.speakerLabelingSessionActive, isFalse);
++      await tester.pump();
++      expect(h.reprocessed, ['c']);
++      await tester.pump(const Duration(seconds: 10));
++      expect(h.reprocessed, ['c']);
++      h.provider.dispose();
++    });
++
++    testWidgets('Undo puts back and re-saves each line\'s previous label', (tester) async {
++      final h = harness();
++      final segments = h.provider.conversation.transcriptSegments;
++      segments.first.personId = 'alex';
++      segments.last.isUser = true;
++      h.provider.beginSpeakerLabelingSession();
++      expect(h.provider.canUndoSpeakerLabel, isFalse);
++      expect(await h.provider.assignSpeaker(['s', 's2'], 'maya'), isTrue);
++      expect(segments.map((s) => (s.isUser, s.personId)), [(false, 'maya'), (false, 'maya')]);
++      expect(h.provider.speakerLabelingSessionLineCount, 2);
++      expect(h.provider.canUndoSpeakerLabel, isTrue);
++
++      expect(await h.provider.undoLastSpeakerLabel(), isTrue);
++      expect(segments.map((s) => (s.isUser, s.personId)), [(false, 'alex'), (true, null)]);
++      expect(h.saves, [
++        ('s,s2', false, 'maya'),
++        ('s', false, 'alex'),
++        ('s2', true, null),
++      ]);
++      expect(h.provider.speakerLabelingSessionLineCount, 0);
++      expect(h.provider.canUndoSpeakerLabel, isFalse);
++      expect(h.provider.speakerLabelingSessionActive, isTrue);
++      await tester.pump(const Duration(seconds: 10));
++      expect(h.reprocessed, isEmpty);
++      h.provider.dispose();
++    });
++
++    testWidgets('a failed Undo leaves the lines as the server still has them', (tester) async {
++      var accept = true;
++      final h = harness(save: () async => accept);
++      final segment = h.provider.conversation.transcriptSegments.first;
++      h.provider.beginSpeakerLabelingSession();
++      expect(await h.provider.assignSpeaker(['s'], 'maya'), isTrue);
++      accept = false;
++      expect(await h.provider.undoLastSpeakerLabel(), isFalse);
++      expect(segment.personId, 'maya');
++      expect(h.provider.canUndoSpeakerLabel, isFalse);
++      h.provider.dispose();
++    });
++
++    testWidgets('a label that failed to save is not counted and has nothing to undo', (tester) async {
++      final h = harness(save: () async => false);
++      h.provider.beginSpeakerLabelingSession();
++      expect(await h.provider.assignSpeaker(['s'], 'maya'), isFalse);
++      expect(h.provider.speakerLabelingSessionLineCount, 0);
++      expect(h.provider.canUndoSpeakerLabel, isFalse);
++      h.provider.dispose();
++    });
++  });
+ }
+diff --git a/app/test/widgets/speaker_labeling_clone_test.dart b/app/test/widgets/speaker_labeling_clone_test.dart
+new file mode 100644
+index 0000000000..6b4664dc78
+--- /dev/null
++++ b/app/test/widgets/speaker_labeling_clone_test.dart
+@@ -0,0 +1,238 @@
++// Clone local : nommer plusieurs locuteurs d'un coup (0012, repris d'Omi 7d4da9750b). En français, en thème clair
++// (champs lisibles comme le 0005), et sur la page : quitter la page ou passer l'app en arrière-plan au milieu
++// d'une session régénère le résumé une seule fois.
++import 'dart:async';
++
++import 'package:flutter/material.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:provider/provider.dart';
++import 'package:shared_preferences/shared_preferences.dart';
++
++import 'package:omi/backend/http/api/users.dart';
++import 'package:omi/backend/http/api_result.dart';
++import 'package:omi/backend/preferences.dart';
++import 'package:omi/backend/schema/conversation.dart';
++import 'package:omi/backend/schema/person.dart';
++import 'package:omi/backend/schema/structured.dart';
++import 'package:omi/backend/schema/transcript_segment.dart';
++import 'package:omi/l10n/app_localizations.dart';
++import 'package:omi/pages/conversation_detail/conversation_detail_provider.dart';
++import 'package:omi/pages/conversation_detail/page.dart';
++import 'package:omi/pages/conversation_detail/widgets/speaker_quick_picker.dart';
++import 'package:omi/pages/conversation_detail/widgets/speaker_tag_outcome.dart';
++import 'package:omi/pages/conversation_detail/widgets/transcript_tab.dart';
++import 'package:omi/providers/app_provider.dart';
++import 'package:omi/providers/connectivity_provider.dart';
++import 'package:omi/providers/conversation_provider.dart';
++import 'package:omi/providers/folder_provider.dart';
++import 'package:omi/providers/integration_provider.dart';
++import 'package:omi/providers/people_provider.dart';
++import 'package:omi/ui/ui.dart';
++import 'package:omi/utils/platform/platform_manager.dart';
++import 'package:omi/widgets/conversation_bottom_bar.dart';
++
++TranscriptSegment _line(String id, int speakerId, String text, double start) => TranscriptSegment(
++      id: id,
++      text: text,
++      speaker: 'SPEAKER_${speakerId.toString().padLeft(2, '0')}',
++      speakerId: speakerId,
++      isUser: false,
++      personId: null,
++      start: start,
++      end: start + 2,
++      translations: const [],
++    );
++
++Person _person(String id, String name) =>
++    Person(id: id, name: name, createdAt: DateTime(2026), updatedAt: DateTime(2026));
++
++ServerConversation _conversation() => ServerConversation(
++      id: 'c-plaud',
++      createdAt: DateTime.utc(2026, 10, 19, 9),
++      structured: Structured('Réunion de chantier', 'Le résumé avant les noms.'),
++      status: ConversationStatus.completed,
++      transcriptSegments: [
++        _line('a', 1, 'On commence par le devis.', 0),
++        _line('b', 2, 'Je l’envoie lundi.', 3),
++        _line('c', 3, 'Et le budget ?', 6),
++        _line('d', 1, 'On en reparle jeudi.', 9),
++      ],
++    );
++
++void main() {
++  setUp(() async {
++    SharedPreferences.setMockInitialValues({'has_first_conversation': true});
++    await SharedPreferencesUtil.init();
++    OmiColors.active = OmiPalette.light;
++  });
++
++  testWidgets('en français et en thème clair : sélection, nom en un appui, champ lisible, Terminé', (tester) async {
++    final conversation = _conversation();
++    final saves = <(String, String?)>[];
++    var regenerations = 0;
++    final detail = ConversationDetailProvider(
++      assignSpeaker: (_, ids, {isUser, personId, speakerId}) async {
++        saves.add((ids.join(','), personId));
++        return true;
++      },
++      reprocess: (id, {appId, requireSpeakerReceipt = false}) async {
++        regenerations++;
++        return conversation;
++      },
++      fetchConversation: (_) async => conversation,
++    )
++      ..selectedDate = conversation.createdAt
++      ..setCachedConversation(conversation);
++    final outcome = SpeakerTagOutcomeController(
++      fetchPerson: (id) async => ApiSuccess(_person(id, 'Marie')),
++      fetchMatches: (_) async => const ApiSuccess([]),
++    );
++    final people = [_person('marie', 'Marie'), _person('paul', 'Paul')];
++    await tester.pumpWidget(MultiProvider(
++      providers: [
++        ChangeNotifierProvider<ConnectivityProvider>(create: (_) => ConnectivityProvider()),
++        ChangeNotifierProvider<PeopleProvider>.value(
++          value: PeopleProvider(loadPeople: () async => PeopleListResponse(people: people))..people = people,
++        ),
++        ChangeNotifierProvider<ConversationDetailProvider>.value(value: detail),
++        ChangeNotifierProvider<SpeakerTagOutcomeController>.value(value: outcome),
++      ],
++      child: MaterialApp(
++        localizationsDelegates: AppLocalizations.localizationsDelegates,
++        supportedLocales: AppLocalizations.supportedLocales,
++        locale: const Locale('fr'),
++        theme: buildOmiTheme(brightness: Brightness.light),
++        home: const Scaffold(body: TranscriptWidgets()),
++      ),
++    ));
++    await tester.pumpAndSettle();
++
++    await tester.tap(find.byKey(const Key('transcript_select_lines')));
++    await tester.pumpAndSettle();
++    expect(find.text('0 sélectionné(s)'), findsOneWidget);
++    await tester.tap(find.byKey(const ValueKey('transcript_select_b')));
++    await tester.tap(find.byKey(const ValueKey('transcript_select_c')));
++    await tester.pumpAndSettle();
++    expect(find.text('2 sélectionné(s)'), findsOneWidget);
++    // Selected and unselected lines differ by shape, not only by colour.
++    expect(find.byIcon(Icons.check_circle), findsNWidgets(2));
++    expect(find.byIcon(Icons.radio_button_unchecked), findsNWidgets(2));
++
++    await tester.tap(find.byKey(const Key('speaker_labeling_assign')));
++    await tester.pumpAndSettle();
++    expect(find.byType(SpeakerQuickPicker), findsOneWidget);
++    expect(find.text('Nommer le locuteur'), findsWidgets);
++    await tester.tap(find.byKey(const Key('speaker_quick_picker_add')));
++    await tester.pumpAndSettle();
++    final field = tester.widget<TextField>(find.byKey(const Key('speaker_quick_picker_new_name')));
++    expect(field.style?.color, OmiPalette.light.textPrimary);
++    expect(field.decoration?.fillColor, OmiPalette.light.surface2);
++    expect(field.decoration?.hintText, 'Entrez le nom de la personne');
++    expect(OmiPalette.light.textPrimary, isNot(OmiPalette.light.surface2));
++    await tester.tap(find.text('Annuler').last);
++    await tester.pumpAndSettle();
++    await tester.tap(find.byKey(const Key('speaker_quick_picker_person_paul')));
++    await tester.pumpAndSettle();
++    expect(saves, [('b,c', 'paul')]);
++    expect(find.text('2 lignes étiquetées'), findsOneWidget);
++    await tester.pump(const Duration(seconds: 10));
++    expect(regenerations, 0);
++
++    await tester.tap(find.text('Terminé'));
++    await tester.pump();
++    await tester.pump(const Duration(milliseconds: 300));
++    expect(regenerations, 1);
++    expect(find.byKey(const Key('speaker_labeling_session_bar')), findsNothing);
++
++    outcome.dismiss();
++    await tester.pumpWidget(const SizedBox());
++    detail.dispose();
++    outcome.dispose();
++  });
++
++  group('sur la page de la conversation', () {
++    Future<({ConversationDetailProvider detail, List<String> regenerated})> pumpPage(WidgetTester tester) async {
++      PlatformManager.initializeForLocalHarness();
++      final initial = _conversation();
++      final details = Completer<ServerConversation?>()..complete(initial);
++      final conversations = ConversationProvider(isSignedIn: () => false);
++      conversations.conversations = [initial];
++      conversations.groupedConversations = {
++        conversationLocalDayKey(initial.createdAt): [initial],
++      };
++      conversations.conversationDetailsFetcherOverride = (_) => details.future;
++      final regenerated = <String>[];
++      final detail = ConversationDetailProvider(
++        assignSpeaker: (_, ids, {isUser, personId, speakerId}) async => true,
++        fetchConversation: (_) async => initial,
++        reprocess: (id, {appId, requireSpeakerReceipt = false}) async {
++          regenerated.add(id);
++          return initial;
++        },
++      );
++      final apps = AppProvider();
++      detail.setProviders(apps, conversations);
++      addTearDown(() {
++        detail.dispose();
++        conversations.dispose();
++        apps.dispose();
++      });
++      await tester.pumpWidget(MaterialApp(
++        localizationsDelegates: AppLocalizations.localizationsDelegates,
++        supportedLocales: AppLocalizations.supportedLocales,
++        home: MultiProvider(
++          providers: [
++            ChangeNotifierProvider<ConversationProvider>.value(value: conversations),
++            ChangeNotifierProvider<ConversationDetailProvider>.value(value: detail),
++            ChangeNotifierProvider<AppProvider>.value(value: apps),
++            ChangeNotifierProvider(create: (_) => FolderProvider(foldersFetcher: () async => [])),
++            ChangeNotifierProvider(create: (_) => ConnectivityProvider()),
++            ChangeNotifierProvider(create: (_) => PeopleProvider()),
++            ChangeNotifierProvider(
++              create: (_) => IntegrationProvider(
++                fetchStatus: (_) async => null,
++                saveStatus: (_, __) async => false,
++                deleteStatus: (_) async => false,
++                persistPref: (_, __) async {},
++              ),
++            ),
++          ],
++          child: ConversationDetailPage(conversation: initial, initialTab: ConversationTab.transcript),
++        ),
++      ));
++      await tester.pump();
++      await tester.pump(const Duration(milliseconds: 300));
++      detail.beginSpeakerLabelingSession();
++      expect(await detail.assignSpeaker(['b'], 'marie'), isTrue);
++      expect(await detail.assignSpeaker(['c'], 'paul'), isTrue);
++      await tester.pump(const Duration(seconds: 10));
++      expect(regenerated, isEmpty);
++      return (detail: detail, regenerated: regenerated);
++    }
++
++    testWidgets('quitter la page au milieu de la session régénère une fois', (tester) async {
++      final page = await pumpPage(tester);
++      await tester.pumpWidget(const SizedBox());
++      await tester.pump();
++      expect(page.regenerated, ['c-plaud']);
++      expect(page.detail.speakerLabelingSessionActive, isFalse);
++      await tester.pump(const Duration(seconds: 10));
++      expect(page.regenerated, ['c-plaud']);
++    });
++
++    testWidgets('passer l\'app en arrière-plan termine la session comme Terminé', (tester) async {
++      final page = await pumpPage(tester);
++      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
++      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
++      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
++      await tester.pump();
++      expect(page.regenerated, ['c-plaud']);
++      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
++      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
++      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
++      await tester.pumpWidget(const SizedBox());
++      await tester.pump(const Duration(seconds: 10));
++      expect(page.regenerated, ['c-plaud']);
++    });
++  });
++}
+diff --git a/app/test/widgets/speaker_labeling_session_test.dart b/app/test/widgets/speaker_labeling_session_test.dart
+new file mode 100644
+index 0000000000..04f1b7d052
+--- /dev/null
++++ b/app/test/widgets/speaker_labeling_session_test.dart
+@@ -0,0 +1,238 @@
++import 'package:flutter/material.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:nested/nested.dart';
++import 'package:provider/provider.dart';
++import 'package:shared_preferences/shared_preferences.dart';
++
++import 'package:omi/backend/http/api/users.dart';
++import 'package:omi/backend/http/api_result.dart';
++import 'package:omi/backend/preferences.dart';
++import 'package:omi/backend/schema/conversation.dart';
++import 'package:omi/backend/schema/person.dart';
++import 'package:omi/backend/schema/structured.dart';
++import 'package:omi/backend/schema/transcript_segment.dart';
++import 'package:omi/l10n/app_localizations.dart';
++import 'package:omi/pages/conversation_detail/conversation_detail_provider.dart';
++import 'package:omi/pages/conversation_detail/widgets/name_speaker_sheet.dart';
++import 'package:omi/pages/conversation_detail/widgets/speaker_quick_picker.dart';
++import 'package:omi/pages/conversation_detail/widgets/speaker_tag_outcome.dart';
++import 'package:omi/pages/conversation_detail/widgets/transcript_tab.dart';
++import 'package:omi/providers/connectivity_provider.dart';
++import 'package:omi/providers/people_provider.dart';
++import 'package:omi/widgets/transcript.dart';
++
++TranscriptSegment _line(String id, int speakerId, String text, double start, {String? personId}) => TranscriptSegment(
++      id: id,
++      text: text,
++      speaker: 'SPEAKER_${speakerId.toString().padLeft(2, '0')}',
++      speakerId: speakerId,
++      isUser: false,
++      personId: personId,
++      start: start,
++      end: start + 2,
++      translations: const [],
++    );
++
++Person _person(String id, String name) =>
++    Person(id: id, name: name, createdAt: DateTime(2026), updatedAt: DateTime(2026));
++
++Widget _app(Widget child, {List<SingleChildWidget> providers = const [], List<Person> people = const []}) =>
++    MultiProvider(
++      providers: [
++        ChangeNotifierProvider<ConnectivityProvider>(create: (_) => ConnectivityProvider()),
++        ChangeNotifierProvider<PeopleProvider>.value(
++          value: PeopleProvider(loadPeople: () async => PeopleListResponse(people: people))..people = people,
++        ),
++        ...providers,
++      ],
++      child: MaterialApp(
++        localizationsDelegates: AppLocalizations.localizationsDelegates,
++        supportedLocales: AppLocalizations.supportedLocales,
++        home: Scaffold(body: child),
++      ),
++    );
++
++void main() {
++  setUp(() async {
++    SharedPreferences.setMockInitialValues({});
++    await SharedPreferencesUtil.init();
++  });
++
++  testWidgets('short lines inside a turn start where the long lines start', (tester) async {
++    const long = 'We should look at the floor plan again before we decide anything about the kitchen.';
++    final segments = [
++      _line('a', 1, long, 0),
++      _line('b', 1, 'Maybe', 3),
++      _line('c', 2, 'Yeah, and the people inside so big. No.', 5),
++      _line('d', 2, 'No.', 8),
++      _line('e', 1, long, 10),
++      _line('f', 1, 'Okay', 13),
++    ];
++    await tester.pumpWidget(
++      _app(TranscriptWidget(segments: segments, isConversationDetail: true, horizontalMargin: false)),
++    );
++    await tester.pumpAndSettle();
++
++    final start = tester.getTopLeft(find.text(long, findRichText: true).first).dx;
++    for (final text in ['Maybe', 'Yeah, and the people inside so big. No.', 'No.', 'Okay']) {
++      final line = find.text(text, findRichText: true);
++      expect(line, findsOneWidget, reason: text);
++      expect(tester.getTopLeft(line).dx, start, reason: '"$text" must not be centered');
++      expect(tester.widget<RichText>(line).textAlign, TextAlign.left, reason: text);
++    }
++  });
++
++  group('labeling pass', () {
++    late ServerConversation conversation;
++    late ConversationDetailProvider detail;
++    late SpeakerTagOutcomeController outcome;
++    late List<(String, String?)> saves;
++    late int regenerations;
++
++    // Built inside each test body, not setUp: the provider's save chain starts from a
++    // completed future, and a future created outside the test's fake-async zone
++    // resumes on the real microtask queue, which pumping never drains.
++    void createPass() {
++      conversation = ServerConversation(
++        id: 'c-pass',
++        createdAt: DateTime(2026, 10, 10, 9),
++        structured: Structured('Title', 'Summary'),
++        status: ConversationStatus.completed,
++        transcriptSegments: [
++          _line('a', 1, 'First line from the first voice.', 0),
++          _line('b', 2, 'A reply from the second voice.', 3),
++          _line('c', 1, 'The first voice again.', 6),
++        ],
++      );
++      saves = [];
++      regenerations = 0;
++      detail = ConversationDetailProvider(
++        assignSpeaker: (_, ids, {isUser, personId, speakerId}) async {
++          saves.add((ids.join(','), personId));
++          return true;
++        },
++        reprocess: (id, {appId, requireSpeakerReceipt = false}) async {
++          regenerations++;
++          return conversation;
++        },
++        fetchConversation: (_) async => conversation,
++      )
++        ..selectedDate = conversation.createdAt
++        ..setCachedConversation(conversation);
++      outcome = SpeakerTagOutcomeController(
++        fetchPerson: (id) async => ApiSuccess(_person(id, 'Maya')),
++        fetchMatches: (_) async => const ApiSuccess([]),
++      );
++    }
++
++    Future<void> pumpTab(WidgetTester tester) async {
++      createPass();
++      await tester.pumpWidget(
++        _app(
++          const TranscriptWidgets(),
++          people: [_person('maya', 'Maya')],
++          providers: [
++            ChangeNotifierProvider<ConversationDetailProvider>.value(value: detail),
++            ChangeNotifierProvider<SpeakerTagOutcomeController>.value(value: outcome),
++          ],
++        ),
++      );
++      await tester.pumpAndSettle();
++    }
++
++    Future<void> finish(WidgetTester tester) async {
++      outcome.dismiss();
++      await tester.pumpWidget(const SizedBox());
++      detail.dispose();
++      outcome.dispose();
++    }
++
++    testWidgets('select lines, name them with one tap, and Done updates the summary once', (tester) async {
++      await pumpTab(tester);
++      expect(find.byKey(const Key('speaker_labeling_session_bar')), findsNothing);
++
++      await tester.tap(find.byKey(const Key('transcript_select_lines')));
++      await tester.pumpAndSettle();
++      expect(find.byKey(const Key('speaker_labeling_session_bar')), findsOneWidget);
++      expect(find.text('0 selected'), findsOneWidget);
++
++      await tester.tap(find.byKey(const ValueKey('transcript_select_a')));
++      await tester.tap(find.byKey(const ValueKey('transcript_select_c')));
++      await tester.pumpAndSettle();
++      expect(find.text('2 selected'), findsOneWidget);
++
++      await tester.tap(find.byKey(const Key('speaker_labeling_assign')));
++      await tester.pumpAndSettle();
++      expect(find.byType(SpeakerQuickPicker), findsOneWidget);
++      await tester.tap(find.byKey(const Key('speaker_quick_picker_person_maya')));
++      await tester.pumpAndSettle();
++
++      expect(find.byType(SpeakerQuickPicker), findsNothing);
++      expect(saves, [('a,c', 'maya')]);
++      expect(find.text('Labeled 2 lines'), findsOneWidget);
++      // The per-label card waits for Done; pauses between labels regenerate nothing.
++      expect(find.byKey(const Key('speaker_tag_outcome')), findsNothing);
++      await tester.pump(const Duration(seconds: 10));
++      expect(regenerations, 0);
++
++      await tester.tap(find.byKey(const Key('speaker_labeling_done')));
++      // The outcome card's "Learning voice…" spinner never settles; pump past the regeneration.
++      await tester.pump();
++      await tester.pump(const Duration(milliseconds: 300));
++      expect(regenerations, 1);
++      expect(find.byKey(const Key('speaker_labeling_session_bar')), findsNothing);
++      expect(find.byKey(const Key('speaker_tag_outcome')), findsOneWidget);
++      await finish(tester);
++    });
++
++    testWidgets('selection mode toggles lines instead of opening the name sheet; Cancel leaves it', (tester) async {
++      await pumpTab(tester);
++      await tester.tap(find.byKey(const Key('transcript_select_lines')));
++      await tester.pumpAndSettle();
++      // The name sits under the line's toggle, so the tap selects instead of opening the sheet.
++      await tester.tap(find.text('Speaker 1').first, warnIfMissed: false);
++      await tester.pumpAndSettle();
++      expect(find.text('1 selected'), findsOneWidget);
++      expect(find.byType(NameSpeakerBottomSheet), findsNothing);
++
++      await tester.tap(find.byKey(const Key('speaker_labeling_cancel_selection')));
++      await tester.pumpAndSettle();
++      expect(find.byKey(const ValueKey('transcript_select_a')), findsNothing);
++      // The pass stays open with nothing labeled, and Done regenerates nothing.
++      await tester.tap(find.byKey(const Key('speaker_labeling_done')));
++      await tester.pumpAndSettle();
++      expect(regenerations, 0);
++      await finish(tester);
++    });
++
++    testWidgets('Undo in the bar puts the previous label back', (tester) async {
++      await pumpTab(tester);
++      await tester.tap(find.byKey(const Key('transcript_select_lines')));
++      await tester.pumpAndSettle();
++      await tester.tap(find.byKey(const ValueKey('transcript_select_b')));
++      await tester.pumpAndSettle();
++      await tester.tap(find.byKey(const Key('speaker_labeling_assign')));
++      await tester.pumpAndSettle();
++      await tester.tap(find.byKey(const Key('speaker_quick_picker_person_maya')));
++      await tester.pumpAndSettle();
++      expect(conversation.transcriptSegments[1].personId, 'maya');
++
++      await tester.tap(find.byKey(const Key('speaker_labeling_undo')));
++      await tester.pumpAndSettle();
++      expect(conversation.transcriptSegments[1].personId, isNull);
++      expect(saves.last, ('b', null));
++      expect(find.text('Labeled 0 lines'), findsOneWidget);
++      await finish(tester);
++    });
++  });
++
++  test('the quick picker puts people already in the conversation first, then recent, then by name', () {
++    final people = [_person('zoe', 'Zoe'), _person('amy', 'Amy'), _person('maya', 'Maya'), _person('blank', ' ')];
++    final ordered = SpeakerQuickPicker.order(
++      people,
++      [_line('a', 1, 'x', 0, personId: 'maya'), _line('b', 1, 'y', 1, personId: 'maya')],
++      {'zoe': 100},
++    );
++    expect(ordered.map((p) => p.id), ['maya', 'zoe', 'amy']);
++  });
++}

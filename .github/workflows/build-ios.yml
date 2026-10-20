@@ -116,7 +116,8 @@ jobs:
         working-directory: omi/app
         # test/plaud/ vient de patches/app ; firmware et bluetooth sont ceux d'Omi sur les fichiers touchés ; les
         # suivants viennent de 0006-0009 (discussions séparées, résumés gardés, Insights, Corriger) ou sont ceux
-        # d'Omi sur l'accueil à trois onglets
+        # d'Omi sur l'accueil à trois onglets ; 2026-10-20 : 0011-0014 (sources des sections, nommer plusieurs
+        # locuteurs, régénération fiable + MagicDNS, relecture de nuit)
         run: >-
           flutter test test/plaud/ test/unit/firmware_update_build_policy_test.dart
           test/unit/native_bluetooth_discoverer_plaud_test.dart
@@ -127,6 +128,11 @@ jobs:
           test/unit/summary_correction_test.dart test/widgets/summary_correction_sheet_test.dart
           test/unit/insights_maintenant_bilans_test.dart test/widgets/insights_maintenant_bilans_test.dart
           test/widgets/insights_relecture_2026_10_11_test.dart
+          test/unit/note_citations_test.dart test/unit/summary_section_sources_test.dart
+          test/widgets/summary_section_sources_test.dart test/providers/speaker_summary_refresh_test.dart
+          test/widgets/speaker_labeling_session_test.dart test/widgets/speaker_labeling_clone_test.dart
+          test/unit/reprocess_reliability_test.dart test/widgets/reprocess_failure_message_test.dart
+          test/unit/env_test.dart test/unit/relecture_test.dart test/widgets/relecture_test.dart
 
       - name: Test de connexion vers le serveur personnel
         working-directory: omi/app

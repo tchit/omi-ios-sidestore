@@ -1,0 +1,2893 @@
+diff --git a/app/lib/backend/http/api/insights.dart b/app/lib/backend/http/api/insights.dart
+index 7fa927c640..805e788947 100644
+--- a/app/lib/backend/http/api/insights.dart
++++ b/app/lib/backend/http/api/insights.dart
+@@ -12,6 +12,9 @@ class InsightsApi {
+   final ApiSend? send;
+   final String? _baseUrl;
+ 
++  /// La base des adresses si elle a été donnée (tests), sinon null : celle de l'app.
++  String? get baseUrl => _baseUrl;
++
+   String _url(String path, [Map<String, String> query = const {}]) =>
+       Uri.parse('${_baseUrl ?? Env.apiBaseUrl}$path').replace(queryParameters: query.isEmpty ? null : query).toString();
+ 
+diff --git a/app/lib/backend/http/api/relecture.dart b/app/lib/backend/http/api/relecture.dart
+new file mode 100644
+index 0000000000..73f121bbfd
+--- /dev/null
++++ b/app/lib/backend/http/api/relecture.dart
+@@ -0,0 +1,129 @@
++import 'dart:convert';
++
++import 'package:http/http.dart' as http;
++
++import 'package:omi/backend/http/api_result.dart';
++import 'package:omi/backend/http/shared.dart';
++import 'package:omi/backend/schema/relecture.dart';
++import 'package:omi/env/env.dart';
++import 'package:omi/services/auth/auth_token_result.dart';
++
++/// Le résultat d'un geste de la relecture (accepter, ignorer, annuler).
++sealed class RelectureOutcome<T> {
++  const RelectureOutcome();
++}
++
++/// Fait (le serveur a répondu 2xx). [data] est ce qu'il a rendu, s'il se lit.
++final class RelectureDone<T> extends RelectureOutcome<T> {
++  const RelectureDone(this.data);
++  final T data;
++}
++
++/// Refusé par le serveur (409) : déjà traité, ou les données ont changé depuis. [detail] est son message, à
++/// montrer tel quel.
++final class RelectureConflict<T> extends RelectureOutcome<T> {
++  const RelectureConflict(this.detail);
++  final String? detail;
++}
++
++/// En échec : réseau, serveur, ou 404 ([ApiProblemKind.notFound] : n'existe plus).
++final class RelectureFailed<T> extends RelectureOutcome<T> {
++  const RelectureFailed(this.problem);
++  final ApiProblem problem;
++}
++
++/// Clone local : les routes de la « Relecture de nuit » du serveur du clone. L'app lit les propositions et les
++/// changements, et ne fait que des gestes explicites de Mike : accepter, ignorer une proposition, annuler un
++/// changement. Rien n'est supprimé d'ici.
++class RelectureApi {
++  RelectureApi({this.send, String? baseUrl}) : _baseUrl = baseUrl;
++
++  /// Remplace l'envoi (tests) ; null : le chemin de production (en-têtes, jeton, nouvel essai après 401).
++  final ApiSend? send;
++  final String? _baseUrl;
++
++  static const _root = 'v1/clone/relecture';
++
++  String _url(String path) => '${_baseUrl ?? Env.apiBaseUrl}$path';
++
++  /// Les propositions en attente, les changements récents (le plus récent d'abord) et l'heure de la dernière
++  /// relecture. Une réponse sans rien (`{}`) n'est pas une erreur.
++  Future<ApiResult<Relecture>> load() => executeApi(
++        request: ApiRequest(url: _url(_root), method: 'GET'),
++        send: send,
++        decode: (body) {
++          final decoded = jsonDecode(body);
++          if (decoded is! Map<String, dynamic>) throw const FormatException('Invalid relecture answer');
++          return Relecture.fromJson(decoded);
++        },
++      );
++
++  /// Applique la proposition ; rend le changement fait (null s'il ne se lit pas : c'est fait quand même).
++  Future<RelectureOutcome<RelectureChangement?>> accept(String propositionId) =>
++      _post('$_root/propositions/${Uri.encodeComponent(propositionId)}/accepter', RelectureChangement.tryParseEnvelope);
++
++  /// Écarte la proposition ; elle ne reviendra pas.
++  Future<RelectureOutcome<void>> ignore(String propositionId) =>
++      _post('$_root/propositions/${Uri.encodeComponent(propositionId)}/ignorer', (_) {});
++
++  /// Remet les données comme avant le changement ; rend le changement à jour (`annule_le`).
++  Future<RelectureOutcome<RelectureChangement?>> undo(String changementId) =>
++      _post('$_root/changements/${Uri.encodeComponent(changementId)}/annuler', RelectureChangement.tryParseEnvelope);
++
++  /// Un POST dont le refus (409) garde le message du serveur : [executeApi] ne rend que le code, la réponse est
++  /// donc lue au passage. Le chemin de production reste celui d'[executeApi] (même envoi, même 401).
++  Future<RelectureOutcome<T>> _post<T>(String path, T Function(Object? json) read) async {
++    http.Response? answer;
++    AuthTokenResult? refresh;
++    final result = await executeApi<T>(
++      request: ApiRequest(
++        url: _url(path),
++        method: 'POST',
++        headers: const {'Content-Type': 'application/json'},
++        body: '{}',
++      ),
++      send: (request) async {
++        final custom = send;
++        final response = custom != null
++            ? await custom(request)
++            : await sendUncaughtApiCall(
++                url: request.url,
++                headers: request.headers,
++                body: request.body,
++                method: request.method,
++                onAuthRefresh: (result) => refresh = result,
++              );
++        return answer = response;
++      },
++      // Le geste a réussi dès que le serveur répond 2xx ; une réponse illisible n'y change rien.
++      decode: (body) => read(_jsonOrNull(body)),
++    );
++    switch (result) {
++      case ApiSuccess(:final data):
++        return RelectureDone(data);
++      case ApiFailure(:final problem) when problem.statusCode == 409:
++        return RelectureConflict(_detail(answer?.body));
++      case ApiFailure(:final problem) when problem.statusCode == 401 && refresh is AuthTokenTransientFailure:
++        return const RelectureFailed(ApiProblem(ApiProblemKind.authTransient, statusCode: 401));
++      case ApiFailure(:final problem):
++        return RelectureFailed(problem);
++    }
++  }
++
++  static Object? _jsonOrNull(String body) {
++    try {
++      return jsonDecode(body);
++    } on FormatException {
++      return null;
++    }
++  }
++
++  /// `{"detail": "…"}` → le message ; autre chose (FastAPI rend parfois une liste) → null.
++  static String? _detail(String? body) {
++    if (body == null) return null;
++    final json = _jsonOrNull(body);
++    if (json is! Map) return null;
++    final detail = json['detail'];
++    return detail is String && detail.trim().isNotEmpty ? detail.trim() : null;
++  }
++}
+diff --git a/app/lib/backend/schema/relecture.dart b/app/lib/backend/schema/relecture.dart
+new file mode 100644
+index 0000000000..cab93fac9a
+--- /dev/null
++++ b/app/lib/backend/schema/relecture.dart
+@@ -0,0 +1,247 @@
++/// Clone local : la « Relecture de nuit ». Chaque nuit, le serveur du clone relit les données de Mike et PROPOSE
++/// des corrections (nom mal orthographié, tâches en double, tâche visiblement faite, souvenirs ou fiches de
++/// personnes en double). Rien ne s'applique sans son accord ; ce qu'il accepte devient un changement, annulable.
++///
++/// Formes rendues par `GET /v1/clone/relecture` et par les gestes (accepter, ignorer, annuler). Dart pur (sans
++/// Flutter) pour être testé seul. Lecture tolérante : champs inconnus ignorés, champs absents tolérés (liste vide,
++/// null) ; une ligne illisible (sans id) est écartée et comptée sans cacher les autres ; seule une liste non vide
++/// entièrement illisible est une erreur de lecture ([FormatException]).
++library;
++
++import 'package:omi/backend/schema/insight_dossier.dart' show uniqueById;
++
++/// Les types de proposition connus ; un autre reste affiché, avec une étiquette neutre.
++const relectureTypes = ['orthographe', 'tache_doublon', 'tache_terminee', 'souvenir_doublon', 'personne_doublon'];
++
++/// Ce qu'une proposition ou un changement touche : une conversation, une tâche, un souvenir, une personne.
++class RelectureCible {
++  const RelectureCible({required this.type, required this.id, this.titre});
++
++  final String type;
++  final String id;
++  final String? titre;
++
++  static RelectureCible? tryParse(Object? json) {
++    if (json is! Map) return null;
++    final id = _string(json['id']);
++    if (id == null) return null;
++    return RelectureCible(type: _string(json['type']) ?? '', id: id, titre: _string(json['titre']));
++  }
++}
++
++/// Une citation courte qui justifie la proposition, avec sa source (et la conversation à ouvrir, s'il y en a une).
++class RelectureExtrait {
++  const RelectureExtrait({required this.texte, this.source, this.conversationId});
++
++  final String texte;
++  final String? source;
++  final String? conversationId;
++
++  static RelectureExtrait? tryParse(Object? json) {
++    if (json is! Map) return null;
++    final texte = _string(json['texte']);
++    if (texte == null) return null;
++    return RelectureExtrait(
++      texte: texte,
++      source: _string(json['source']),
++      conversationId: _string(json['conversation_id']),
++    );
++  }
++}
++
++class RelectureProposition {
++  const RelectureProposition({
++    required this.id,
++    required this.type,
++    this.titre,
++    this.explication,
++    this.avant,
++    this.apres,
++    this.extraits = const [],
++    this.cibles = const [],
++    this.cree,
++  });
++
++  final String id;
++  final String type;
++  final String? titre;
++  final String? explication;
++
++  /// Le texte tel qu'il est, et tel qu'il serait une fois la proposition acceptée (l'un ou l'autre peut manquer).
++  final String? avant;
++  final String? apres;
++  final List<RelectureExtrait> extraits;
++  final List<RelectureCible> cibles;
++  final DateTime? cree;
++
++  factory RelectureProposition.fromJson(Map<String, dynamic> json) {
++    final id = _string(json['id']);
++    if (id == null) throw const FormatException('Proposition sans id');
++    return RelectureProposition(
++      id: id,
++      type: _string(json['type']) ?? '',
++      titre: _string(json['titre']),
++      explication: _string(json['explication']),
++      avant: _string(json['avant']),
++      apres: _string(json['apres']),
++      extraits: _list(json['extraits'], RelectureExtrait.tryParse),
++      cibles: uniqueById(_list(json['cibles'], RelectureCible.tryParse), (cible) => '${cible.type}/${cible.id}'),
++      cree: _date(json['cree']),
++    );
++  }
++}
++
++/// Une cible d'un changement, et son texte avant / après.
++class RelectureDetail {
++  const RelectureDetail({this.cible, this.avant, this.apres});
++
++  final RelectureCible? cible;
++  final String? avant;
++  final String? apres;
++
++  static RelectureDetail? tryParse(Object? json) {
++    if (json is! Map) return null;
++    final detail = RelectureDetail(
++      cible: RelectureCible.tryParse(json['cible']),
++      avant: _string(json['avant']),
++      apres: _string(json['apres']),
++    );
++    // Rien à montrer : écarté.
++    if (detail.cible == null && detail.avant == null && detail.apres == null) return null;
++    return detail;
++  }
++}
++
++class RelectureChangement {
++  const RelectureChangement({
++    required this.id,
++    this.propositionId,
++    required this.type,
++    this.titre,
++    this.details = const [],
++    this.faitLe,
++    this.annulable = false,
++    this.annuleLe,
++  });
++
++  final String id;
++  final String? propositionId;
++  final String type;
++  final String? titre;
++  final List<RelectureDetail> details;
++  final DateTime? faitLe;
++
++  /// Ce que dit le serveur ; voir [peutAnnuler].
++  final bool annulable;
++  final DateTime? annuleLe;
++
++  /// Annulable et pas déjà annulé.
++  bool get peutAnnuler => annulable && annuleLe == null;
++
++  factory RelectureChangement.fromJson(Map<String, dynamic> json) {
++    final id = _string(json['id']);
++    if (id == null) throw const FormatException('Changement sans id');
++    return RelectureChangement(
++      id: id,
++      propositionId: _string(json['proposition_id']),
++      type: _string(json['type']) ?? '',
++      titre: _string(json['titre']),
++      details: _list(json['details'], RelectureDetail.tryParse),
++      faitLe: _date(json['fait_le']),
++      annulable: json['annulable'] == true,
++      annuleLe: _date(json['annule_le']),
++    );
++  }
++
++  /// Le changement rendu par un geste (`{"changement": {...}}`) ; null s'il manque ou ne se lit pas (le geste a
++  /// quand même réussi : c'est le code HTTP qui le dit).
++  static RelectureChangement? tryParseEnvelope(Object? json) {
++    if (json is! Map) return null;
++    final changement = json['changement'];
++    if (changement is! Map<String, dynamic>) return null;
++    try {
++      return RelectureChangement.fromJson(changement);
++    } on FormatException {
++      return null;
++    }
++  }
++}
++
++/// Le plus récent d'abord ; sans date, à la fin ; à date égale, l'ordre du serveur.
++List<RelectureChangement> sortChangements(Iterable<RelectureChangement> changements) {
++  final indexed = changements.toList().indexed.toList();
++  indexed.sort((a, b) {
++    final da = a.$2.faitLe;
++    final db = b.$2.faitLe;
++    if (da == null && db == null) return a.$1.compareTo(b.$1);
++    if (da == null) return 1;
++    if (db == null) return -1;
++    final byDate = db.compareTo(da);
++    return byDate != 0 ? byDate : a.$1.compareTo(b.$1);
++  });
++  return [for (final (_, changement) in indexed) changement];
++}
++
++class Relecture {
++  const Relecture({
++    this.propositions = const [],
++    this.changements = const [],
++    this.derniereRelecture,
++    this.lignesEcartees = 0,
++  });
++
++  static const empty = Relecture();
++
++  /// Dans l'ordre du serveur.
++  final List<RelectureProposition> propositions;
++
++  /// Le plus récent d'abord.
++  final List<RelectureChangement> changements;
++  final DateTime? derniereRelecture;
++
++  /// Lignes illisibles écartées (propositions et changements).
++  final int lignesEcartees;
++
++  factory Relecture.fromJson(Map<String, dynamic> json) {
++    var rejected = 0;
++    List<T> rows<T>(Object? value, T Function(Map<String, dynamic>) parse) {
++      if (value is! List) return const [];
++      final kept = <T>[];
++      var bad = 0;
++      for (final item in value) {
++        try {
++          if (item is! Map<String, dynamic>) throw const FormatException('Ligne illisible');
++          kept.add(parse(item));
++        } on FormatException {
++          bad++;
++        }
++      }
++      if (kept.isEmpty && bad > 0) throw const FormatException('Liste illisible');
++      rejected += bad;
++      return kept;
++    }
++
++    final propositions = uniqueById(rows(json['propositions'], RelectureProposition.fromJson), (p) => p.id);
++    final changements = uniqueById(rows(json['changements'], RelectureChangement.fromJson), (c) => c.id);
++    return Relecture(
++      propositions: propositions,
++      changements: sortChangements(changements),
++      derniereRelecture: _date(json['derniere_relecture']),
++      lignesEcartees: rejected,
++    );
++  }
++
++  Relecture copyWith({List<RelectureProposition>? propositions, List<RelectureChangement>? changements}) => Relecture(
++        propositions: propositions ?? this.propositions,
++        changements: changements ?? this.changements,
++        derniereRelecture: derniereRelecture,
++        lignesEcartees: lignesEcartees,
++      );
++}
++
++List<T> _list<T>(Object? value, T? Function(Object?) parse) =>
++    value is List ? value.map(parse).whereType<T>().toList() : const [];
++
++String? _string(Object? value) => value is String && value.trim().isNotEmpty ? value.trim() : null;
++
++DateTime? _date(Object? value) => value is String ? DateTime.tryParse(value) : null;
+diff --git a/app/lib/l10n/app_en.arb b/app/lib/l10n/app_en.arb
+index 37483fcb82..fd01a77952 100644
+--- a/app/lib/l10n/app_en.arb
++++ b/app/lib/l10n/app_en.arb
+@@ -3360,6 +3360,195 @@
+     "@insightSourceConversationDeleted": {
+         "description": "Insights: a source conversation that was deleted and had no title or date"
+     },
++    "relectureTitle": "To review",
++    "@relectureTitle": {
++        "description": "Overnight review: title of the card and page listing Omi's suggested fixes"
++    },
++    "relectureCardCount": "{count, plural, =1{1 suggestion from Omi to review} other{{count} suggestions from Omi to review}}",
++    "@relectureCardCount": {
++        "description": "Overnight review: how many suggested fixes wait for the user",
++        "placeholders": {
++            "count": {
++                "type": "int"
++            }
++        }
++    },
++    "relectureChangesTitle": "Recent changes",
++    "@relectureChangesTitle": {
++        "description": "Overnight review: link and page listing the fixes the user accepted"
++    },
++    "relectureLoadError": "Overnight review unavailable right now.",
++    "@relectureLoadError": {
++        "description": "Overnight review: discreet line in the Insights tab when the review could not be read (pull to refresh retries)"
++    },
++    "relectureListLoadError": "Couldn’t load the overnight review.",
++    "@relectureListLoadError": {
++        "description": "Overnight review: full-page error with a retry button"
++    },
++    "relectureIntro": "Overnight, Omi read through your data and suggests these fixes. Nothing changes unless you accept, and anything you accept can be undone.",
++    "@relectureIntro": {
++        "description": "Overnight review: explanation at the top of the review page"
++    },
++    "relectureLastRun": "Last review: {when}",
++    "@relectureLastRun": {
++        "description": "Overnight review: when the server last read the data",
++        "placeholders": {
++            "when": {
++                "type": "String"
++            }
++        }
++    },
++    "relectureAccept": "Accept",
++    "@relectureAccept": {
++        "description": "Overnight review: apply a suggested fix"
++    },
++    "relectureIgnore": "Ignore",
++    "@relectureIgnore": {
++        "description": "Overnight review: dismiss a suggested fix (it will not come back)"
++    },
++    "relectureDone": "Done",
++    "@relectureDone": {
++        "description": "Overnight review: toast after accepting a fix, with Undo"
++    },
++    "relectureIgnored": "Suggestion ignored",
++    "@relectureIgnored": {
++        "description": "Overnight review: toast after ignoring a fix"
++    },
++    "relectureConflict": "The data changed since the review. The list is up to date.",
++    "@relectureConflict": {
++        "description": "Overnight review: the server refused (409) without a message"
++    },
++    "relecturePropositionGone": "This suggestion is no longer there.",
++    "@relecturePropositionGone": {
++        "description": "Overnight review: the suggestion no longer exists (404)"
++    },
++    "relectureChangeGone": "This change is no longer there.",
++    "@relectureChangeGone": {
++        "description": "Overnight review: the change no longer exists (404)"
++    },
++    "relectureActionFailed": "Couldn’t do that right now. Try again.",
++    "@relectureActionFailed": {
++        "description": "Overnight review: accept, ignore or undo failed (network, server)"
++    },
++    "relectureAllDoneTitle": "All caught up",
++    "@relectureAllDoneTitle": {
++        "description": "Overnight review: no suggestion left"
++    },
++    "relectureAllDoneMessage": "Omi will suggest more fixes after its next overnight review.",
++    "@relectureAllDoneMessage": {
++        "description": "Overnight review: no suggestion left"
++    },
++    "relectureBefore": "Before: {text}",
++    "@relectureBefore": {
++        "description": "Overnight review: the text as it is (or was), when there is no after",
++        "placeholders": {
++            "text": {
++                "type": "String"
++            }
++        }
++    },
++    "relectureAfter": "After: {text}",
++    "@relectureAfter": {
++        "description": "Overnight review: the text once fixed, when there is no before",
++        "placeholders": {
++            "text": {
++                "type": "String"
++            }
++        }
++    },
++    "relectureDiffSemantics": "Before: {before}. After: {after}.",
++    "@relectureDiffSemantics": {
++        "description": "Overnight review: what a screen reader says for a before → after pair",
++        "placeholders": {
++            "before": {
++                "type": "String"
++            },
++            "after": {
++                "type": "String"
++            }
++        }
++    },
++    "relectureTypeSpelling": "Spelling",
++    "@relectureTypeSpelling": {
++        "description": "Overnight review: a misspelled name"
++    },
++    "relectureTypeDuplicateTasks": "Duplicate tasks",
++    "@relectureTypeDuplicateTasks": {
++        "description": "Overnight review: the same task twice"
++    },
++    "relectureTypeTaskDone": "Task done",
++    "@relectureTypeTaskDone": {
++        "description": "Overnight review: a task that was clearly done"
++    },
++    "relectureTypeDuplicateMemories": "Duplicate memories",
++    "@relectureTypeDuplicateMemories": {
++        "description": "Overnight review: the same memory twice"
++    },
++    "relectureTypeDuplicatePeople": "Duplicate people",
++    "@relectureTypeDuplicatePeople": {
++        "description": "Overnight review: the same person twice"
++    },
++    "relectureTypeOther": "Suggestion",
++    "@relectureTypeOther": {
++        "description": "Overnight review: a suggestion of an unknown kind"
++    },
++    "relectureTargetConversation": "Conversation",
++    "@relectureTargetConversation": {
++        "description": "Overnight review: a target conversation without a title"
++    },
++    "relectureTargetTask": "Task",
++    "@relectureTargetTask": {
++        "description": "Overnight review: a target task without a title"
++    },
++    "relectureTargetMemory": "Memory",
++    "@relectureTargetMemory": {
++        "description": "Overnight review: a target memory without a title"
++    },
++    "relectureTargetPerson": "Person",
++    "@relectureTargetPerson": {
++        "description": "Overnight review: a target person without a title"
++    },
++    "relectureUndoQuestion": "Undo this change?",
++    "@relectureUndoQuestion": {
++        "description": "Overnight review: light confirmation before undoing"
++    },
++    "relectureUndoMessage": "Omi puts the data back the way it was before this change.",
++    "@relectureUndoMessage": {
++        "description": "Overnight review: light confirmation before undoing"
++    },
++    "relectureUndoConfirm": "Undo Change",
++    "@relectureUndoConfirm": {
++        "description": "Overnight review: confirm undoing a change"
++    },
++    "relectureUndoKeep": "Keep",
++    "@relectureUndoKeep": {
++        "description": "Overnight review: keep the change (cancel the undo)"
++    },
++    "relectureUndone": "Change undone",
++    "@relectureUndone": {
++        "description": "Overnight review: toast after undoing a change"
++    },
++    "relectureUndoneOn": "Undone on {date}",
++    "@relectureUndoneOn": {
++        "description": "Overnight review: a change that was undone, and when",
++        "placeholders": {
++            "date": {
++                "type": "String"
++            }
++        }
++    },
++    "relectureNotUndoable": "Can no longer be undone",
++    "@relectureNotUndoable": {
++        "description": "Overnight review: a change the server no longer lets the user undo"
++    },
++    "relectureNoChangesTitle": "No recent changes",
++    "@relectureNoChangesTitle": {
++        "description": "Overnight review: empty recent changes"
++    },
++    "relectureNoChangesMessage": "What you accept in “To review” shows up here, with a way to undo it.",
++    "@relectureNoChangesMessage": {
++        "description": "Overnight review: empty recent changes"
++    },
+     "swipeTasksToIndent": "Swipe tasks to indent, drag between categories",
+     "@swipeTasksToIndent": {
+         "description": "Instructions for task management gestures"
+diff --git a/app/lib/l10n/app_fr.arb b/app/lib/l10n/app_fr.arb
+index a6105fa77b..f5c08665e1 100644
+--- a/app/lib/l10n/app_fr.arb
++++ b/app/lib/l10n/app_fr.arb
+@@ -876,6 +876,45 @@
+     "insightHeardInConversation": "Entendu dans une conversation",
+     "insightSourceChatDeleted": "Discussion supprimée",
+     "insightSourceConversationDeleted": "Conversation supprimée",
++    "relectureTitle": "À vérifier",
++    "relectureCardCount": "{count, plural, =1{1 proposition d’Omi à vérifier} other{{count} propositions d’Omi à vérifier}}",
++    "relectureChangesTitle": "Changements récents",
++    "relectureLoadError": "Relecture de nuit indisponible pour l’instant.",
++    "relectureListLoadError": "Impossible de charger la relecture de nuit.",
++    "relectureIntro": "Cette nuit, Omi a relu vos données et propose ces corrections. Rien ne change sans votre accord, et ce que vous acceptez peut être annulé.",
++    "relectureLastRun": "Dernière relecture : {when}",
++    "relectureAccept": "Accepter",
++    "relectureIgnore": "Ignorer",
++    "relectureDone": "Fait",
++    "relectureIgnored": "Proposition ignorée",
++    "relectureConflict": "Les données ont changé depuis la relecture. La liste est à jour.",
++    "relecturePropositionGone": "Cette proposition n’est plus là.",
++    "relectureChangeGone": "Ce changement n’est plus là.",
++    "relectureActionFailed": "Impossible pour l’instant. Réessayez.",
++    "relectureAllDoneTitle": "Tout est vérifié",
++    "relectureAllDoneMessage": "Omi proposera d’autres corrections après sa prochaine relecture de nuit.",
++    "relectureBefore": "Avant : {text}",
++    "relectureAfter": "Après : {text}",
++    "relectureDiffSemantics": "Avant : {before}. Après : {after}.",
++    "relectureTypeSpelling": "Orthographe",
++    "relectureTypeDuplicateTasks": "Tâches en double",
++    "relectureTypeTaskDone": "Tâche faite",
++    "relectureTypeDuplicateMemories": "Souvenirs en double",
++    "relectureTypeDuplicatePeople": "Personnes en double",
++    "relectureTypeOther": "Proposition",
++    "relectureTargetConversation": "Conversation",
++    "relectureTargetTask": "Tâche",
++    "relectureTargetMemory": "Souvenir",
++    "relectureTargetPerson": "Personne",
++    "relectureUndoQuestion": "Annuler ce changement ?",
++    "relectureUndoMessage": "Omi remet les données comme avant ce changement.",
++    "relectureUndoConfirm": "Annuler le changement",
++    "relectureUndoKeep": "Garder",
++    "relectureUndone": "Changement annulé",
++    "relectureUndoneOn": "Annulé le {date}",
++    "relectureNotUndoable": "Ne peut plus être annulé",
++    "relectureNoChangesTitle": "Aucun changement récent",
++    "relectureNoChangesMessage": "Ce que vous acceptez dans « À vérifier » apparaît ici, avec de quoi l’annuler.",
+     "swipeTasksToIndent": "Balayez les tâches pour indenter, faites glisser entre les catégories",
+     "create": "Créer",
+     "noTasksYet": "Aucune tâche pour l'instant",
+diff --git a/app/lib/pages/insights/insight_sources.dart b/app/lib/pages/insights/insight_sources.dart
+index 286e857a1a..3ae2c8803a 100644
+--- a/app/lib/pages/insights/insight_sources.dart
++++ b/app/lib/pages/insights/insight_sources.dart
+@@ -10,18 +10,31 @@ import 'package:omi/backend/schema/chat_session.dart';
+ import 'package:omi/pages/chat/chat_route.dart';
+ import 'package:omi/pages/chat/page.dart';
+ import 'package:omi/pages/conversation_detail/page.dart';
++import 'package:omi/providers/home_provider.dart';
+ import 'package:omi/providers/message_provider.dart';
+ import 'package:omi/ui/ui.dart';
+ import 'package:omi/utils/l10n_extensions.dart';
+ import 'package:omi/utils/other/temp.dart';
+ 
+ /// Clone local : ouvre la source d'un élément d'Insights (la discussion du chat d'où il vient, ou une
+-/// conversation citée). Remplaçable dans les tests.
++/// conversation citée), ou l'onglet Tâches (une tâche visée par la relecture de nuit). Remplaçable dans les tests.
+ class InsightSourceOpener {
+-  const InsightSourceOpener({this.openChat = openInsightChat, this.openConversation = openInsightConversation});
++  const InsightSourceOpener({
++    this.openChat = openInsightChat,
++    this.openConversation = openInsightConversation,
++    this.openTasks = openInsightTasks,
++  });
+ 
+   final Future<void> Function(BuildContext context, String sessionId) openChat;
+   final Future<void> Function(BuildContext context, String conversationId) openConversation;
++  final Future<void> Function(BuildContext context) openTasks;
++}
++
++/// Revient à l'accueil et montre l'onglet Tâches (les tâches n'ont pas de page à elles).
++Future<void> openInsightTasks(BuildContext context) async {
++  final home = context.read<HomeProvider>();
++  Navigator.of(context).popUntil((route) => route.isFirst);
++  home.setIndex(HomeProvider.tasksTab);
+ }
+ 
+ /// Rouvre la discussion [sessionId] dans le chat, comme un choix de « Discussions passées ». Refusé pendant une
+diff --git a/app/lib/pages/insights/insights_page.dart b/app/lib/pages/insights/insights_page.dart
+index 756277be65..a687ed087e 100644
+--- a/app/lib/pages/insights/insights_page.dart
++++ b/app/lib/pages/insights/insights_page.dart
+@@ -3,6 +3,7 @@ import 'dart:async';
+ import 'package:flutter/material.dart';
+ 
+ import 'package:omi/backend/http/api/insights.dart';
++import 'package:omi/backend/http/api/relecture.dart';
+ import 'package:omi/backend/http/api_result.dart';
+ import 'package:omi/backend/schema/insight_dossier.dart';
+ import 'package:omi/backend/schema/insight_maintenant_bilan.dart';
+@@ -11,20 +12,28 @@ import 'package:omi/pages/insights/insight_dossier_page.dart';
+ import 'package:omi/pages/insights/insight_labels.dart';
+ import 'package:omi/pages/insights/insight_now_card.dart';
+ import 'package:omi/pages/insights/insight_sources.dart';
++import 'package:omi/pages/insights/relecture_changements_page.dart';
++import 'package:omi/pages/insights/relecture_controller.dart';
++import 'package:omi/pages/insights/relecture_page.dart';
++import 'package:omi/pages/insights/relecture_widgets.dart';
+ import 'package:omi/ui/ui.dart';
+ import 'package:omi/utils/l10n_extensions.dart';
+ import 'package:omi/utils/other/temp.dart';
+ import 'package:omi/widgets/home_bottom_bar.dart';
+ 
+-/// Clone local : le troisième onglet de l'accueil (Accueil, Tâches, Insights). En haut, « Maintenant » (ce qui
+-/// compte dans l'immédiat), puis le dernier « Bilan » (la profondeur : sections, essais et leur suivi), puis les
+-/// dossiers vivants qu'Omi tient à partir des discussions du chat, un par personne, relation ou thème, le plus
+-/// récemment mis à jour d'abord. Toucher ouvre ; appui long : retirer. Lecture seule sinon : Omi décide seul de
+-/// ce qui entre. Les trois se lisent ensemble, et la panne de l'un ne cache pas les autres.
++/// Clone local : le troisième onglet de l'accueil (Accueil, Tâches, Insights). Tout en haut, la carte « À
++/// vérifier » quand la relecture de nuit propose des corrections (et l'entrée discrète « Changements récents »),
++/// puis « Maintenant » (ce qui compte dans l'immédiat), puis le dernier « Bilan » (la profondeur : sections, essais
++/// et leur suivi), puis les dossiers vivants qu'Omi tient à partir des discussions du chat, un par personne,
++/// relation ou thème, le plus récemment mis à jour d'abord. Toucher ouvre ; appui long : retirer. Lecture seule
++/// sinon : Omi décide seul de ce qui entre. Tout se lit ensemble, et la panne de l'un ne cache pas les autres.
+ class InsightsPage extends StatefulWidget {
+-  const InsightsPage({super.key, this.api, this.sources = const InsightSourceOpener()});
++  const InsightsPage({super.key, this.api, this.relecture, this.sources = const InsightSourceOpener()});
+ 
+   final InsightsApi? api;
++
++  /// La relecture de nuit ; par défaut, le même serveur (et le même envoi) que [api].
++  final RelectureApi? relecture;
+   final InsightSourceOpener sources;
+ 
+   @override
+@@ -33,6 +42,8 @@ class InsightsPage extends StatefulWidget {
+ 
+ class InsightsPageState extends State<InsightsPage> with AutomaticKeepAliveClientMixin {
+   late final InsightsApi _api = widget.api ?? InsightsApi();
++  late final RelectureController _relecture =
++      RelectureController(api: widget.relecture ?? RelectureApi(send: _api.send, baseUrl: _api.baseUrl));
+   final ScrollController _scrollController = ScrollController();
+ 
+   /// Null tant que rien n'a été lu.
+@@ -59,6 +70,7 @@ class InsightsPageState extends State<InsightsPage> with AutomaticKeepAliveClien
+   @override
+   void dispose() {
+     _scrollController.dispose();
++    _relecture.dispose();
+     super.dispose();
+   }
+ 
+@@ -68,8 +80,9 @@ class InsightsPageState extends State<InsightsPage> with AutomaticKeepAliveClien
+     }
+   }
+ 
+-  /// Relit « Maintenant », les bilans et les dossiers (onglet rouvert, retour d'un dossier ou d'un bilan, tirer
+-  /// pour rafraîchir). Un échec garde ce qui est affiché ; [reportFailure] le dit alors par un message.
++  /// Relit « Maintenant », les bilans, les dossiers et la relecture de nuit (onglet rouvert, retour d'un dossier ou
++  /// d'un bilan, tirer pour rafraîchir). Un échec garde ce qui est affiché ; [reportFailure] le dit alors par un
++  /// message (la relecture, elle, le dit en une ligne discrète à sa place).
+   Future<void> refresh({bool reportFailure = false}) {
+     final running = _loading;
+     if (running != null) return running;
+@@ -79,7 +92,7 @@ class InsightsPageState extends State<InsightsPage> with AutomaticKeepAliveClien
+   }
+ 
+   Future<void> _load({required bool reportFailure}) async {
+-    final (dossiers, now, bilans) = await (_api.list(), _api.now(), _api.bilans()).wait;
++    final (dossiers, now, bilans, _) = await (_api.list(), _api.now(), _api.bilans(), _relecture.load()).wait;
+     if (!mounted) return;
+     final hadContent = _dossiers != null || _now != null || _bilans != null;
+     setState(() {
+@@ -150,6 +163,16 @@ class InsightsPageState extends State<InsightsPage> with AutomaticKeepAliveClien
+     if (mounted) unawaited(refresh());
+   }
+ 
++  void _openRelecture() {
++    OmiHaptics.selection();
++    unawaited(routeToRelecture(context, _relecture, sources: widget.sources));
++  }
++
++  void _openRelectureChanges() {
++    OmiHaptics.selection();
++    unawaited(routeToRelectureChanges(context, _relecture, sources: widget.sources));
++  }
++
+   Future<void> _showMenu(InsightDossierSummary dossier) async {
+     final removed = await showInsightDossierMenu(context, _api, dossier);
+     if (!removed || !mounted) return;
+@@ -164,6 +187,11 @@ class InsightsPageState extends State<InsightsPage> with AutomaticKeepAliveClien
+       slivers.add(const SliverFillRemaining(hasScrollBody: false, child: OmiLoadingState()));
+     } else {
+       slivers
++        ..add(_boxed(RelectureTabEntry(
++          controller: _relecture,
++          onOpenReview: _openRelecture,
++          onOpenChanges: _openRelectureChanges,
++        )))
+         ..add(_boxed(InsightNowCard(
+           now: _now,
+           problem: _nowProblem,
+diff --git a/app/lib/pages/insights/relecture_changements_page.dart b/app/lib/pages/insights/relecture_changements_page.dart
+new file mode 100644
+index 0000000000..ccda729c80
+--- /dev/null
++++ b/app/lib/pages/insights/relecture_changements_page.dart
+@@ -0,0 +1,193 @@
++import 'dart:async';
++
++import 'package:flutter/material.dart';
++
++import 'package:omi/backend/schema/relecture.dart';
++import 'package:omi/pages/insights/insight_sources.dart';
++import 'package:omi/pages/insights/relecture_controller.dart';
++import 'package:omi/pages/insights/relecture_widgets.dart';
++import 'package:omi/ui/ui.dart';
++import 'package:omi/utils/l10n_extensions.dart';
++import 'package:omi/utils/other/temp.dart';
++
++/// Ouvre « Changements récents » par-dessus l'accueil ; se termine quand on en revient.
++Future<void> routeToRelectureChanges(
++  BuildContext context,
++  RelectureController controller, {
++  InsightSourceOpener sources = const InsightSourceOpener(),
++}) =>
++    routeToPage(context, RelectureChangesPage(controller: controller, sources: sources));
++
++/// Clone local : « Changements récents », ce qu'Omi a changé avec l'accord de Mike, le plus récent d'abord. Pour
++/// chacun : sa nature et sa date en clair, son titre, et pour chaque chose touchée, avant → après. « Annuler »
++/// (confirmation légère) tant que le serveur le permet ; « Annulé le … » ensuite. Rien n'est effacé d'ici.
++class RelectureChangesPage extends StatefulWidget {
++  const RelectureChangesPage({super.key, required this.controller, this.sources = const InsightSourceOpener()});
++
++  final RelectureController controller;
++  final InsightSourceOpener sources;
++
++  @override
++  State<RelectureChangesPage> createState() => _RelectureChangesPageState();
++}
++
++class _RelectureChangesPageState extends State<RelectureChangesPage> {
++  RelectureController get _controller => widget.controller;
++
++  @override
++  void initState() {
++    super.initState();
++    unawaited(_controller.load());
++  }
++
++  Future<void> _undo(RelectureChangement changement) async {
++    final l10n = context.l10n;
++    final confirmed = await showOmiConfirm(
++      context,
++      title: l10n.relectureUndoQuestion,
++      message: l10n.relectureUndoMessage,
++      confirmLabel: l10n.relectureUndoConfirm,
++      cancelLabel: l10n.relectureUndoKeep,
++    );
++    if (!confirmed || !mounted) return;
++    final outcome = await _controller.undo(changement);
++    if (outcome == null || !mounted) return;
++    showRelectureUndoOutcome(context, outcome);
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    final l10n = context.l10n;
++    return Scaffold(
++      appBar: AppBar(leading: const OmiBackButton(), title: Text(l10n.relectureChangesTitle)),
++      body: ListenableBuilder(
++        listenable: _controller,
++        builder: (context, _) {
++          final data = _controller.data;
++          if (data == null) {
++            return _controller.problem == null
++                ? const OmiLoadingState()
++                : OmiErrorState(message: l10n.relectureListLoadError, onRetry: _controller.load);
++          }
++          final changements = data.changements;
++          if (changements.isEmpty) {
++            return OmiEmptyState(
++              key: const ValueKey('relecture_no_changes'),
++              icon: Icons.history_rounded,
++              title: l10n.relectureNoChangesTitle,
++              message: l10n.relectureNoChangesMessage,
++            );
++          }
++          return RefreshIndicator(
++            onRefresh: _controller.load,
++            child: ListView.separated(
++              key: const ValueKey('relecture_changes_list'),
++              physics: const AlwaysScrollableScrollPhysics(),
++              padding: EdgeInsets.fromLTRB(
++                OmiSpacing.md,
++                OmiSpacing.xs,
++                OmiSpacing.md,
++                OmiSpacing.xxl + MediaQuery.paddingOf(context).bottom,
++              ),
++              itemCount: changements.length,
++              separatorBuilder: (_, __) => const SizedBox(height: OmiSpacing.sm),
++              itemBuilder: (context, index) {
++                final changement = changements[index];
++                return RelectureChangeCard(
++                  key: ValueKey('relecture_changement_${changement.id}'),
++                  changement: changement,
++                  busy: _controller.gestureOn(changement.id) != null,
++                  onUndo: () => unawaited(_undo(changement)),
++                  onOpenConversation: (id) => unawaited(widget.sources.openConversation(context, id)),
++                  onOpenTasks: () => unawaited(widget.sources.openTasks(context)),
++                );
++              },
++            ),
++          );
++        },
++      ),
++    );
++  }
++}
++
++/// Un changement : nature et date, titre, puis pour chaque chose touchée avant → après ; « Annuler » s'il est
++/// annulable, « Annulé le … » s'il l'a été, « Ne peut plus être annulé » sinon.
++class RelectureChangeCard extends StatelessWidget {
++  const RelectureChangeCard({
++    super.key,
++    required this.changement,
++    required this.busy,
++    required this.onUndo,
++    required this.onOpenConversation,
++    required this.onOpenTasks,
++  });
++
++  final RelectureChangement changement;
++  final bool busy;
++  final VoidCallback onUndo;
++  final ValueChanged<String> onOpenConversation;
++  final VoidCallback onOpenTasks;
++
++  @override
++  Widget build(BuildContext context) {
++    final l10n = context.l10n;
++    final dates = OmiDateFormat.of(context);
++    final c = changement;
++    final faitLe = c.faitLe;
++    final annuleLe = c.annuleLe;
++    final titre = c.titre;
++    final footnote = OmiType.footnote.copyWith(color: OmiColors.textTertiary, fontWeight: FontWeight.w600);
++    return Material(
++      color: OmiColors.surface1,
++      borderRadius: OmiRadius.mdAll,
++      child: Padding(
++        padding: const EdgeInsets.fromLTRB(OmiSpacing.md, OmiSpacing.md, OmiSpacing.md, OmiSpacing.sm),
++        child: Column(
++          crossAxisAlignment: CrossAxisAlignment.stretch,
++          children: [
++            RelectureKindLine(type: c.type, trailing: faitLe == null ? null : dates.dateTime(faitLe.toLocal())),
++            if (titre != null) ...[
++              const SizedBox(height: OmiSpacing.xs),
++              Semantics(header: true, child: Text(titre, style: OmiType.headline)),
++            ],
++            for (final detail in c.details) ...[
++              const SizedBox(height: OmiSpacing.sm),
++              if (detail.cible case final cible?)
++                Align(
++                  alignment: Alignment.centerLeft,
++                  child: relectureTargetChip(context, cible, onOpenConversation, onOpenTasks),
++                ),
++              if (detail.avant != null || detail.apres != null) ...[
++                if (detail.cible != null) const SizedBox(height: OmiSpacing.xxs),
++                RelectureDiff(before: detail.avant, after: detail.apres),
++              ],
++            ],
++            const SizedBox(height: OmiSpacing.sm),
++            if (annuleLe != null)
++              Row(
++                key: ValueKey('relecture_undone_${c.id}'),
++                children: [
++                  ExcludeSemantics(child: Icon(Icons.undo_rounded, size: 16, color: OmiColors.textTertiary)),
++                  const SizedBox(width: OmiSpacing.xxs),
++                  Expanded(child: Text(l10n.relectureUndoneOn(dates.dateTime(annuleLe.toLocal())), style: footnote)),
++                ],
++              )
++            else if (c.annulable)
++              Align(
++                alignment: Alignment.centerRight,
++                child: OmiButton.secondary(
++                  key: ValueKey('relecture_undo_${c.id}'),
++                  label: l10n.undo,
++                  size: OmiButtonSize.compact,
++                  isLoading: busy,
++                  onPressed: onUndo,
++                ),
++              )
++            else
++              Text(l10n.relectureNotUndoable, key: ValueKey('relecture_not_undoable_${c.id}'), style: footnote),
++          ],
++        ),
++      ),
++    );
++  }
++}
+diff --git a/app/lib/pages/insights/relecture_controller.dart b/app/lib/pages/insights/relecture_controller.dart
+new file mode 100644
+index 0000000000..7d18150cdd
+--- /dev/null
++++ b/app/lib/pages/insights/relecture_controller.dart
+@@ -0,0 +1,166 @@
++import 'package:flutter/foundation.dart';
++
++import 'package:omi/backend/http/api/relecture.dart';
++import 'package:omi/backend/http/api_result.dart';
++import 'package:omi/backend/schema/relecture.dart';
++
++/// Le geste en cours sur une proposition ou un changement (son bouton tourne, les autres attendent).
++enum RelectureGesture { accept, ignore, undo }
++
++/// Clone local : l'état de la « Relecture de nuit », partagé par la carte de l'onglet Insights et les pages
++/// « À vérifier » et « Changements récents » (un geste fait dans une page se voit aussitôt dans l'onglet).
++///
++/// Une seule lecture à la fois ; un geste par élément à la fois (jamais de double envoi). Une lecture qui
++/// croise un geste est refaite : elle pourrait le précéder et remontrer une carte déjà traitée.
++class RelectureController extends ChangeNotifier {
++  RelectureController({required this.api});
++
++  final RelectureApi api;
++
++  Relecture? _data;
++  ApiProblem? _problem;
++  Future<void>? _loading;
++  final Map<String, RelectureGesture> _busy = {};
++
++  /// Compte les gestes terminés : une lecture partie avant le dernier est relue.
++  int _gestures = 0;
++  bool _disposed = false;
++
++  /// Null tant que rien n'a été lu.
++  Relecture? get data => _data;
++  List<RelectureProposition> get propositions => _data?.propositions ?? const [];
++  List<RelectureChangement> get changements => _data?.changements ?? const [];
++
++  /// La dernière lecture a échoué (ce qui était affiché reste).
++  ApiProblem? get problem => _problem;
++
++  /// Le serveur ne connaît pas (encore) la relecture (404) : rien n'est montré, ce n'est pas une panne.
++  bool get missing => _problem?.kind == ApiProblemKind.notFound;
++  RelectureGesture? gestureOn(String id) => _busy[id];
++
++  /// Relit ; un appel pendant une lecture attend celle-ci.
++  Future<void> load() {
++    final running = _loading;
++    if (running != null) return running;
++    // Rien n'est annoncé au départ (appelé aussi pendant la construction d'une page) ; seulement à l'arrivée.
++    final future = _read().whenComplete(() => _loading = null);
++    _loading = future;
++    return future;
++  }
++
++  Future<void> _read() async {
++    while (true) {
++      final mark = _gestures;
++      ApiResult<Relecture> result;
++      try {
++        result = await api.load();
++      } on Exception {
++        result = const ApiFailure(ApiProblem(ApiProblemKind.transport));
++      }
++      if (_disposed) return;
++      // Un geste a abouti pendant la lecture : elle peut le précéder ; relire.
++      if (mark != _gestures) continue;
++      switch (result) {
++        case ApiSuccess(:final data):
++          _data = data;
++          _problem = null;
++        case ApiFailure(:final problem):
++          _problem = problem;
++      }
++      _notify();
++      return;
++    }
++  }
++
++  /// Accepte [proposition] ; fait, elle quitte la liste et son changement arrive en tête des changements. Null :
++  /// un geste est déjà en cours sur elle (rien n'est envoyé).
++  Future<RelectureOutcome<RelectureChangement?>?> accept(RelectureProposition proposition) async {
++    if (!_start(proposition.id, RelectureGesture.accept)) return null;
++    final outcome = await _guard(() => api.accept(proposition.id));
++    if (_disposed) return outcome;
++    _end(proposition.id);
++    if (outcome case RelectureDone(:final data)) {
++      _update(
++        propositions: _without(proposition.id),
++        changements: data == null ? null : sortChangements([data, ...changements.where((c) => c.id != data.id)]),
++      );
++      if (data == null) _reload();
++    } else {
++      _reload();
++    }
++    return outcome;
++  }
++
++  /// Ignore [proposition] ; faite, elle quitte la liste (le serveur ne la reproposera pas).
++  Future<RelectureOutcome<void>?> ignore(RelectureProposition proposition) async {
++    if (!_start(proposition.id, RelectureGesture.ignore)) return null;
++    final outcome = await _guard(() => api.ignore(proposition.id));
++    if (_disposed) return outcome;
++    _end(proposition.id);
++    if (outcome is RelectureDone) {
++      _update(propositions: _without(proposition.id));
++    } else {
++      _reload();
++    }
++    return outcome;
++  }
++
++  /// Annule [changement] ; fait, il se montre « Annulé le … ». La liste est relue : une proposition peut revenir.
++  Future<RelectureOutcome<RelectureChangement?>?> undo(RelectureChangement changement) async {
++    if (!_start(changement.id, RelectureGesture.undo)) return null;
++    final outcome = await _guard(() => api.undo(changement.id));
++    if (_disposed) return outcome;
++    _end(changement.id);
++    if (outcome case RelectureDone(:final data?)) {
++      _update(changements: [for (final c in changements) c.id == data.id ? data : c]);
++    }
++    _reload();
++    return outcome;
++  }
++
++  bool _start(String id, RelectureGesture gesture) {
++    if (_busy.containsKey(id)) return false;
++    _busy[id] = gesture;
++    _notify();
++    return true;
++  }
++
++  void _end(String id) {
++    _busy.remove(id);
++    _gestures++;
++  }
++
++  Future<RelectureOutcome<T>> _guard<T>(Future<RelectureOutcome<T>> Function() send) async {
++    try {
++      return await send();
++    } on Exception {
++      return const RelectureFailed(ApiProblem(ApiProblemKind.transport));
++    }
++  }
++
++  List<RelectureProposition> _without(String id) => [
++        for (final p in propositions)
++          if (p.id != id) p
++      ];
++
++  void _update({List<RelectureProposition>? propositions, List<RelectureChangement>? changements}) {
++    _data = (_data ?? Relecture.empty).copyWith(propositions: propositions, changements: changements);
++    _notify();
++  }
++
++  /// Relit en arrière-plan (409, 404, panne, réponse illisible : la vérité est sur le serveur).
++  void _reload() {
++    _notify();
++    load();
++  }
++
++  void _notify() {
++    if (!_disposed) notifyListeners();
++  }
++
++  @override
++  void dispose() {
++    _disposed = true;
++    super.dispose();
++  }
++}
+diff --git a/app/lib/pages/insights/relecture_page.dart b/app/lib/pages/insights/relecture_page.dart
+new file mode 100644
+index 0000000000..7013918f1d
+--- /dev/null
++++ b/app/lib/pages/insights/relecture_page.dart
+@@ -0,0 +1,294 @@
++import 'dart:async';
++
++import 'package:flutter/material.dart';
++
++import 'package:omi/backend/http/api/relecture.dart';
++import 'package:omi/backend/schema/relecture.dart';
++import 'package:omi/pages/insights/insight_sources.dart';
++import 'package:omi/pages/insights/relecture_changements_page.dart';
++import 'package:omi/pages/insights/relecture_controller.dart';
++import 'package:omi/pages/insights/relecture_widgets.dart';
++import 'package:omi/ui/ui.dart';
++import 'package:omi/utils/l10n_extensions.dart';
++import 'package:omi/utils/other/temp.dart';
++
++/// Ouvre « À vérifier » par-dessus l'accueil ; se termine quand on en revient.
++Future<void> routeToRelecture(
++  BuildContext context,
++  RelectureController controller, {
++  InsightSourceOpener sources = const InsightSourceOpener(),
++}) =>
++    routeToPage(context, RelecturePage(controller: controller, sources: sources));
++
++/// Clone local : « À vérifier », les corrections proposées par la relecture de nuit. Une carte par proposition :
++/// ce qu'Omi a vu (titre, explication), avant → après, les extraits qui le montrent, ce qui est touché ; puis
++/// « Ignorer » ou « Accepter ». Rien ne change sans un de ces deux gestes. Accepter : la carte part, « Fait » avec
++/// « Annuler » quelques secondes (puis dans « Changements récents ») ; Ignorer : la carte part. Un refus du
++/// serveur (409 : déjà traitée, ou les données ont changé) affiche son message et relit la liste.
++class RelecturePage extends StatefulWidget {
++  const RelecturePage({super.key, required this.controller, this.sources = const InsightSourceOpener()});
++
++  final RelectureController controller;
++  final InsightSourceOpener sources;
++
++  @override
++  State<RelecturePage> createState() => _RelecturePageState();
++}
++
++class _RelecturePageState extends State<RelecturePage> {
++  RelectureController get _controller => widget.controller;
++
++  /// Le contexte de l'application : un « Annuler » touché après avoir quitté la page doit encore pouvoir dire
++  /// son résultat.
++  late BuildContext _appContext;
++
++  @override
++  void initState() {
++    super.initState();
++    // La carte de l'onglet a pu être lue il y a longtemps : relire en arrière-plan (ce qui est connu reste).
++    unawaited(_controller.load());
++  }
++
++  @override
++  void didChangeDependencies() {
++    super.didChangeDependencies();
++    _appContext = Navigator.of(context, rootNavigator: true).context;
++  }
++
++  /// Dit le résultat d'un geste : sur la page si elle est encore là, sinon sur l'application.
++  void _say(void Function(BuildContext context) say) {
++    if (mounted) {
++      say(context);
++    } else if (_appContext.mounted) {
++      say(_appContext);
++    }
++  }
++
++  Future<void> _accept(RelectureProposition proposition) async {
++    OmiHaptics.selection();
++    final outcome = await _controller.accept(proposition);
++    if (outcome == null) return;
++    _say((context) {
++      final l10n = context.l10n;
++      // Fait, et annulable : « Fait » avec « Annuler » quelques secondes (coche neutre).
++      if (outcome case RelectureDone(:final data?) when data.peutAnnuler) {
++        OmiHaptics.success();
++        unawaited(OmiFeedback.undo(
++          context,
++          l10n.relectureDone,
++          icon: Icons.check_rounded,
++          onUndo: () => unawaited(_undo(data)),
++        ));
++        return;
++      }
++      showRelectureOutcome(context, outcome, done: l10n.relectureDone, gone: l10n.relecturePropositionGone);
++    });
++  }
++
++  /// « Annuler » de la barre « Fait » : pas de confirmation, le geste vient d'être fait (et se fait même si la
++  /// page a été quittée entre-temps).
++  Future<void> _undo(RelectureChangement changement) async {
++    final outcome = await _controller.undo(changement);
++    if (outcome == null) return;
++    _say((context) => showRelectureUndoOutcome(context, outcome));
++  }
++
++  Future<void> _ignore(RelectureProposition proposition) async {
++    OmiHaptics.selection();
++    final outcome = await _controller.ignore(proposition);
++    if (outcome == null) return;
++    _say((context) => showRelectureOutcome(
++          context,
++          outcome,
++          done: context.l10n.relectureIgnored,
++          gone: context.l10n.relecturePropositionGone,
++        ));
++  }
++
++  void _openConversation(String id) => unawaited(widget.sources.openConversation(context, id));
++
++  void _openTasks() => unawaited(widget.sources.openTasks(context));
++
++  void _openChanges() => unawaited(routeToRelectureChanges(context, _controller, sources: widget.sources));
++
++  @override
++  Widget build(BuildContext context) {
++    final l10n = context.l10n;
++    return Scaffold(
++      appBar: AppBar(leading: const OmiBackButton(), title: Text(l10n.relectureTitle)),
++      body: ListenableBuilder(
++        listenable: _controller,
++        builder: (context, _) {
++          final data = _controller.data;
++          if (data == null) {
++            return _controller.problem == null
++                ? const OmiLoadingState()
++                : OmiErrorState(message: l10n.relectureListLoadError, onRetry: _controller.load);
++          }
++          final propositions = data.propositions;
++          final changesLink = data.changements.isEmpty
++              ? null
++              : OmiButton.tertiary(
++                  key: const ValueKey('relecture_changes_link'),
++                  label: l10n.relectureChangesTitle,
++                  icon: Icons.history_rounded,
++                  onPressed: _openChanges,
++                );
++          if (propositions.isEmpty) {
++            return RefreshIndicator(
++              onRefresh: _controller.load,
++              child: LayoutBuilder(
++                builder: (context, constraints) => SingleChildScrollView(
++                  physics: const AlwaysScrollableScrollPhysics(),
++                  child: ConstrainedBox(
++                    constraints: BoxConstraints(minHeight: constraints.maxHeight),
++                    child: OmiEmptyState(
++                      key: const ValueKey('relecture_all_done'),
++                      icon: Icons.fact_check_outlined,
++                      title: l10n.relectureAllDoneTitle,
++                      message: l10n.relectureAllDoneMessage,
++                      action: changesLink,
++                    ),
++                  ),
++                ),
++              ),
++            );
++          }
++          final lastRun = data.derniereRelecture;
++          return RefreshIndicator(
++            onRefresh: _controller.load,
++            child: ListView(
++              key: const ValueKey('relecture_list'),
++              physics: const AlwaysScrollableScrollPhysics(),
++              padding: EdgeInsets.fromLTRB(
++                OmiSpacing.md,
++                OmiSpacing.xs,
++                OmiSpacing.md,
++                OmiSpacing.xxl + MediaQuery.paddingOf(context).bottom,
++              ),
++              children: [
++                Padding(
++                  padding: const EdgeInsets.fromLTRB(OmiSpacing.xxs, 0, OmiSpacing.xxs, OmiSpacing.sm),
++                  child: Column(
++                    crossAxisAlignment: CrossAxisAlignment.start,
++                    children: [
++                      Text(l10n.relectureIntro, style: OmiType.subhead.copyWith(color: OmiColors.textTertiary)),
++                      if (lastRun != null) ...[
++                        const SizedBox(height: OmiSpacing.xxs),
++                        Text(
++                          l10n.relectureLastRun(OmiDateFormat.of(context).timestamp(lastRun.toLocal())),
++                          style: OmiType.footnote.copyWith(color: OmiColors.textTertiary),
++                        ),
++                      ],
++                    ],
++                  ),
++                ),
++                for (final proposition in propositions)
++                  Padding(
++                    padding: const EdgeInsets.only(bottom: OmiSpacing.sm),
++                    child: RelecturePropositionCard(
++                      key: ValueKey('relecture_proposition_${proposition.id}'),
++                      proposition: proposition,
++                      gesture: _controller.gestureOn(proposition.id),
++                      onAccept: () => unawaited(_accept(proposition)),
++                      onIgnore: () => unawaited(_ignore(proposition)),
++                      onOpenConversation: _openConversation,
++                      onOpenTasks: _openTasks,
++                    ),
++                  ),
++                if (changesLink != null) Center(child: changesLink),
++              ],
++            ),
++          );
++        },
++      ),
++    );
++  }
++}
++
++/// Une proposition : sa nature (icône et libellé), son titre en gras, l'explication, avant → après, les extraits,
++/// ce qui est touché, puis « Ignorer » et « Accepter ». Pendant un geste, son bouton tourne et l'autre attend.
++class RelecturePropositionCard extends StatelessWidget {
++  const RelecturePropositionCard({
++    super.key,
++    required this.proposition,
++    required this.gesture,
++    required this.onAccept,
++    required this.onIgnore,
++    required this.onOpenConversation,
++    required this.onOpenTasks,
++  });
++
++  final RelectureProposition proposition;
++
++  /// Le geste en cours sur elle, s'il y en a un.
++  final RelectureGesture? gesture;
++  final VoidCallback onAccept;
++  final VoidCallback onIgnore;
++  final ValueChanged<String> onOpenConversation;
++  final VoidCallback onOpenTasks;
++
++  @override
++  Widget build(BuildContext context) {
++    final l10n = context.l10n;
++    final p = proposition;
++    final idle = gesture == null;
++    final titre = p.titre;
++    final explication = p.explication;
++    return Material(
++      color: OmiColors.surface1,
++      borderRadius: OmiRadius.mdAll,
++      child: Padding(
++        padding: const EdgeInsets.fromLTRB(OmiSpacing.md, OmiSpacing.md, OmiSpacing.md, OmiSpacing.sm),
++        child: Column(
++          crossAxisAlignment: CrossAxisAlignment.stretch,
++          children: [
++            RelectureKindLine(type: p.type),
++            if (titre != null) ...[
++              const SizedBox(height: OmiSpacing.xs),
++              Semantics(header: true, child: Text(titre, style: OmiType.headline)),
++            ],
++            if (explication != null) ...[
++              const SizedBox(height: OmiSpacing.xxs),
++              Text(explication, style: OmiType.subhead),
++            ],
++            if (p.avant != null || p.apres != null) ...[
++              const SizedBox(height: OmiSpacing.sm),
++              RelectureDiff(before: p.avant, after: p.apres),
++            ],
++            if (p.extraits.isNotEmpty) ...[
++              const SizedBox(height: OmiSpacing.xxs),
++              RelectureQuotes(ownerId: p.id, extraits: p.extraits, onOpenConversation: onOpenConversation),
++            ],
++            if (p.cibles.isNotEmpty) ...[
++              const SizedBox(height: OmiSpacing.sm),
++              RelectureTargets(cibles: p.cibles, onOpenConversation: onOpenConversation, onOpenTasks: onOpenTasks),
++            ],
++            const SizedBox(height: OmiSpacing.sm),
++            Wrap(
++              alignment: WrapAlignment.end,
++              spacing: OmiSpacing.xs,
++              runSpacing: OmiSpacing.xs,
++              children: [
++                OmiButton.secondary(
++                  key: ValueKey('relecture_ignore_${p.id}'),
++                  label: l10n.relectureIgnore,
++                  size: OmiButtonSize.compact,
++                  isLoading: gesture == RelectureGesture.ignore,
++                  onPressed: idle || gesture == RelectureGesture.ignore ? onIgnore : null,
++                ),
++                OmiButton(
++                  key: ValueKey('relecture_accept_${p.id}'),
++                  label: l10n.relectureAccept,
++                  size: OmiButtonSize.compact,
++                  isLoading: gesture == RelectureGesture.accept,
++                  onPressed: idle || gesture == RelectureGesture.accept ? onAccept : null,
++                ),
++              ],
++            ),
++          ],
++        ),
++      ),
++    );
++  }
++}
+diff --git a/app/lib/pages/insights/relecture_widgets.dart b/app/lib/pages/insights/relecture_widgets.dart
+new file mode 100644
+index 0000000000..b0d339e047
+--- /dev/null
++++ b/app/lib/pages/insights/relecture_widgets.dart
+@@ -0,0 +1,415 @@
++import 'package:flutter/material.dart';
++
++import 'package:omi/backend/http/api/relecture.dart';
++import 'package:omi/backend/http/api_result.dart';
++import 'package:omi/backend/schema/relecture.dart';
++import 'package:omi/l10n/app_localizations.dart';
++import 'package:omi/pages/insights/insight_dossier_page.dart';
++import 'package:omi/pages/insights/relecture_controller.dart';
++import 'package:omi/ui/ui.dart';
++import 'package:omi/utils/l10n_extensions.dart';
++
++/// Clone local : les morceaux communs de la « Relecture de nuit » (carte de l'onglet, pages « À vérifier » et
++/// « Changements récents »). Mike est daltonien : jamais de rouge ni de vert pour dire avant / après ou bon /
++/// mauvais. Avant est barré, une flèche, après est en gras ; encres neutres (textPrimary, textTertiary : au moins
++/// 4,5:1 sur les cartes en thème clair).
++
++String relectureTypeLabel(AppLocalizations l10n, String type) => switch (type) {
++      'orthographe' => l10n.relectureTypeSpelling,
++      'tache_doublon' => l10n.relectureTypeDuplicateTasks,
++      'tache_terminee' => l10n.relectureTypeTaskDone,
++      'souvenir_doublon' => l10n.relectureTypeDuplicateMemories,
++      'personne_doublon' => l10n.relectureTypeDuplicatePeople,
++      '' => l10n.relectureTypeOther,
++      // Un type inconnu garde le mot du serveur, lisible.
++      _ => _capitalized(type.replaceAll('_', ' ')),
++    };
++
++/// Toujours montrée avec son libellé, jamais seule porteuse du sens.
++IconData relectureTypeIcon(String type) => switch (type) {
++      'orthographe' => Icons.spellcheck_rounded,
++      'tache_doublon' || 'souvenir_doublon' => Icons.call_merge_rounded,
++      'tache_terminee' => Icons.task_alt_rounded,
++      'personne_doublon' => Icons.people_outline_rounded,
++      _ => Icons.auto_fix_high_outlined,
++    };
++
++IconData relectureTargetIcon(String type) => switch (type) {
++      'conversation' => Icons.graphic_eq_rounded,
++      'tache' => Icons.check_box_outlined,
++      'souvenir' => Icons.lightbulb_outline_rounded,
++      'personne' => Icons.person_outline_rounded,
++      _ => Icons.label_outline_rounded,
++    };
++
++String relectureTargetLabel(AppLocalizations l10n, RelectureCible cible) =>
++    cible.titre ??
++    switch (cible.type) {
++      'conversation' => l10n.relectureTargetConversation,
++      'tache' => l10n.relectureTargetTask,
++      'souvenir' => l10n.relectureTargetMemory,
++      'personne' => l10n.relectureTargetPerson,
++      _ => cible.type.isEmpty ? l10n.relectureTypeOther : _capitalized(cible.type),
++    };
++
++String _capitalized(String word) => word.isEmpty ? word : word[0].toUpperCase() + word.substring(1);
++
++/// La nature d'une proposition ou d'un changement : icône ET libellé, puis (facultatif) une date.
++class RelectureKindLine extends StatelessWidget {
++  const RelectureKindLine({super.key, required this.type, this.trailing});
++
++  final String type;
++  final String? trailing;
++
++  @override
++  Widget build(BuildContext context) {
++    final label = [relectureTypeLabel(context.l10n, type), if (trailing != null) trailing!].join(' · ');
++    return Row(
++      children: [
++        ExcludeSemantics(child: Icon(relectureTypeIcon(type), size: 18, color: OmiColors.textTertiary)),
++        const SizedBox(width: OmiSpacing.xs),
++        Expanded(
++          child: Text(
++            label,
++            style: OmiType.footnote.copyWith(color: OmiColors.textTertiary, fontWeight: FontWeight.w600),
++          ),
++        ),
++      ],
++    );
++  }
++}
++
++/// Avant → après. Courts : sur une ligne avec une flèche ; longs : l'un sous l'autre. Avant barré (encre
++/// neutre), après en gras ; un seul des deux : « Avant : … » ou « Après : … ». Un lecteur d'écran entend
++/// « Avant : … Après : … ».
++class RelectureDiff extends StatelessWidget {
++  const RelectureDiff({super.key, this.before, this.after});
++
++  final String? before;
++  final String? after;
++
++  static const _inlineLimit = 40;
++
++  @override
++  Widget build(BuildContext context) {
++    final l10n = context.l10n;
++    final before = this.before;
++    final after = this.after;
++    if (before == null && after == null) return const SizedBox.shrink();
++    final beforeStyle = OmiType.subhead.copyWith(
++      color: OmiColors.textTertiary,
++      decoration: TextDecoration.lineThrough,
++      decorationColor: OmiColors.textTertiary,
++    );
++    final afterStyle = OmiType.subhead.copyWith(color: OmiColors.textPrimary, fontWeight: FontWeight.w700);
++    final String spoken;
++    final Widget body;
++    if (before != null && after != null) {
++      spoken = l10n.relectureDiffSemantics(before, after);
++      final short = before.length <= _inlineLimit &&
++          after.length <= _inlineLimit &&
++          !before.contains('\n') &&
++          !after.contains('\n');
++      final beforeText = Text(before, key: const ValueKey('relecture_before'), style: beforeStyle);
++      final afterText = Text(after, key: const ValueKey('relecture_after'), style: afterStyle);
++      body = short
++          ? Wrap(
++              crossAxisAlignment: WrapCrossAlignment.center,
++              spacing: OmiSpacing.xs,
++              runSpacing: OmiSpacing.xxs,
++              children: [
++                beforeText,
++                Icon(Icons.arrow_forward_rounded, size: 16, color: OmiColors.textTertiary),
++                afterText,
++              ],
++            )
++          : Column(
++              crossAxisAlignment: CrossAxisAlignment.start,
++              children: [
++                beforeText,
++                Padding(
++                  padding: const EdgeInsets.symmetric(vertical: 2),
++                  child: Icon(Icons.arrow_downward_rounded, size: 16, color: OmiColors.textTertiary),
++                ),
++                afterText,
++              ],
++            );
++    } else if (before != null) {
++      spoken = l10n.relectureBefore(before);
++      body = Text(spoken,
++          key: const ValueKey('relecture_before'), style: OmiType.subhead.copyWith(color: OmiColors.textTertiary));
++    } else {
++      spoken = l10n.relectureAfter(after!);
++      body = Text(spoken, key: const ValueKey('relecture_after'), style: afterStyle);
++    }
++    return Semantics(
++      container: true,
++      label: spoken,
++      excludeSemantics: true,
++      child: Container(
++        width: double.infinity,
++        padding: const EdgeInsets.symmetric(horizontal: OmiSpacing.sm, vertical: OmiSpacing.xs),
++        decoration: BoxDecoration(color: OmiColors.surface0, borderRadius: OmiRadius.smAll),
++        child: body,
++      ),
++    );
++  }
++}
++
++/// Les extraits : citations courtes avec leur source ; toucher ouvre la conversation quand il y en a une.
++class RelectureQuotes extends StatelessWidget {
++  const RelectureQuotes({super.key, required this.ownerId, required this.extraits, required this.onOpenConversation});
++
++  /// L'id de la proposition (clés des extraits).
++  final String ownerId;
++  final List<RelectureExtrait> extraits;
++  final ValueChanged<String> onOpenConversation;
++
++  @override
++  Widget build(BuildContext context) {
++    return Column(
++      crossAxisAlignment: CrossAxisAlignment.stretch,
++      children: [
++        for (final (index, extrait) in extraits.indexed) _quote(context, index, extrait),
++      ],
++    );
++  }
++
++  Widget _quote(BuildContext context, int index, RelectureExtrait extrait) {
++    final conversationId = extrait.conversationId;
++    final source = extrait.source;
++    final content = Container(
++      padding: const EdgeInsets.fromLTRB(OmiSpacing.sm, OmiSpacing.xxs, OmiSpacing.xxs, OmiSpacing.xxs),
++      decoration: BoxDecoration(border: Border(left: BorderSide(color: OmiColors.border, width: 3))),
++      child: Row(
++        children: [
++          Expanded(
++            child: Column(
++              crossAxisAlignment: CrossAxisAlignment.start,
++              children: [
++                Text(extrait.texte, style: OmiType.subhead.copyWith(fontStyle: FontStyle.italic)),
++                if (source != null)
++                  Padding(
++                    padding: const EdgeInsets.only(top: 2),
++                    child: Text('— $source', style: OmiType.footnote.copyWith(color: OmiColors.textTertiary)),
++                  ),
++              ],
++            ),
++          ),
++          if (conversationId != null)
++            ExcludeSemantics(child: Icon(Icons.chevron_right_rounded, size: 20, color: OmiColors.textTertiary)),
++        ],
++      ),
++    );
++    return Padding(
++      key: ValueKey('relecture_extrait_${ownerId}_$index'),
++      padding: const EdgeInsets.only(top: OmiSpacing.xs),
++      child: conversationId == null
++          ? content
++          : Semantics(
++              button: true,
++              child: InkWell(
++                borderRadius: OmiRadius.smAll,
++                onTap: () => onOpenConversation(conversationId),
++                child: ConstrainedBox(constraints: const BoxConstraints(minHeight: 44), child: content),
++              ),
++            ),
++    );
++  }
++}
++
++/// Ce qui est touché, en puces : une conversation s'ouvre, une tâche montre l'onglet Tâches ; un souvenir ou une
++/// personne se lit seulement.
++class RelectureTargets extends StatelessWidget {
++  const RelectureTargets({
++    super.key,
++    required this.cibles,
++    required this.onOpenConversation,
++    required this.onOpenTasks,
++  });
++
++  final List<RelectureCible> cibles;
++  final ValueChanged<String> onOpenConversation;
++  final VoidCallback onOpenTasks;
++
++  @override
++  Widget build(BuildContext context) {
++    if (cibles.isEmpty) return const SizedBox.shrink();
++    return Wrap(
++      spacing: OmiSpacing.xs,
++      runSpacing: OmiSpacing.xs,
++      children: [for (final cible in cibles) relectureTargetChip(context, cible, onOpenConversation, onOpenTasks)],
++    );
++  }
++}
++
++Widget relectureTargetChip(
++  BuildContext context,
++  RelectureCible cible,
++  ValueChanged<String> onOpenConversation,
++  VoidCallback onOpenTasks,
++) =>
++    InsightSourceChip(
++      key: ValueKey('relecture_cible_${cible.type}_${cible.id}'),
++      icon: relectureTargetIcon(cible.type),
++      label: relectureTargetLabel(context.l10n, cible),
++      available: true,
++      onTap: switch (cible.type) {
++        'conversation' => () => onOpenConversation(cible.id),
++        'tache' => onOpenTasks,
++        _ => null,
++      },
++    );
++
++/// En haut de l'onglet Insights : la carte « À vérifier » quand Omi propose quelque chose (cachée sinon), et
++/// l'entrée discrète « Changements récents » quand il y en a. Une lecture en panne le dit en une ligne discrète
++/// (nouvel essai en tirant vers le bas) ; un serveur qui ne connaît pas la relecture (404) ne montre rien.
++class RelectureTabEntry extends StatelessWidget {
++  const RelectureTabEntry(
++      {super.key, required this.controller, required this.onOpenReview, required this.onOpenChanges});
++
++  final RelectureController controller;
++  final VoidCallback onOpenReview;
++  final VoidCallback onOpenChanges;
++
++  @override
++  Widget build(BuildContext context) {
++    return ListenableBuilder(
++      listenable: controller,
++      builder: (context, _) {
++        final l10n = context.l10n;
++        final count = controller.propositions.length;
++        final children = <Widget>[
++          if (count > 0)
++            Semantics(
++              button: true,
++              child: Material(
++                key: const ValueKey('relecture_card'),
++                color: OmiColors.surface1,
++                borderRadius: OmiRadius.mdAll,
++                clipBehavior: Clip.antiAlias,
++                child: InkWell(
++                  onTap: onOpenReview,
++                  child: ConstrainedBox(
++                    constraints: const BoxConstraints(minHeight: 64),
++                    child: Padding(
++                      padding: const EdgeInsets.symmetric(horizontal: OmiSpacing.md, vertical: OmiSpacing.sm),
++                      child: Row(
++                        children: [
++                          ExcludeSemantics(
++                            child: Icon(Icons.fact_check_outlined, size: 22, color: OmiColors.textTertiary),
++                          ),
++                          const SizedBox(width: OmiSpacing.sm),
++                          Expanded(
++                            child: Column(
++                              crossAxisAlignment: CrossAxisAlignment.start,
++                              mainAxisSize: MainAxisSize.min,
++                              children: [
++                                Text(l10n.relectureTitle, style: OmiType.headline),
++                                const SizedBox(height: 2),
++                                Text(
++                                  l10n.relectureCardCount(count),
++                                  key: const ValueKey('relecture_card_count'),
++                                  style: OmiType.subhead.copyWith(color: OmiColors.textTertiary),
++                                ),
++                              ],
++                            ),
++                          ),
++                          const SizedBox(width: OmiSpacing.xs),
++                          ExcludeSemantics(
++                            child: Icon(Icons.chevron_right_rounded, size: 20, color: OmiColors.textTertiary),
++                          ),
++                        ],
++                      ),
++                    ),
++                  ),
++                ),
++              ),
++            ),
++          if (controller.changements.isNotEmpty)
++            Align(
++              alignment: Alignment.centerLeft,
++              child: OmiButton.tertiary(
++                key: const ValueKey('relecture_changes_link'),
++                label: l10n.relectureChangesTitle,
++                icon: Icons.history_rounded,
++                size: OmiButtonSize.compact,
++                onPressed: onOpenChanges,
++              ),
++            ),
++          if (controller.data == null && controller.problem != null && !controller.missing)
++            Padding(
++              key: const ValueKey('relecture_failure'),
++              padding: const EdgeInsets.symmetric(horizontal: OmiSpacing.xxs, vertical: OmiSpacing.xxs),
++              child: Text(l10n.relectureLoadError, style: OmiType.footnote.copyWith(color: OmiColors.textTertiary)),
++            ),
++        ];
++        if (children.isEmpty) return const SizedBox.shrink();
++        return Padding(
++          padding: const EdgeInsets.only(bottom: OmiSpacing.sm),
++          child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: children),
++        );
++      },
++    );
++  }
++}
++
++/// Confirme un geste (« Fait », « Changement annulé »…) : la barre habituelle, mais une coche neutre (la coche
++/// verte de l'app dirait « bon » par la couleur).
++void relectureConfirm(BuildContext context, String message) => _show(
++      context,
++      OmiFeedback.buildSnackBar(
++        context,
++        message,
++        kind: OmiFeedbackKind.confirm,
++        duration: OmiFeedbackTiming.confirm,
++        icon: Icons.check_rounded,
++      ),
++    );
++
++/// Un refus du serveur, une proposition partie, une panne : le texte dit tout, l'icône reste neutre (jamais le
++/// rouge de l'app) ; 8 s avec un bouton de fermeture, le temps de lire un message du serveur.
++void relectureNotice(BuildContext context, String message) => _show(
++      context,
++      OmiFeedback.buildSnackBar(
++        context,
++        message,
++        kind: OmiFeedbackKind.error,
++        duration: OmiFeedbackTiming.error,
++        showClose: true,
++        icon: Icons.info_outline_rounded,
++      ),
++    );
++
++void _show(BuildContext context, SnackBar bar) {
++  final messenger = ScaffoldMessenger.maybeOf(context);
++  if (messenger == null) return;
++  messenger.hideCurrentSnackBar();
++  messenger.showSnackBar(bar);
++}
++
++/// Dit le résultat d'un geste : fait ([done]), refusé (409 : le message du serveur), parti (404 : [gone]), ou en
++/// panne.
++void showRelectureOutcome(
++  BuildContext context,
++  RelectureOutcome<Object?> outcome, {
++  required String done,
++  required String gone,
++}) {
++  final l10n = context.l10n;
++  switch (outcome) {
++    case RelectureDone():
++      OmiHaptics.success();
++      relectureConfirm(context, done);
++    case RelectureConflict(:final detail):
++      relectureNotice(context, detail ?? l10n.relectureConflict);
++    case RelectureFailed(:final problem) when problem.kind == ApiProblemKind.notFound:
++      relectureNotice(context, gone);
++    case RelectureFailed():
++      relectureNotice(context, l10n.relectureActionFailed);
++  }
++}
++
++/// Dit le résultat d'une annulation (barre « Fait » ou « Changements récents »).
++void showRelectureUndoOutcome(BuildContext context, RelectureOutcome<RelectureChangement?> outcome) =>
++    showRelectureOutcome(context, outcome, done: context.l10n.relectureUndone, gone: context.l10n.relectureChangeGone);
+diff --git a/app/test/unit/relecture_test.dart b/app/test/unit/relecture_test.dart
+new file mode 100644
+index 0000000000..e5d07abe60
+--- /dev/null
++++ b/app/test/unit/relecture_test.dart
+@@ -0,0 +1,404 @@
++// Clone local : « Relecture de nuit » (0014) — lecture tolérante des formes rendues par GET /v1/clone/relecture et
++// par les gestes (accepter, ignorer, annuler), appels de l'API (adresses, méthode, 409 avec le message du serveur,
++// 404, panne, réponse illisible) et l'état partagé (jamais de double envoi, lecture croisant un geste relue).
++import 'dart:async';
++import 'dart:convert';
++import 'dart:io';
++
++import 'package:flutter_test/flutter_test.dart';
++import 'package:http/http.dart' as http;
++
++import 'package:omi/backend/http/api/relecture.dart';
++import 'package:omi/backend/http/api_result.dart';
++import 'package:omi/backend/schema/relecture.dart';
++import 'package:omi/pages/insights/relecture_controller.dart';
++
++Map<String, dynamic> _proposition(String id, {String type = 'orthographe'}) => {
++      'id': id,
++      'type': type,
++      'titre': 'Arnaud, pas Arnault',
++      'explication': 'Le nom est écrit de deux façons ; Arnaud est la plus fréquente.',
++      'avant': 'Arnault',
++      'apres': 'Arnaud',
++      'extraits': [
++        {'texte': 'je dois rappeler Arnault', 'source': 'Réunion du 12 oct.', 'conversation_id': 'c-1'},
++        {'texte': 'sans source'},
++        {'source': 'sans texte'},
++        'pas un objet',
++      ],
++      'cibles': [
++        {'type': 'conversation', 'id': 'c-1', 'titre': 'Réunion Arnaud'},
++        {'type': 'conversation', 'id': 'c-1', 'titre': 'En double'},
++        {'type': 'tache', 'id': 't-1'},
++        {'titre': 'sans id'},
++      ],
++      'cree': '2026-10-20T03:10:00+00:00',
++      'champ_inconnu': {'ignoré': true},
++    };
++
++Map<String, dynamic> _changement(String id, String faitLe, {bool annulable = true, String? annuleLe}) => {
++      'id': id,
++      'proposition_id': 'p-$id',
++      'type': 'tache_doublon',
++      'titre': 'Tâches fusionnées',
++      'details': [
++        {
++          'cible': {'type': 'tache', 'id': 't-1', 'titre': 'Rappeler Arnaud'},
++          'avant': 'Rappeler Arnaud (x2)',
++          'apres': 'Rappeler Arnaud',
++        },
++        {'cible': null, 'avant': null, 'apres': null},
++      ],
++      'fait_le': faitLe,
++      'annulable': annulable,
++      'annule_le': annuleLe,
++    };
++
++http.Response _json(Object body, [int status = 200]) =>
++    http.Response(jsonEncode(body), status, headers: {'content-type': 'application/json; charset=utf-8'});
++
++void main() {
++  group('lecture', () {
++    test('une réponse complète : propositions dans l’ordre du serveur, changements le plus récent d’abord', () {
++      final relecture = Relecture.fromJson({
++        'propositions': [_proposition('p-1'), _proposition('p-2', type: 'tache_terminee')],
++        'changements': [
++          _changement('a', '2026-10-18T04:00:00+00:00'),
++          _changement('b', '2026-10-20T04:00:00+00:00', annulable: false, annuleLe: '2026-10-20T09:30:00+00:00'),
++          _changement('c', '2026-10-19T04:00:00+00:00', annulable: false),
++        ],
++        'derniere_relecture': '2026-10-20T04:12:00+00:00',
++      });
++
++      expect(relecture.propositions.map((p) => p.id), ['p-1', 'p-2']);
++      final p = relecture.propositions.first;
++      expect(p.type, 'orthographe');
++      expect(p.titre, 'Arnaud, pas Arnault');
++      expect(p.avant, 'Arnault');
++      expect(p.apres, 'Arnaud');
++      expect(p.cree, DateTime.utc(2026, 10, 20, 3, 10));
++      // Extraits : sans texte ou illisibles, écartés ; la source et la conversation sont facultatives.
++      expect(p.extraits.map((e) => e.texte), ['je dois rappeler Arnault', 'sans source']);
++      expect(p.extraits.first.conversationId, 'c-1');
++      expect(p.extraits.last.source, isNull);
++      // Cibles : sans id écartée, la même deux fois gardée une fois.
++      expect(p.cibles.map((c) => '${c.type}/${c.id}'), ['conversation/c-1', 'tache/t-1']);
++      expect(p.cibles.last.titre, isNull);
++
++      expect(relecture.changements.map((c) => c.id), ['b', 'c', 'a']);
++      final b = relecture.changements.first;
++      expect(b.annuleLe, DateTime.utc(2026, 10, 20, 9, 30));
++      expect(b.peutAnnuler, isFalse);
++      expect(relecture.changements.last.peutAnnuler, isTrue);
++      expect(relecture.changements[1].peutAnnuler, isFalse, reason: 'non annulable, pas annulé');
++      // Un détail sans rien à montrer est écarté.
++      expect(b.details, hasLength(1));
++      expect(b.details.single.cible?.titre, 'Rappeler Arnaud');
++      expect(relecture.derniereRelecture, DateTime.utc(2026, 10, 20, 4, 12));
++      expect(relecture.lignesEcartees, 0);
++    });
++
++    test('champs absents tolérés : {} est une relecture vide, une proposition réduite à son id se lit', () {
++      final vide = Relecture.fromJson({});
++      expect(vide.propositions, isEmpty);
++      expect(vide.changements, isEmpty);
++      expect(vide.derniereRelecture, isNull);
++
++      final reduite = Relecture.fromJson({
++        'propositions': [
++          {'id': 'p-1'},
++        ],
++        'changements': [
++          {'id': 'c-1'},
++        ],
++        'derniere_relecture': 'pas une date',
++      });
++      final p = reduite.propositions.single;
++      expect(p.type, '');
++      expect(p.titre, isNull);
++      expect(p.explication, isNull);
++      expect(p.avant, isNull);
++      expect(p.extraits, isEmpty);
++      expect(p.cibles, isEmpty);
++      final c = reduite.changements.single;
++      expect(c.details, isEmpty);
++      expect(c.faitLe, isNull);
++      expect(c.annulable, isFalse);
++      expect(reduite.derniereRelecture, isNull);
++    });
++
++    test('une ligne sans id est écartée et comptée ; deux fois le même id : gardé une fois', () {
++      final relecture = Relecture.fromJson({
++        'propositions': [
++          _proposition('p-1'),
++          {'titre': 'sans id'},
++          'pas un objet',
++          _proposition('p-1'),
++        ],
++        'changements': [
++          _changement('a', '2026-10-18T04:00:00+00:00'),
++          {'id': ''},
++        ],
++      });
++      expect(relecture.propositions.map((p) => p.id), ['p-1']);
++      expect(relecture.changements.map((c) => c.id), ['a']);
++      expect(relecture.lignesEcartees, 3);
++    });
++
++    test('une liste non vide entièrement illisible est une erreur de lecture ; des types faux ne plantent pas', () {
++      expect(
++        () => Relecture.fromJson({
++          'propositions': [
++            {'titre': 'sans id'},
++          ],
++        }),
++        throwsFormatException,
++      );
++      final bizarre = Relecture.fromJson({
++        'propositions': [
++          {
++            'id': 'p-1',
++            'titre': 42,
++            'extraits': 'non',
++            'cibles': {'non': 1},
++            'avant': '   '
++          },
++        ],
++        'changements': 'non',
++      });
++      expect(bizarre.propositions.single.titre, isNull);
++      expect(bizarre.propositions.single.avant, isNull, reason: 'un texte blanc ne s’affiche pas');
++      expect(bizarre.changements, isEmpty);
++    });
++
++    test('changements sans date : à la fin, dans l’ordre du serveur', () {
++      final sorted = sortChangements([
++        const RelectureChangement(id: 'x', type: ''),
++        RelectureChangement(id: 'y', type: '', faitLe: DateTime.utc(2026, 10, 1)),
++        const RelectureChangement(id: 'z', type: ''),
++        RelectureChangement(id: 'w', type: '', faitLe: DateTime.utc(2026, 10, 2)),
++      ]);
++      expect(sorted.map((c) => c.id), ['w', 'y', 'x', 'z']);
++    });
++  });
++
++  group('API', () {
++    late List<http.Request> requests;
++    late http.Response Function(http.Request) answer;
++
++    RelectureApi api() => RelectureApi(
++          baseUrl: 'https://example.invalid/',
++          send: (request) async {
++            final sent = http.Request(request.method, Uri.parse(request.url))..body = request.body;
++            sent.headers.addAll(request.headers);
++            requests.add(sent);
++            return answer(sent);
++          },
++        );
++
++    setUp(() {
++      requests = [];
++      answer = (_) => _json({});
++    });
++
++    test('lire : GET /v1/clone/relecture ; vide n’est pas une erreur ; panne et illisible restent distincts', () async {
++      answer = (_) => _json({
++            'propositions': [_proposition('p-1')],
++            'changements': [],
++            'derniere_relecture': null,
++          });
++      final ok = await api().load();
++      expect(requests.single.method, 'GET');
++      expect(requests.single.url.toString(), 'https://example.invalid/v1/clone/relecture');
++      expect((ok as ApiSuccess<Relecture>).data.propositions.single.id, 'p-1');
++
++      answer = (_) => _json({});
++      expect((await api().load() as ApiSuccess<Relecture>).data.propositions, isEmpty);
++
++      answer = (_) => _json({'detail': 'boom'}, 500);
++      expect((await api().load() as ApiFailure).problem.kind, ApiProblemKind.server);
++
++      answer = (_) => _json({'detail': 'Not Found'}, 404);
++      expect((await api().load() as ApiFailure).problem.kind, ApiProblemKind.notFound);
++
++      answer = (_) => http.Response('<html>', 200);
++      expect((await api().load() as ApiFailure).problem.kind, ApiProblemKind.decode);
++
++      answer = (_) => _json(['pas', 'un', 'objet']);
++      expect((await api().load() as ApiFailure).problem.kind, ApiProblemKind.decode);
++    });
++
++    test('accepter : POST sur la proposition (id encodé), rend le changement', () async {
++      answer = (_) => _json({
++            'changement': _changement('ch-1', '2026-10-20T08:00:00+00:00'),
++            'inconnu': 1,
++          });
++      final outcome = await api().accept('p/1 é');
++      final request = requests.single;
++      expect(request.method, 'POST');
++      expect(request.url.toString(), 'https://example.invalid/v1/clone/relecture/propositions/p%2F1%20%C3%A9/accepter');
++      expect(request.url.pathSegments, ['v1', 'clone', 'relecture', 'propositions', 'p/1 é', 'accepter']);
++      expect(request.body, '{}');
++      final changement = (outcome as RelectureDone<RelectureChangement?>).data!;
++      expect(changement.id, 'ch-1');
++      expect(changement.peutAnnuler, isTrue);
++    });
++
++    test('accepter : 409 garde le message du serveur ; sans message, null ; 404 et panne restent distincts', () async {
++      answer = (_) => _json({'detail': 'Les données ont changé depuis la relecture.'}, 409);
++      final conflict = await api().accept('p-1');
++      expect((conflict as RelectureConflict).detail, 'Les données ont changé depuis la relecture.');
++
++      answer = (_) => http.Response('conflit', 409);
++      expect((await api().accept('p-1') as RelectureConflict).detail, isNull);
++
++      answer = (_) => _json({
++            'detail': [
++              {'msg': 'liste FastAPI'}
++            ]
++          }, 409);
++      expect((await api().accept('p-1') as RelectureConflict).detail, isNull);
++
++      answer = (_) => _json({'detail': 'Not Found'}, 404);
++      expect((await api().accept('p-1') as RelectureFailed).problem.kind, ApiProblemKind.notFound);
++
++      answer = (_) => _json({'detail': 'boom'}, 503);
++      expect((await api().accept('p-1') as RelectureFailed).problem.kind, ApiProblemKind.server);
++    });
++
++    test('accepter : 200 illisible reste « fait » (sans changement à annuler) ; réseau coupé = panne', () async {
++      answer = (_) => http.Response('ok', 200);
++      expect((await api().accept('p-1') as RelectureDone<RelectureChangement?>).data, isNull);
++
++      answer = (_) => _json({
++            'changement': {'titre': 'sans id'}
++          });
++      expect((await api().accept('p-1') as RelectureDone<RelectureChangement?>).data, isNull);
++
++      answer = (_) => throw const SocketException('hors ligne');
++      expect((await api().accept('p-1') as RelectureFailed).problem.kind, ApiProblemKind.transport);
++    });
++
++    test('ignorer : POST …/ignorer ; annuler : POST …/changements/{id}/annuler, rend le changement annulé', () async {
++      answer = (_) => _json({'ok': true});
++      expect(await api().ignore('p-2'), isA<RelectureDone<void>>());
++      expect(requests.last.url.path, '/v1/clone/relecture/propositions/p-2/ignorer');
++      expect(requests.last.method, 'POST');
++
++      answer = (_) => _json({
++            'changement': _changement('ch-1', '2026-10-20T08:00:00+00:00',
++                annulable: false, annuleLe: '2026-10-20T09:00:00+00:00'),
++          });
++      final undone = await api().undo('ch-1');
++      expect(requests.last.url.path, '/v1/clone/relecture/changements/ch-1/annuler');
++      final changement = (undone as RelectureDone<RelectureChangement?>).data!;
++      expect(changement.annuleLe, DateTime.utc(2026, 10, 20, 9));
++      expect(changement.peutAnnuler, isFalse);
++
++      answer = (_) => _json({'detail': 'Déjà annulé.'}, 409);
++      expect((await api().undo('ch-1') as RelectureConflict).detail, 'Déjà annulé.');
++    });
++  });
++
++  group('état partagé', () {
++    test('accepter : la proposition part, son changement arrive en tête ; jamais deux envois', () async {
++      final hold = Completer<void>();
++      var posts = 0;
++      final controller = RelectureController(
++        api: RelectureApi(
++          baseUrl: 'https://example.invalid/',
++          send: (request) async {
++            if (request.method == 'GET') {
++              return _json({
++                'propositions': [_proposition('p-1'), _proposition('p-2')],
++                'changements': [_changement('old', '2026-10-18T04:00:00+00:00')],
++              });
++            }
++            posts++;
++            await hold.future;
++            return _json({'changement': _changement('new', '2026-10-20T08:00:00+00:00')});
++          },
++        ),
++      );
++      addTearDown(controller.dispose);
++      await controller.load();
++      final p1 = controller.propositions.first;
++
++      final first = controller.accept(p1);
++      expect(controller.gestureOn('p-1'), RelectureGesture.accept);
++      expect(await controller.accept(p1), isNull, reason: 'un geste en cours : rien n’est envoyé');
++      expect(await controller.ignore(p1), isNull);
++      hold.complete();
++      expect(await first, isA<RelectureDone<RelectureChangement?>>());
++      expect(posts, 1);
++      expect(controller.gestureOn('p-1'), isNull);
++      expect(controller.propositions.map((p) => p.id), ['p-2']);
++      expect(controller.changements.map((c) => c.id), ['new', 'old']);
++    });
++
++    test('une lecture qui croise un geste est refaite (elle pouvait le précéder)', () async {
++      var reads = 0;
++      final firstRead = Completer<void>();
++      var accepted = false;
++      final controller = RelectureController(
++        api: RelectureApi(
++          baseUrl: 'https://example.invalid/',
++          send: (request) async {
++            if (request.method == 'GET') {
++              reads++;
++              final snapshot = {
++                'propositions': [if (!accepted) _proposition('p-1'), _proposition('p-2')],
++              };
++              if (reads == 2) await firstRead.future;
++              return _json(snapshot);
++            }
++            accepted = true;
++            return _json({'changement': _changement('new', '2026-10-20T08:00:00+00:00')});
++          },
++        ),
++      );
++      addTearDown(controller.dispose);
++      await controller.load();
++      // Une lecture part (elle voit encore p-1), puis l'acceptation aboutit avant qu'elle ne rende.
++      final reading = controller.load();
++      await controller.accept(controller.propositions.first);
++      firstRead.complete();
++      await reading;
++      expect(controller.propositions.map((p) => p.id), ['p-2'], reason: 'p-1 ne revient pas');
++      expect(reads, 3, reason: 'la lecture périmée a été refaite');
++    });
++
++    test('409 : le message passe, la liste est relue ; 404 sur la lecture = rien à montrer, pas une panne', () async {
++      var reads = 0;
++      var routeKnown = true;
++      final controller = RelectureController(
++        api: RelectureApi(
++          baseUrl: 'https://example.invalid/',
++          send: (request) async {
++            if (request.method == 'GET') {
++              reads++;
++              if (!routeKnown) return _json({'detail': 'Not Found'}, 404);
++              return _json({
++                'propositions': [_proposition('p-1')],
++              });
++            }
++            return _json({'detail': 'Déjà traitée.'}, 409);
++          },
++        ),
++      );
++      addTearDown(controller.dispose);
++      await controller.load();
++      final outcome = await controller.accept(controller.propositions.single);
++      expect((outcome as RelectureConflict).detail, 'Déjà traitée.');
++      await controller.load();
++      expect(reads, 2, reason: 'relue après le refus (une seule lecture à la fois)');
++
++      routeKnown = false;
++      final fresh = RelectureController(api: controller.api);
++      addTearDown(fresh.dispose);
++      await fresh.load();
++      expect(fresh.missing, isTrue);
++      expect(fresh.propositions, isEmpty);
++    });
++  });
++}
+diff --git a/app/test/widgets/relecture_test.dart b/app/test/widgets/relecture_test.dart
+new file mode 100644
+index 0000000000..75a2708c4e
+--- /dev/null
++++ b/app/test/widgets/relecture_test.dart
+@@ -0,0 +1,581 @@
++// Clone local : « Relecture de nuit » (0014) — la carte « À vérifier » en haut de l'onglet Insights (cachée sans
++// proposition, une panne ne casse pas l'onglet), la page « À vérifier » (avant → après sans rouge ni vert, extraits
++// et cibles qui s'ouvrent, Accepter → la carte part + « Fait » avec « Annuler », Ignorer, 409 → message du
++// serveur, jamais de double envoi), la page « Changements récents » (annulable, annulé, confirmation légère) et
++// l'anglais.
++import 'dart:async';
++import 'dart:convert';
++
++import 'package:flutter/material.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:http/http.dart' as http;
++import 'package:provider/provider.dart';
++import 'package:shared_preferences/shared_preferences.dart';
++
++import 'package:omi/backend/http/api/insights.dart';
++import 'package:omi/backend/http/api_result.dart';
++import 'package:omi/backend/preferences.dart';
++import 'package:omi/l10n/app_localizations.dart';
++import 'package:omi/pages/insights/insight_sources.dart';
++import 'package:omi/pages/insights/insights_page.dart';
++import 'package:omi/pages/insights/relecture_widgets.dart';
++import 'package:omi/providers/home_provider.dart';
++import 'package:omi/ui/ui.dart';
++
++Map<String, dynamic> _orthographe() => {
++      'id': 'p-1',
++      'type': 'orthographe',
++      'titre': 'Arnaud, pas Arnault',
++      'explication': 'Le nom est écrit de deux façons ; Arnaud est la plus fréquente.',
++      'avant': 'Arnault',
++      'apres': 'Arnaud',
++      'extraits': [
++        {'texte': 'je dois rappeler Arnault avant midi', 'source': 'Réunion du 12 oct.', 'conversation_id': 'c-1'},
++        {'texte': 'Arnaud a validé le devis', 'source': 'Note'},
++      ],
++      'cibles': [
++        {'type': 'conversation', 'id': 'c-1', 'titre': 'Réunion Arnaud'},
++        {'type': 'personne', 'id': 'pe-1', 'titre': 'Arnaud D.'},
++      ],
++      'cree': '2026-10-20T03:10:00+00:00',
++    };
++
++Map<String, dynamic> _tacheFaite() => {
++      'id': 'p-2',
++      'type': 'tache_terminee',
++      'titre': 'Le devis est envoyé',
++      'explication': 'Vous avez dit l’avoir envoyé mardi.',
++      'avant': null,
++      'apres': null,
++      'extraits': [],
++      'cibles': [
++        {'type': 'tache', 'id': 't-1', 'titre': 'Envoyer le devis'},
++      ],
++    };
++
++Map<String, dynamic> _souvenirs() => {
++      'id': 'p-3',
++      'type': 'souvenir_doublon',
++      'titre': 'Deux souvenirs disent la même chose',
++      'avant': 'Mike aime le café noir\nMike boit son café sans sucre',
++      'apres': 'Mike boit son café noir, sans sucre',
++    };
++
++Map<String, dynamic> _changement(String id, String titre, String faitLe, {bool annulable = true, String? annuleLe}) => {
++      'id': id,
++      'proposition_id': null,
++      'type': 'tache_doublon',
++      'titre': titre,
++      'details': [
++        {
++          'cible': {'type': 'tache', 'id': 't-$id', 'titre': 'Rappeler Arnaud'},
++          'avant': 'Rappeler Arnaud (deux fois)',
++          'apres': 'Rappeler Arnaud',
++        },
++      ],
++      'fait_le': faitLe,
++      'annulable': annulable,
++      'annule_le': annuleLe,
++    };
++
++/// Un faux serveur du clone : Insights (vide, un dossier) et la relecture de nuit, mêmes formes que le contrat.
++class _Server {
++  final requests = <ApiRequest>[];
++  List<Map<String, dynamic>> propositions = [_orthographe(), _tacheFaite(), _souvenirs()];
++  List<Map<String, dynamic>> changements = [];
++  int relectureStatus = 200;
++
++  /// Propositions et changements refusés (409) avec ce message (null : sans message).
++  final conflicts = <String, String?>{};
++
++  /// Retient la réponse d'un geste (bouton occupé).
++  Completer<void>? hold;
++  var _next = 0;
++
++  static http.Response _json(Object body, [int status = 200]) =>
++      http.Response(jsonEncode(body), status, headers: {'content-type': 'application/json; charset=utf-8'});
++
++  int count(String method, String path) =>
++      requests.where((r) => r.method == method && Uri.parse(r.url).path == path).length;
++
++  Future<http.Response> send(ApiRequest request) async {
++    requests.add(request);
++    final segments = Uri.parse(request.url).pathSegments;
++    if (segments[1] == 'insights') {
++      switch (segments[2]) {
++        case 'maintenant':
++          return _json({'lignes': [], 'resume': null, 'maj': null, 'version': 0});
++        case 'bilans':
++          return _json({'bilans': []});
++        case 'dossiers':
++          return _json({
++            'dossiers': [
++              {
++                'id': 'arnaud',
++                'titre': 'Dossier Arnaud',
++                'gabarit': 'pro',
++                'statut': 'actif',
++                'maj': '2026-10-09T18:30:00+00:00',
++                'nb_elements': 2,
++              },
++            ],
++          });
++      }
++    }
++    if (segments.length == 3 && request.method == 'GET') {
++      if (relectureStatus != 200) return _json({'detail': 'boom'}, relectureStatus);
++      return _json({
++        'propositions': propositions,
++        'changements': changements,
++        'derniere_relecture': '2026-10-20T04:12:00+00:00',
++      });
++    }
++    final hold = this.hold;
++    if (hold != null) await hold.future;
++    final id = segments[4];
++    if (conflicts.containsKey(id)) return _json({'detail': conflicts[id]}, 409);
++    switch ((segments[3], segments[5])) {
++      case ('propositions', 'accepter'):
++        final proposition = propositions.firstWhere((p) => p['id'] == id);
++        propositions = propositions.where((p) => p['id'] != id).toList();
++        final changement = {
++          ..._changement('ch-${_next++}', proposition['titre'] as String, '2026-10-20T08:00:00+00:00'),
++          'proposition_id': id,
++        };
++        changements = [changement, ...changements];
++        return _json({'changement': changement});
++      case ('propositions', 'ignorer'):
++        propositions = propositions.where((p) => p['id'] != id).toList();
++        return _json({'ok': true});
++      case ('changements', 'annuler'):
++        final index = changements.indexWhere((c) => c['id'] == id);
++        changements[index] = {...changements[index], 'annulable': false, 'annule_le': '2026-10-20T09:30:00+00:00'};
++        return _json({'changement': changements[index]});
++    }
++    return _json({'detail': 'Not Found'}, 404);
++  }
++}
++
++class _Opened {
++  final conversations = <String>[];
++  var tasks = 0;
++
++  InsightSourceOpener get opener => InsightSourceOpener(
++        openChat: (_, __) async {},
++        openConversation: (_, id) async => conversations.add(id),
++        openTasks: (_) async => tasks++,
++      );
++}
++
++Future<void> _pump(
++  WidgetTester tester,
++  _Server server, {
++  _Opened? opened,
++  Locale locale = const Locale('fr'),
++  GlobalKey<InsightsPageState>? key,
++}) async {
++  // Largeur d'iPhone, assez haut pour que tout soit construit (les listes sont paresseuses).
++  tester.view.physicalSize = const Size(390, 2600);
++  tester.view.devicePixelRatio = 1;
++  addTearDown(tester.view.reset);
++  await tester.pumpWidget(MaterialApp(
++    localizationsDelegates: AppLocalizations.localizationsDelegates,
++    supportedLocales: AppLocalizations.supportedLocales,
++    locale: locale,
++    home: Scaffold(
++      body: InsightsPage(
++        key: key,
++        api: InsightsApi(baseUrl: 'https://example.invalid/', send: server.send),
++        sources: (opened ?? _Opened()).opener,
++      ),
++    ),
++  ));
++  await tester.pumpAndSettle();
++}
++
++Future<void> _openReview(WidgetTester tester) async {
++  await tester.tap(find.byKey(const ValueKey('relecture_card')));
++  await tester.pumpAndSettle();
++}
++
++Finder _inCard(String id, Finder matching) =>
++    find.descendant(of: find.byKey(ValueKey('relecture_proposition_$id')), matching: matching);
++
++/// Contraste WCAG d'une encre sur un fond opaque.
++double _contrast(Color ink, Color background) {
++  final a = Color.alphaBlend(ink, background).computeLuminance();
++  final b = background.computeLuminance();
++  return (a > b ? a + 0.05 : b + 0.05) / (a > b ? b + 0.05 : a + 0.05);
++}
++
++/// La barre du bas montre [icon] dans une encre neutre (jamais le vert « bon » ni le rouge « mauvais »).
++void _expectNeutralToast(WidgetTester tester, IconData icon) {
++  final shown = tester.widget<Icon>(find.descendant(of: find.byType(SnackBar), matching: find.byIcon(icon)));
++  expect([OmiPalette.light.success, OmiPalette.light.danger], isNot(contains(shown.color)));
++  expect(find.descendant(of: find.byType(SnackBar), matching: find.byIcon(Icons.error_rounded)), findsNothing);
++  expect(find.descendant(of: find.byType(SnackBar), matching: find.byIcon(Icons.check_circle_rounded)), findsNothing);
++}
++
++void main() {
++  setUp(() => OmiColors.active = OmiPalette.light);
++
++  group('onglet Insights', () {
++    testWidgets('« À vérifier » en haut, avec le nombre de propositions ; l’entrée « Changements récents »',
++        (tester) async {
++      final server = _Server()..changements = [_changement('a', 'Tâches fusionnées', '2026-10-19T04:00:00+00:00')];
++      await _pump(tester, server);
++
++      expect(find.text('À vérifier'), findsOneWidget);
++      expect(find.text('3 propositions d’Omi à vérifier'), findsOneWidget);
++      final card = find.byKey(const ValueKey('relecture_card'));
++      expect(tester.getTopLeft(card).dy, lessThan(tester.getTopLeft(find.text('Maintenant')).dy));
++      expect(find.byKey(const ValueKey('relecture_changes_link')), findsOneWidget);
++      expect(find.text('Dossier Arnaud'), findsOneWidget);
++      // Lue avec le reste de l'onglet.
++      expect(server.count('GET', '/v1/clone/relecture'), 1);
++      expect(server.count('GET', '/v1/insights/maintenant'), 1);
++    });
++
++    testWidgets('aucune proposition, aucun changement : ni carte ni entrée, l’onglet est inchangé', (tester) async {
++      final server = _Server()..propositions = [];
++      await _pump(tester, server);
++
++      expect(find.byKey(const ValueKey('relecture_card')), findsNothing);
++      expect(find.byKey(const ValueKey('relecture_changes_link')), findsNothing);
++      expect(find.byKey(const ValueKey('relecture_failure')), findsNothing);
++      expect(find.text('Maintenant'), findsOneWidget);
++      expect(find.text('Dossier Arnaud'), findsOneWidget);
++    });
++
++    testWidgets('relecture en panne : une ligne discrète, le reste de l’onglet est là ; relue au rafraîchissement',
++        (tester) async {
++      final server = _Server()..relectureStatus = 500;
++      final key = GlobalKey<InsightsPageState>();
++      await _pump(tester, server, key: key);
++
++      expect(find.text('Relecture de nuit indisponible pour l’instant.'), findsOneWidget);
++      expect(find.text('Maintenant'), findsOneWidget);
++      expect(find.text('Dossier Arnaud'), findsOneWidget);
++      expect(find.byKey(const ValueKey('relecture_card')), findsNothing);
++
++      server.relectureStatus = 200;
++      await key.currentState!.refresh(reportFailure: true);
++      await tester.pumpAndSettle();
++      expect(find.text('Relecture de nuit indisponible pour l’instant.'), findsNothing);
++      expect(find.text('3 propositions d’Omi à vérifier'), findsOneWidget);
++    });
++
++    testWidgets('serveur sans la relecture (404) : rien n’est montré, pas même la panne', (tester) async {
++      final server = _Server()..relectureStatus = 404;
++      await _pump(tester, server);
++
++      expect(find.byKey(const ValueKey('relecture_failure')), findsNothing);
++      expect(find.byKey(const ValueKey('relecture_card')), findsNothing);
++      expect(find.text('Maintenant'), findsOneWidget);
++    });
++  });
++
++  group('« À vérifier »', () {
++    testWidgets('une carte par proposition : titre, explication, avant → après, extraits, cibles, deux boutons',
++        (tester) async {
++      await _pump(tester, _Server());
++      await _openReview(tester);
++
++      expect(
++          find.text('Cette nuit, Omi a relu vos données et propose ces corrections. Rien ne change sans votre '
++              'accord, et ce que vous acceptez peut être annulé.'),
++          findsOneWidget);
++      expect(find.textContaining('Dernière relecture : '), findsOneWidget);
++      expect(_inCard('p-1', find.text('Orthographe')), findsOneWidget);
++      expect(_inCard('p-1', find.text('Arnaud, pas Arnault')), findsOneWidget);
++      expect(
++          _inCard('p-1', find.text('Le nom est écrit de deux façons ; Arnaud est la plus fréquente.')), findsOneWidget);
++      expect(_inCard('p-1', find.text('je dois rappeler Arnault avant midi')), findsOneWidget);
++      expect(_inCard('p-1', find.text('— Réunion du 12 oct.')), findsOneWidget);
++      expect(_inCard('p-1', find.text('Arnaud D.')), findsOneWidget);
++      expect(_inCard('p-1', find.text('Accepter')), findsOneWidget);
++      expect(_inCard('p-1', find.text('Ignorer')), findsOneWidget);
++      expect(_inCard('p-2', find.text('Tâche faite')), findsOneWidget);
++      // Sans avant ni après : pas de bloc vide.
++      expect(_inCard('p-2', find.byKey(const ValueKey('relecture_before'))), findsNothing);
++      // Longs (plusieurs lignes) : l'un sous l'autre, flèche vers le bas.
++      expect(_inCard('p-3', find.byIcon(Icons.arrow_downward_rounded)), findsOneWidget);
++      // Le titre est en gras.
++      final title = tester.widget<Text>(_inCard('p-1', find.text('Arnaud, pas Arnault')));
++      expect(title.style!.fontWeight, FontWeight.w600);
++    });
++
++    testWidgets('avant barré, une flèche, après en gras ; encres neutres, jamais rouge ni vert', (tester) async {
++      await _pump(tester, _Server());
++      await _openReview(tester);
++
++      final before = tester.widget<Text>(_inCard('p-1', find.byKey(const ValueKey('relecture_before'))));
++      final after = tester.widget<Text>(_inCard('p-1', find.byKey(const ValueKey('relecture_after'))));
++      expect(before.data, 'Arnault');
++      expect(after.data, 'Arnaud');
++      expect(before.style!.decoration, TextDecoration.lineThrough);
++      expect(after.style!.decoration, isNot(TextDecoration.lineThrough));
++      expect(after.style!.fontWeight, FontWeight.w700);
++      expect(_inCard('p-1', find.byIcon(Icons.arrow_forward_rounded)), findsOneWidget);
++      const light = OmiPalette.light;
++      final forbidden = {light.danger, light.success, light.dangerSurface, light.successSurface};
++      for (final style in [before.style!, after.style!]) {
++        expect(forbidden.contains(style.color), isFalse);
++        expect(forbidden.contains(style.decorationColor), isFalse);
++        expect(forbidden.contains(style.backgroundColor), isFalse);
++      }
++      expect({before.style!.color, after.style!.color}, {light.textTertiary, light.textPrimary});
++      // Lisibles sur leur fond (thème clair) ; un lecteur d'écran entend « Avant : … Après : … ».
++      expect(_contrast(before.style!.color!, light.surface0), greaterThanOrEqualTo(4.5));
++      expect(_contrast(after.style!.color!, light.surface0), greaterThanOrEqualTo(4.5));
++      expect(find.bySemanticsLabel('Avant : Arnault. Après : Arnaud.'), findsOneWidget);
++    });
++
++    testWidgets('un extrait ou une conversation touchés ouvrent la conversation ; une tâche, l’onglet Tâches',
++        (tester) async {
++      final opened = _Opened();
++      await _pump(tester, _Server(), opened: opened);
++      await _openReview(tester);
++
++      await tester.tap(find.byKey(const ValueKey('relecture_extrait_p-1_0')));
++      await tester.pumpAndSettle();
++      await tester.tap(find.byKey(const ValueKey('relecture_cible_conversation_c-1')));
++      await tester.pumpAndSettle();
++      expect(opened.conversations, ['c-1', 'c-1']);
++      // Un extrait sans conversation, une personne : rien à ouvrir.
++      await tester.tap(find.byKey(const ValueKey('relecture_extrait_p-1_1')));
++      await tester.tap(find.byKey(const ValueKey('relecture_cible_personne_pe-1')));
++      await tester.pumpAndSettle();
++      expect(opened.conversations, hasLength(2));
++
++      await tester.tap(find.byKey(const ValueKey('relecture_cible_tache_t-1')));
++      await tester.pumpAndSettle();
++      expect(opened.tasks, 1);
++    });
++
++    testWidgets('Accepter : la carte part, « Fait » avec « Annuler » ; Annuler annule le changement rendu',
++        (tester) async {
++      final server = _Server();
++      await _pump(tester, server);
++      await _openReview(tester);
++
++      await tester.tap(_inCard('p-1', find.text('Accepter')));
++      await tester.pumpAndSettle();
++      expect(server.count('POST', '/v1/clone/relecture/propositions/p-1/accepter'), 1);
++      expect(find.byKey(const ValueKey('relecture_proposition_p-1')), findsNothing);
++      expect(find.byKey(const ValueKey('relecture_proposition_p-2')), findsOneWidget);
++      expect(find.text('Fait'), findsOneWidget);
++      _expectNeutralToast(tester, Icons.check_rounded);
++      // Le changement se voit déjà dans l'entrée « Changements récents ».
++      expect(find.byKey(const ValueKey('relecture_changes_link')), findsOneWidget);
++
++      await tester.tap(find.text('Annuler'));
++      await tester.pumpAndSettle();
++      expect(server.count('POST', '/v1/clone/relecture/changements/ch-0/annuler'), 1);
++      expect(find.text('Changement annulé'), findsOneWidget);
++      _expectNeutralToast(tester, Icons.check_rounded);
++
++      // De retour sur l'onglet, la carte compte ce qui reste.
++      await tester.tap(find.byType(OmiBackButton));
++      await tester.pumpAndSettle();
++      expect(find.text('2 propositions d’Omi à vérifier'), findsOneWidget);
++    });
++
++    testWidgets('pendant l’appel, le bouton tourne et rien ne part deux fois', (tester) async {
++      final server = _Server()..hold = Completer<void>();
++      await _pump(tester, server);
++      await _openReview(tester);
++
++      await tester.tap(_inCard('p-1', find.text('Accepter')));
++      await tester.pump();
++      expect(_inCard('p-1', find.byType(OmiSpinner)), findsOneWidget);
++      await tester.tap(find.byKey(const ValueKey('relecture_accept_p-1')), warnIfMissed: false);
++      await tester.tap(find.byKey(const ValueKey('relecture_ignore_p-1')), warnIfMissed: false);
++      await tester.pump();
++
++      server.hold!.complete();
++      server.hold = null;
++      await tester.pumpAndSettle();
++      expect(server.count('POST', '/v1/clone/relecture/propositions/p-1/accepter'), 1);
++      expect(server.count('POST', '/v1/clone/relecture/propositions/p-1/ignorer'), 0);
++      expect(find.byKey(const ValueKey('relecture_proposition_p-1')), findsNothing);
++    });
++
++    testWidgets('409 : le message du serveur s’affiche et la liste est relue', (tester) async {
++      final server = _Server()
++        ..conflicts['p-1'] = 'Les données ont changé depuis la relecture : Arnaud est déjà corrigé.';
++      await _pump(tester, server);
++      await _openReview(tester);
++      final reads = server.count('GET', '/v1/clone/relecture');
++
++      await tester.tap(_inCard('p-1', find.text('Accepter')));
++      await tester.pumpAndSettle();
++      expect(find.text('Les données ont changé depuis la relecture : Arnaud est déjà corrigé.'), findsOneWidget);
++      _expectNeutralToast(tester, Icons.info_outline_rounded);
++      expect(server.count('GET', '/v1/clone/relecture'), reads + 1);
++      // Toujours proposée par le serveur : elle reste, ses boutons de nouveau actifs.
++      expect(find.byKey(const ValueKey('relecture_proposition_p-1')), findsOneWidget);
++      expect(_inCard('p-1', find.byType(OmiSpinner)), findsNothing);
++
++      // Sans message : une phrase de l'app.
++      server.conflicts['p-1'] = null;
++      await tester.tap(_inCard('p-1', find.text('Accepter')));
++      await tester.pumpAndSettle();
++      expect(find.text('Les données ont changé depuis la relecture. La liste est à jour.'), findsOneWidget);
++    });
++
++    testWidgets('Ignorer : la carte part sans confirmation ; plus rien : « Tout est vérifié »', (tester) async {
++      final server = _Server()..propositions = [_tacheFaite()];
++      await _pump(tester, server);
++      await _openReview(tester);
++
++      await tester.tap(_inCard('p-2', find.text('Ignorer')));
++      await tester.pumpAndSettle();
++      expect(server.count('POST', '/v1/clone/relecture/propositions/p-2/ignorer'), 1);
++      expect(find.byType(AlertDialog), findsNothing);
++      expect(find.text('Proposition ignorée'), findsOneWidget);
++      expect(find.byKey(const ValueKey('relecture_proposition_p-2')), findsNothing);
++      expect(find.text('Tout est vérifié'), findsOneWidget);
++
++      await tester.tap(find.byType(OmiBackButton));
++      await tester.pumpAndSettle();
++      expect(find.byKey(const ValueKey('relecture_card')), findsNothing);
++    });
++  });
++
++  group('« Changements récents »', () {
++    Future<_Server> openChanges(WidgetTester tester) async {
++      final server = _Server()
++        ..propositions = []
++        ..changements = [
++          _changement('ancien', 'Souvenirs fusionnés', '2026-10-18T04:00:00+00:00', annulable: false),
++          _changement('annule', 'Nom corrigé', '2026-10-19T04:00:00+00:00',
++              annulable: false, annuleLe: '2026-10-19T10:00:00+00:00'),
++          _changement('recent', 'Tâches fusionnées', '2026-10-20T04:00:00+00:00'),
++        ];
++      await _pump(tester, server);
++      await tester.tap(find.byKey(const ValueKey('relecture_changes_link')));
++      await tester.pumpAndSettle();
++      return server;
++    }
++
++    testWidgets('le plus récent d’abord ; Annuler s’il est annulable, « Annulé le … », sinon le dire', (tester) async {
++      await openChanges(tester);
++
++      double top(String id) => tester.getTopLeft(find.byKey(ValueKey('relecture_changement_$id'))).dy;
++      expect(top('recent'), lessThan(top('annule')));
++      expect(top('annule'), lessThan(top('ancien')));
++      expect(find.byKey(const ValueKey('relecture_undo_recent')), findsOneWidget);
++      expect(find.byKey(const ValueKey('relecture_undo_annule')), findsNothing);
++      expect(find.byKey(const ValueKey('relecture_undone_annule')), findsOneWidget);
++      expect(find.textContaining('Annulé le '), findsOneWidget);
++      expect(find.byKey(const ValueKey('relecture_not_undoable_ancien')), findsOneWidget);
++      expect(find.text('Ne peut plus être annulé'), findsOneWidget);
++      // Date en clair, détail avant → après par cible.
++      expect(find.textContaining('Tâches en double · '), findsNWidgets(3));
++      expect(find.text('Rappeler Arnaud (deux fois)'), findsNWidgets(3));
++    });
++
++    testWidgets('Annuler demande une confirmation légère, puis le changement se montre annulé', (tester) async {
++      final server = await openChanges(tester);
++
++      await tester.tap(find.byKey(const ValueKey('relecture_undo_recent')));
++      await tester.pumpAndSettle();
++      expect(find.text('Annuler ce changement ?'), findsOneWidget);
++      // « Garder » : rien ne part.
++      await tester.tap(find.text('Garder'));
++      await tester.pumpAndSettle();
++      expect(server.count('POST', '/v1/clone/relecture/changements/recent/annuler'), 0);
++
++      await tester.tap(find.byKey(const ValueKey('relecture_undo_recent')));
++      await tester.pumpAndSettle();
++      await tester.tap(find.text('Annuler le changement'));
++      await tester.pumpAndSettle();
++      expect(server.count('POST', '/v1/clone/relecture/changements/recent/annuler'), 1);
++      expect(find.byKey(const ValueKey('relecture_undo_recent')), findsNothing);
++      expect(find.byKey(const ValueKey('relecture_undone_recent')), findsOneWidget);
++      expect(find.text('Changement annulé'), findsOneWidget);
++    });
++
++    testWidgets('annuler refusé (409) : le message du serveur', (tester) async {
++      final server = await openChanges(tester);
++      server.conflicts['recent'] = 'Cette tâche a été modifiée depuis : le changement ne peut plus être annulé.';
++
++      await tester.tap(find.byKey(const ValueKey('relecture_undo_recent')));
++      await tester.pumpAndSettle();
++      await tester.tap(find.text('Annuler le changement'));
++      await tester.pumpAndSettle();
++      expect(find.text('Cette tâche a été modifiée depuis : le changement ne peut plus être annulé.'), findsOneWidget);
++    });
++
++    testWidgets('plus aucun changement à la relecture de la page : une page vide qui l’explique', (tester) async {
++      final server = _Server()
++        ..propositions = []
++        ..changements = [_changement('a', 'Tâches fusionnées', '2026-10-19T04:00:00+00:00')];
++      await _pump(tester, server);
++      // Le serveur ne les garde pas toujours : relus à l'ouverture de la page, il n'y en a plus.
++      server.changements = [];
++      await tester.tap(find.byKey(const ValueKey('relecture_changes_link')));
++      await tester.pumpAndSettle();
++      expect(find.text('Aucun changement récent'), findsOneWidget);
++      expect(
++          find.text('Ce que vous acceptez dans « À vérifier » apparaît ici, avec de quoi l’annuler.'), findsOneWidget);
++    });
++  });
++
++  testWidgets('en anglais aussi', (tester) async {
++    final server = _Server()..changements = [_changement('a', 'Merged tasks', '2026-10-19T04:00:00+00:00')];
++    await _pump(tester, server, locale: const Locale('en'));
++
++    expect(find.text('To review'), findsOneWidget);
++    expect(find.text('3 suggestions from Omi to review'), findsOneWidget);
++    expect(find.text('Recent changes'), findsOneWidget);
++    await _openReview(tester);
++    expect(_inCard('p-1', find.text('Accept')), findsOneWidget);
++    expect(_inCard('p-1', find.text('Ignore')), findsOneWidget);
++    expect(_inCard('p-1', find.text('Spelling')), findsOneWidget);
++    expect(_inCard('p-3', find.text('Duplicate memories')), findsOneWidget);
++  });
++
++  testWidgets('une tâche visée, pour de vrai : retour à l’accueil sur l’onglet Tâches', (tester) async {
++    SharedPreferences.setMockInitialValues({});
++    await SharedPreferencesUtil.init();
++    final home = HomeProvider();
++    addTearDown(home.dispose);
++    final navigator = GlobalKey<NavigatorState>();
++    await tester.pumpWidget(ChangeNotifierProvider.value(
++      value: home,
++      child: MaterialApp(
++        navigatorKey: navigator,
++        localizationsDelegates: AppLocalizations.localizationsDelegates,
++        supportedLocales: AppLocalizations.supportedLocales,
++        locale: const Locale('fr'),
++        home: const Scaffold(body: Text('Accueil')),
++      ),
++    ));
++    unawaited(navigator.currentState!.push(MaterialPageRoute<void>(
++      builder: (context) => Scaffold(
++        body: Builder(
++          builder: (context) => TextButton(
++            onPressed: () => openInsightTasks(context),
++            child: const Text('Tâche'),
++          ),
++        ),
++      ),
++    )));
++    await tester.pumpAndSettle();
++    expect(find.text('Accueil'), findsNothing);
++
++    await tester.tap(find.text('Tâche'));
++    await tester.pumpAndSettle();
++    expect(find.text('Accueil'), findsOneWidget);
++    expect(home.selectedIndex, HomeProvider.tasksTab);
++  });
++
++  test('les libellés connus ; un type inconnu garde le mot du serveur', () {
++    final l10n = lookupAppLocalizations(const Locale('fr'));
++    expect(relectureTypeLabel(l10n, 'personne_doublon'), 'Personnes en double');
++    expect(relectureTypeLabel(l10n, 'nouveau_type'), 'Nouveau type');
++    expect(relectureTypeLabel(l10n, ''), 'Proposition');
++  });
++}

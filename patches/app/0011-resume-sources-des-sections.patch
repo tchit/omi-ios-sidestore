@@ -1,0 +1,1605 @@
+From 9d1cd7a35f731502dc15066b819854d617e330d3 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 20 Oct 2026 20:57:48 +0000
+Subject: [PATCH] =?UTF-8?q?R=C3=A9sum=C3=A9=20:=20sources=20de=20chaque=20?=
+ =?UTF-8?q?section=20(repris=20d'Omi)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+À côté du titre de chaque section des notes d'Omi, une icône discrète (seulement si la section cite des
+passages présents dans la transcription) ouvre une feuille qui les liste : « m:ss · locuteur · texte ».
+Toucher un passage passe à l'onglet Transcription, y fait défiler jusqu'à lui, le met en évidence et cale
+la lecture à son début (le lecteur la reprend de là s'il est chargé, ou au prochain appui sur Lecture).
+
+Repris d'Omi (e8db4f4a65, 3b2e9877b9, 6bd179be99, réparation des citations cf448da99d et suivantes) :
+NoteSectionsSliver, ConversationSectionSourcesButton, utils/note_citations.dart (sans la réparation des
+titres). Les crochets de citation laissés dans le texte (« [s01234] »…) sont retirés à l'affichage et leurs
+identifiants rejoignent les sources de la section ; un identifiant inconnu est ignoré en silence.
+
+Propre au clone :
+- versions gardées (0007) : nouveau champ facultatif `sources` d'une version
+  ([{"heading", "source_segment_ids"}]), rapproché des titres « ## » de son texte ; sans lui, ou sans
+  passage connu, la version s'affiche d'un bloc comme avant ;
+- un aperçu actuel qui n'est plus la projection des sections garde ses sources là où ses titres sont
+  encore ceux des sections ;
+- la feuille dit qui parle (enregistrements du Plaud à plusieurs voix).
+Menu des versions (0007) et « Corriger » (0009) inchangés ; l'édition par double appui porte toujours sur
+tout le résumé.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ app/lib/backend/schema/summary_version.dart   |  39 +++
+ app/lib/l10n/app_en.arb                       |  17 ++
+ app/lib/l10n/app_fr.arb                       |   3 +
+ .../conversation_summary_selection.dart       | 136 ++++++++-
+ app/lib/pages/conversation_detail/page.dart   |  12 +
+ .../pages/conversation_detail/widgets.dart    |  26 ++
+ .../widgets/conversation_section_sources.dart | 170 +++++++++++
+ .../widgets/note_sections_sliver.dart         |  79 +++++
+ .../widgets/summary_tab.dart                  |   5 +
+ app/lib/utils/note_citations.dart             | 156 ++++++++++
+ app/test/fixtures/note_citation_contract.json |  67 +++++
+ app/test/unit/note_citations_test.dart        |  45 +++
+ .../unit/summary_section_sources_test.dart    | 239 ++++++++++++++++
+ .../widgets/summary_section_sources_test.dart | 269 ++++++++++++++++++
+ 14 files changed, 1259 insertions(+), 4 deletions(-)
+ create mode 100644 app/lib/pages/conversation_detail/widgets/conversation_section_sources.dart
+ create mode 100644 app/lib/pages/conversation_detail/widgets/note_sections_sliver.dart
+ create mode 100644 app/lib/utils/note_citations.dart
+ create mode 100644 app/test/fixtures/note_citation_contract.json
+ create mode 100644 app/test/unit/note_citations_test.dart
+ create mode 100644 app/test/unit/summary_section_sources_test.dart
+ create mode 100644 app/test/widgets/summary_section_sources_test.dart
+
+diff --git a/app/lib/backend/schema/summary_version.dart b/app/lib/backend/schema/summary_version.dart
+index 14b2b8d2d1..c9fc7f130d 100644
+--- a/app/lib/backend/schema/summary_version.dart
++++ b/app/lib/backend/schema/summary_version.dart
+@@ -20,6 +20,10 @@ class SummaryVersion {
+   /// Version produite par une correction de l'utilisateur (« Corriger le résumé »), sinon null.
+   final String? correctionId;
+ 
++  /// Les passages de la transcription cités par chaque section de ces notes (champ `sources`, facultatif) ;
++  /// vide quand le serveur ne les a pas gardés.
++  final List<SummarySectionSources> sources;
++
+   const SummaryVersion({
+     required this.id,
+     required this.kind,
+@@ -30,6 +34,7 @@ class SummaryVersion {
+     this.title,
+     this.createdAt,
+     this.correctionId,
++    this.sources = const [],
+   });
+ 
+   /// Null pour une entrée illisible : un historique abîmé ne doit jamais empêcher d'ouvrir la conversation.
+@@ -52,6 +57,7 @@ class SummaryVersion {
+       title: json['title'] is String ? json['title'] as String : null,
+       createdAt: _date(json['created_at']),
+       correctionId: json['correction_id'] is String ? json['correction_id'] as String : null,
++      sources: SummarySectionSources.parseList(json['sources']),
+     );
+   }
+ 
+@@ -70,11 +76,39 @@ class SummaryVersion {
+         'created_at': createdAt?.toUtc().toIso8601String(),
+         'recorded_at': recordedAt.toUtc().toIso8601String(),
+         if (correctionId != null) 'correction_id': correctionId,
++        if (sources.isNotEmpty) 'sources': sources.map((section) => section.toJson()).toList(),
+       };
+ 
+   static DateTime? _date(Object? value) => value is String ? DateTime.tryParse(value) : null;
+ }
+ 
++/// Clone local : les passages cités par une section d'une version gardée (`{"heading": ..., "source_segment_ids": [...]}`).
++/// Le texte d'une version est du Markdown ; la section s'y retrouve par son titre (« ## … »).
++class SummarySectionSources {
++  final String heading;
++  final List<String> sourceSegmentIds;
++
++  const SummarySectionSources({required this.heading, required this.sourceSegmentIds});
++
++  /// Null pour une entrée illisible ou sans passage : elle n'a rien à montrer.
++  static SummarySectionSources? tryParse(Object? json) {
++    if (json is! Map) return null;
++    final heading = json['heading'];
++    final ids = json['source_segment_ids'];
++    if (ids is! List) return null;
++    final sourceSegmentIds = ids.whereType<String>().where((id) => id.isNotEmpty).toList();
++    if (sourceSegmentIds.isEmpty) return null;
++    return SummarySectionSources(heading: heading is String ? heading : '', sourceSegmentIds: sourceSegmentIds);
++  }
++
++  static List<SummarySectionSources> parseList(Object? json) {
++    if (json is! List) return const [];
++    return json.map(tryParse).whereType<SummarySectionSources>().toList();
++  }
++
++  Map<String, dynamic> toJson() => {'heading': heading, 'source_segment_ids': sourceSegmentIds};
++}
++
+ enum SummaryChoiceSource { currentApp, currentOmi, history }
+ 
+ /// Une ligne du menu des résumés : un résumé actuel de la conversation ou une version gardée.
+@@ -101,6 +135,9 @@ class SummaryChoice {
+   /// Produit par une correction de l'utilisateur (« corrigé par vous »).
+   final String? correctionId;
+ 
++  /// Pour une version gardée : les passages cités par ses sections, quand le serveur les a gardés.
++  final List<SummarySectionSources> sources;
++
+   const SummaryChoice({
+     required this.key,
+     required this.source,
+@@ -113,6 +150,7 @@ class SummaryChoice {
+     this.recordedAt,
+     this.resultIndex,
+     this.correctionId,
++    this.sources = const [],
+   });
+ 
+   bool get isCurrent => source != SummaryChoiceSource.history;
+@@ -217,6 +255,7 @@ List<SummaryChoice> buildSummaryChoices({
+         createdAt: version.createdAt,
+         recordedAt: version.recordedAt,
+         correctionId: version.correctionId,
++        sources: version.sources,
+       ),
+     );
+   }
+diff --git a/app/lib/l10n/app_en.arb b/app/lib/l10n/app_en.arb
+index 37483fcb82..b6f10a6cd0 100644
+--- a/app/lib/l10n/app_en.arb
++++ b/app/lib/l10n/app_en.arb
+@@ -4508,6 +4508,23 @@
+             }
+         }
+     },
++    "quoteShowSources": "Show sources",
++    "@quoteShowSources": {
++        "description": "Accessibility label and tooltip for the control beside a summary section heading that lists the transcript moments supporting it"
++    },
++    "quoteJumpToTime": "Jump to {duration}",
++    "@quoteJumpToTime": {
++        "description": "Screen reader label of a cited transcript moment in a summary section's sources",
++        "placeholders": {
++            "duration": {
++                "type": "String"
++            }
++        }
++    },
++    "summarySectionSourcesTitle": "Sources",
++    "@summarySectionSourcesTitle": {
++        "description": "Title of the sheet listing the transcript moments a summary section without a heading cites"
++    },
+     "auto": "Auto",
+     "noSummaryForApp": "No summary available for this app. Try another app for better results.",
+     "tryAnotherApp": "Try Another App",
+diff --git a/app/lib/l10n/app_fr.arb b/app/lib/l10n/app_fr.arb
+index a6105fa77b..32bcdea4f3 100644
+--- a/app/lib/l10n/app_fr.arb
++++ b/app/lib/l10n/app_fr.arb
+@@ -1190,6 +1190,9 @@
+     "summaryCorrectInvalid": "Écrivez ce qui est faux, en 1000 caractères au plus.",
+     "summaryCorrectRetry": "Omi n’a pas pu terminer. Réessayez : la correction ne sera pas appliquée deux fois.",
+     "summaryCorrectPartSkipped": "{count, plural, =1{1 souvenir plus ancien non relu} other{{count} souvenirs plus anciens non relus}}",
++    "quoteShowSources": "Afficher les sources",
++    "quoteJumpToTime": "Aller à {duration}",
++    "summarySectionSourcesTitle": "Sources",
+     "auto": "Automatique",
+     "noSummaryForApp": "Aucun résumé disponible pour cette application. Essayez une autre application pour de meilleurs résultats.",
+     "tryAnotherApp": "Essayer une autre application",
+diff --git a/app/lib/pages/conversation_detail/conversation_summary_selection.dart b/app/lib/pages/conversation_detail/conversation_summary_selection.dart
+index d3f88b0873..32c3bc5221 100644
+--- a/app/lib/pages/conversation_detail/conversation_summary_selection.dart
++++ b/app/lib/pages/conversation_detail/conversation_summary_selection.dart
+@@ -1,6 +1,7 @@
+ import 'package:omi/backend/schema/conversation.dart';
+ import 'package:omi/backend/schema/structured.dart';
+ import 'package:omi/backend/schema/summary_version.dart';
++import 'package:omi/utils/note_citations.dart';
+ 
+ /// The one summary body a conversation detail surface should render or export.
+ ///
+@@ -10,6 +11,10 @@ import 'package:omi/backend/schema/summary_version.dart';
+ ///
+ /// Clone local : [archived] est une version gardée (`summary_history`), choisie dans le menu de « Résumé » ;
+ /// elle se lit, ne s'édite pas. [choiceKey] relie la sélection à sa ligne de ce menu.
++///
++/// Clone local (sources des sections, repris d'Omi) : les notes d'Omi s'affichent section par section quand
++/// [sections] n'est pas vide, chacune avec les passages de la transcription qu'elle cite. Les crochets de
++/// citation que le modèle a laissés dans le texte en sont retirés (ils rejoignent les sources de leur section).
+ enum ConversationSummaryKind { app, overview, sections, empty, archived }
+ 
+ class ConversationSummarySelection {
+@@ -22,6 +27,12 @@ class ConversationSummarySelection {
+   /// La ligne du menu des résumés quand l'utilisateur en a choisi une autre que l'actuelle.
+   final SummaryChoice? choice;
+ 
++  /// Renderable first-party sections; app outputs and edited overviews keep their flat path.
++  ///
++  /// Clone local : une version gardée ou un aperçu modifié s'affichent aussi par sections quand au moins une
++  /// de leurs sections (retrouvée par son titre) a des passages cités ; sinon la liste est vide.
++  final List<Section> sections;
++
+   const ConversationSummarySelection({
+     required this.content,
+     required this.kind,
+@@ -29,6 +40,7 @@ class ConversationSummarySelection {
+     this.resultIndex,
+     this.choiceKey,
+     this.choice,
++    this.sections = const [],
+   });
+ 
+   bool get isApp => kind == ConversationSummaryKind.app;
+@@ -86,35 +98,146 @@ class ConversationSummarySelection {
+   }
+ 
+   static ConversationSummarySelection _selectOmiNotes(ServerConversation conversation, {SummaryChoice? choice}) {
++    final knownIDs = _knownSegmentIDs(conversation);
++    String presentable(String text) => repairNoteCitations(text, knownIDs).text;
+     final overview = conversation.structured.overview.trim();
+     final projectedSections = renderSections(conversation.structured.sections);
++    final validIDs = knownIDs.toSet();
++    final sections =
++        conversation.structured.sections.where((section) => section.bodyMarkdown.trim().isNotEmpty).map((section) {
++      final heading = repairNoteCitations(section.heading, knownIDs);
++      final body = repairNoteCitations(section.bodyMarkdown, knownIDs);
++      // Inline citations the repair removes join the typed provenance (macOS presentableSection),
++      // so a legacy note whose only evidence was `[s01234]` keeps its transcript pointer.
++      return Section(
++        heading: heading.text,
++        bodyMarkdown: body.text,
++        kind: section.kind,
++        sourceSegmentIds: [...?section.sourceSegmentIds, ...heading.sourceIDs, ...body.sourceIDs]
++            .where(validIDs.contains)
++            .toSet()
++            .toList(),
++      );
++    }).toList(growable: false);
+     if (projectedSections.isNotEmpty && overview == projectedSections) {
+       return ConversationSummarySelection(
+-        content: projectedSections,
++        content: presentable(projectedSections),
+         kind: ConversationSummaryKind.sections,
+         choiceKey: currentOmiChoiceKey,
+         choice: choice,
++        sections: sections,
+       );
+     }
+     if (overview.isNotEmpty) {
++      // Clone local : un aperçu qui n'est plus la projection des sections (modifié à la main, ou ordonné
++      // autrement) garde ses sources là où ses titres sont encore ceux des sections.
+       return ConversationSummarySelection(
+-        content: overview,
++        content: presentable(overview),
+         kind: ConversationSummaryKind.overview,
+         choiceKey: currentOmiChoiceKey,
+         choice: choice,
++        sections: sectionsWithSources(
++            overview,
++            [
++              for (final section in conversation.structured.sections)
++                SummarySectionSources(heading: section.heading, sourceSegmentIds: section.sourceSegmentIds ?? const []),
++            ],
++            knownIDs),
+       );
+     }
+     if (projectedSections.isNotEmpty) {
+       return ConversationSummarySelection(
+-        content: projectedSections,
++        content: presentable(projectedSections),
+         kind: ConversationSummaryKind.sections,
+         choiceKey: currentOmiChoiceKey,
+         choice: choice,
++        sections: sections,
+       );
+     }
+     return const ConversationSummarySelection(content: '', kind: ConversationSummaryKind.empty);
+   }
+ 
++  /// The transcript's segment ids; an id-less segment ('') is never a citation.
++  static List<String> _knownSegmentIDs(ServerConversation conversation) =>
++      conversation.transcriptSegments.map((segment) => segment.id).where((id) => id.isNotEmpty).toList();
++
++  /// Clone local : les sections de [markdown] (des notes d'Omi en Markdown, coupées à chaque titre « ## »)
++  /// avec les passages que [sources] donne à leur titre, plus ceux des crochets de citation retirés du texte.
++  /// Vide quand aucune section n'a de passage connu de la transcription : le texte s'affiche alors d'un bloc,
++  /// comme avant.
++  static List<Section> sectionsWithSources(
++      String markdown, List<SummarySectionSources> sources, Iterable<String> knownIDs) {
++    final validIDs = knownIDs.where((id) => id.isNotEmpty).toSet();
++    if (validIDs.isEmpty) return const [];
++    final unused = [
++      for (final entry in sources)
++        (heading: _headingKey(repairNoteCitations(entry.heading, validIDs).text), ids: entry.sourceSegmentIds),
++    ];
++    var anySource = false;
++    final sections = <Section>[];
++    for (final part in splitMarkdownSections(markdown)) {
++      final heading = repairNoteCitations(part.heading, validIDs);
++      final body = repairNoteCitations(part.bodyMarkdown, validIDs);
++      if (heading.text.trim().isEmpty && body.text.trim().isEmpty) continue;
++      final key = _headingKey(heading.text);
++      final index = unused.indexWhere((entry) => entry.heading == key);
++      final typed = index < 0 ? const <String>[] : unused.removeAt(index).ids;
++      final ids = [...typed, ...heading.sourceIDs, ...body.sourceIDs].where(validIDs.contains).toSet().toList();
++      if (ids.isNotEmpty) anySource = true;
++      sections.add(Section(heading: heading.text, bodyMarkdown: body.text, sourceSegmentIds: ids));
++    }
++    return anySource ? List.unmodifiable(sections) : const [];
++  }
++
++  /// Clone local : [markdown] coupé à chaque titre de niveau 2 (« ## Titre ») hors bloc de code ; le texte avant le
++  /// premier titre forme une section sans titre. Les autres niveaux de titre restent dans le corps.
++  static List<Section> splitMarkdownSections(String markdown) {
++    final sections = <Section>[];
++    String heading = '';
++    final body = <String>[];
++    String? fence;
++    void flush() {
++      final text = body.join('\n').trim();
++      if (heading.isNotEmpty || text.isNotEmpty) sections.add(Section(heading: heading, bodyMarkdown: text));
++      body.clear();
++    }
++
++    final headingLine = RegExp(r'^ {0,3}##[ \t]+(.*?)(?:[ \t]+#+)?[ \t]*$');
++    final fenceLine = RegExp(r'^ {0,3}(`{3,}|~{3,})');
++    for (final line in markdown.split('\n')) {
++      final fenceMatch = fenceLine.firstMatch(line);
++      if (fence != null) {
++        if (fenceMatch != null && fenceMatch[1]![0] == fence[0] && fenceMatch[1]!.length >= fence.length) fence = null;
++        body.add(line);
++        continue;
++      }
++      if (fenceMatch != null) {
++        fence = fenceMatch[1];
++        body.add(line);
++        continue;
++      }
++      final match = headingLine.firstMatch(line);
++      if (match != null && match[1]!.trim().isNotEmpty) {
++        flush();
++        // The heading row is plain text: emphasis and code marks would show as typed.
++        heading = match[1]!.replaceAll(RegExp(r'\*\*|__|`'), '').trim();
++        continue;
++      }
++      body.add(line);
++    }
++    flush();
++    return sections;
++  }
++
++  /// A heading as matching sees it: no emphasis marks, case or spacing differences, no trailing colon.
++  static String _headingKey(String heading) => heading
++      .replaceAll(RegExp(r'[*_`]'), '')
++      .replaceAll(RegExp(r'\s+'), ' ')
++      .trim()
++      .replaceAll(RegExp(r'[:：]$'), '')
++      .trim()
++      .toLowerCase();
++
+   /// Clone local : les lignes du menu des résumés (résumés actuels, puis versions gardées).
+   static List<SummaryChoice> choices(ServerConversation conversation) {
+     final overview = conversation.structured.overview.trim();
+@@ -142,12 +265,17 @@ class ConversationSummarySelection {
+       case SummaryChoiceSource.currentOmi:
+         return _selectOmiNotes(conversation, choice: choice);
+       case SummaryChoiceSource.history:
++        // Clone local : des notes d'Omi gardées se lisent comme les actuelles (crochets de citation retirés), et
++        // section par section quand le serveur a gardé leurs sources. Le résumé d'une app reste tel quel.
++        final isOmi = choice.kind == 'omi';
++        final knownIDs = _knownSegmentIDs(conversation);
+         return ConversationSummarySelection(
+-          content: choice.content,
++          content: isOmi ? repairNoteCitations(choice.content, knownIDs).text : choice.content,
+           kind: ConversationSummaryKind.archived,
+           appId: choice.appId,
+           choiceKey: choice.key,
+           choice: choice,
++          sections: isOmi ? sectionsWithSources(choice.content, choice.sources, knownIDs) : const [],
+         );
+     }
+   }
+diff --git a/app/lib/pages/conversation_detail/page.dart b/app/lib/pages/conversation_detail/page.dart
+index 8003680614..2e54deb305 100644
+--- a/app/lib/pages/conversation_detail/page.dart
++++ b/app/lib/pages/conversation_detail/page.dart
+@@ -1130,6 +1130,18 @@ class ConversationDetailPageState extends State<ConversationDetailPage> with Tic
+                         controller: _controller,
+                         children: [
+                           SummaryTab(
++                            // Clone local (repris d'Omi) : un passage cité par une section du résumé ouvre la
++                            // transcription sur lui, le met en évidence et y cale la lecture.
++                            onOpenSource: (id) {
++                              final segments = detailProvider.conversation.transcriptSegments;
++                              final segment = segments.where((segment) => segment.id == id).firstOrNull;
++                              if (segment == null) return;
++                              _hasExplicitTabSelection = true;
++                              setState(() => selectedTab = ConversationTab.transcript);
++                              _controller!.animateTo(_transcriptTabIndex);
++                              _playbackController.updateSegments(segments);
++                              _playbackController.seek(segment.start, strict: true);
++                            },
+                             reviewEnabled: !widget.isFromOnboarding &&
+                                 widget.initialSeekStart == null &&
+                                 selectedTab == ConversationTab.summary &&
+diff --git a/app/lib/pages/conversation_detail/widgets.dart b/app/lib/pages/conversation_detail/widgets.dart
+index 422924d939..7e5ebcb7bd 100644
+--- a/app/lib/pages/conversation_detail/widgets.dart
++++ b/app/lib/pages/conversation_detail/widgets.dart
+@@ -13,6 +13,7 @@ import 'package:omi/pages/apps/app_detail/app_detail.dart';
+ import 'package:omi/pages/conversation_detail/conversation_detail_provider.dart';
+ import 'package:omi/pages/conversation_detail/conversation_summary_selection.dart';
+ import 'package:omi/pages/conversation_detail/widgets/conversation_markdown_widget.dart';
++import 'package:omi/pages/conversation_detail/widgets/note_sections_sliver.dart';
+ import 'package:omi/pages/conversation_detail/widgets/summarized_apps_sheet.dart';
+ import 'package:omi/pages/conversation_detail/widgets/summary_versions_sheet.dart';
+ import 'package:omi/ui/ui.dart';
+@@ -206,6 +207,9 @@ class AppResultDetailWidget extends StatefulWidget {
+   final void Function(ConversationSummarySelection selection)? onEditStarted;
+   final void Function(ConversationSummarySelection selection)? onEditCancelled;
+   final bool Function()? canStartEditing;
++
++  /// Opens the transcript at a cited segment (a section's sources); null hides the sources control.
++  final ValueChanged<String>? onOpenSource;
+   final bool asSliver;
+ 
+   const AppResultDetailWidget({
+@@ -219,6 +223,7 @@ class AppResultDetailWidget extends StatefulWidget {
+     this.onEditStarted,
+     this.onEditCancelled,
+     this.canStartEditing,
++    this.onOpenSource,
+     this.asSliver = false,
+   });
+ 
+@@ -378,6 +383,7 @@ class GetAppsWidgets extends StatelessWidget {
+   final void Function(ConversationSummarySelection selection)? onEditStarted;
+   final void Function(ConversationSummarySelection selection)? onEditCancelled;
+   final bool Function()? canStartEditing;
++  final ValueChanged<String>? onOpenSource;
+   const GetAppsWidgets({
+     super.key,
+     this.searchQuery = '',
+@@ -386,6 +392,7 @@ class GetAppsWidgets extends StatelessWidget {
+     this.onEditStarted,
+     this.onEditCancelled,
+     this.canStartEditing,
++    this.onOpenSource,
+   });
+ 
+   @override
+@@ -434,6 +441,7 @@ class GetAppsWidgets extends StatelessWidget {
+                 searchQuery: searchQuery,
+                 currentResultIndex: currentResultIndex,
+                 canStartEditing: canStartEditing,
++                onOpenSource: onOpenSource,
+                 onEditStarted: onEditStarted == null ? null : (_) => onEditStarted!(selection),
+                 onEditCancelled: onEditCancelled == null ? null : (_) => onEditCancelled!(selection),
+                 onSaveSummarySelection: onSaveSummarySelection,
+@@ -567,6 +575,24 @@ extension _AppResultDetailWidgetSliver on _AppResultDetailWidgetState {
+       );
+     }
+ 
++    // Sections keep their sources beside each heading; a search highlights matches in the flat text.
++    if (selection.sections.isNotEmpty && widget.searchQuery.isEmpty) {
++      return SliverMainAxisGroup(
++        slivers: [
++          NoteSectionsSliver(
++            sections: selection.sections,
++            transcriptSegments: widget.conversation.transcriptSegments,
++            onOpenSource: widget.onOpenSource,
++            onDoubleTap: widget.onSaveSummarySelection == null || !selection.canEdit(widget.conversation)
++                ? null
++                : () => _startEditing(content),
++          ),
++          const SliverToBoxAdapter(child: SizedBox(height: OmiSpacing.xs)),
++          if (widget.app != null) SliverToBoxAdapter(child: _buildAppAttribution(context, widget.app!)),
++        ],
++      );
++    }
++
+     return SliverMainAxisGroup(
+       slivers: [
+         SliverPadding(
+diff --git a/app/lib/pages/conversation_detail/widgets/conversation_section_sources.dart b/app/lib/pages/conversation_detail/widgets/conversation_section_sources.dart
+new file mode 100644
+index 0000000000..53600588d2
+--- /dev/null
++++ b/app/lib/pages/conversation_detail/widgets/conversation_section_sources.dart
+@@ -0,0 +1,170 @@
++import 'package:flutter/material.dart';
++
++import 'package:provider/provider.dart';
++
++import 'package:omi/backend/preferences.dart';
++import 'package:omi/backend/schema/person.dart';
++import 'package:omi/backend/schema/transcript_segment.dart';
++import 'package:omi/providers/people_provider.dart';
++import 'package:omi/ui/ui.dart';
++import 'package:omi/utils/l10n_extensions.dart';
++
++/// Quiet provenance for one summary section: a heading-row control that lists the section's
++/// supporting transcript moments in a sheet, so nothing interrupts the summary prose itself.
++///
++/// Clone local : repris d'Omi (origin/main 2026-10-19) ; chaque passage de la feuille dit aussi qui parle
++/// (« m:ss · locuteur · texte ») : les enregistrements du Plaud ont souvent plusieurs voix.
++class ConversationSectionSourcesButton extends StatelessWidget {
++  final String heading;
++  final List<String> sourceIDs;
++  final List<TranscriptSegment> transcriptSegments;
++  final ValueChanged<String> onOpenSource;
++
++  const ConversationSectionSourcesButton({
++    super.key,
++    required this.heading,
++    required this.sourceIDs,
++    required this.transcriptSegments,
++    required this.onOpenSource,
++  });
++
++  /// The cited segments that exist in the loaded transcript, deduplicated in citation order.
++  /// Unknown ids are dropped silently.
++  static List<TranscriptSegment> resolve(List<String> sourceIDs, List<TranscriptSegment> transcriptSegments) {
++    final segments = {for (final segment in transcriptSegments) segment.id: segment};
++    return sourceIDs
++        .toSet()
++        .where((id) => id.isNotEmpty)
++        .map((id) => segments[id])
++        .whereType<TranscriptSegment>()
++        .where((segment) => segment.start.isFinite && segment.start >= 0)
++        .toList();
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    final sources = resolve(sourceIDs, transcriptSegments);
++    if (sources.isEmpty) return const SizedBox.shrink();
++    return OmiIconButton(
++      key: const ValueKey('section-sources'),
++      icon: const Icon(Icons.graphic_eq_rounded, size: 18),
++      label: context.l10n.quoteShowSources,
++      color: OmiColors.textTertiary,
++      onPressed: () {
++        // Names as the transcript shows them: the people list is read here, where the page's providers are.
++        List<Person> people;
++        try {
++          people = context.read<PeopleProvider?>()?.people ?? SharedPreferencesUtil().cachedPeople;
++        } catch (_) {
++          people = const [];
++        }
++        final names = SpeakerNames.forSegments(transcriptSegments, people: people, l10n: context.l10n);
++        showOmiSheet<void>(
++          context: context,
++          title: heading.trim().isEmpty ? context.l10n.summarySectionSourcesTitle : heading.trim(),
++          builder: (sheetContext) => SectionSourcesList(
++            sources: sources,
++            speakerName: names.forSegment,
++            onOpenSource: (id) {
++              Navigator.of(sheetContext).pop();
++              onOpenSource(id);
++            },
++          ),
++        );
++      },
++    );
++  }
++}
++
++/// The sheet's rows: « m:ss · speaker · text », each opening the transcript at that moment.
++@visibleForTesting
++class SectionSourcesList extends StatelessWidget {
++  final List<TranscriptSegment> sources;
++  final String Function(TranscriptSegment segment) speakerName;
++  final ValueChanged<String> onOpenSource;
++
++  const SectionSourcesList({super.key, required this.sources, required this.speakerName, required this.onOpenSource});
++
++  String _spokenTime(BuildContext context, double start) {
++    final l10n = context.l10n;
++    final total = start.floor();
++    final hours = total ~/ 3600;
++    final minutes = (total % 3600) ~/ 60;
++    final seconds = total % 60;
++    final duration = total < 3600
++        ? OmiDuration.long(total, l10n)
++        : [
++            hours == 1 ? l10n.timeHourSingular(hours) : l10n.timeHoursPlural(hours),
++            minutes == 1 ? l10n.timeMinSingular(minutes) : l10n.timeMinsPlural(minutes),
++            seconds == 1 ? l10n.timeSecsSingular(seconds) : l10n.timeSecsPlural(seconds),
++          ].join(', ');
++    return l10n.quoteJumpToTime(duration);
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    final timeStyle = OmiType.footnote.copyWith(
++      color: OmiColors.textTertiary,
++      fontFeatures: const [FontFeature.tabularFigures()],
++    );
++    // The sheet shell already bounds this in a Flexible; a long list scrolls inside it.
++    return SingleChildScrollView(
++      child: Column(
++        mainAxisSize: MainAxisSize.min,
++        crossAxisAlignment: CrossAxisAlignment.stretch,
++        children: [
++          for (final source in sources)
++            Builder(builder: (context) {
++              final speaker = speakerName(source);
++              final text = source.text.trim();
++              return Semantics(
++                label: '${_spokenTime(context, source.start)}. $speaker : $text',
++                button: true,
++                excludeSemantics: true,
++                child: InkWell(
++                  key: ValueKey('section-source-${source.id}'),
++                  onTap: () => onOpenSource(source.id),
++                  borderRadius: BorderRadius.circular(OmiRadius.sm),
++                  child: ConstrainedBox(
++                    constraints: const BoxConstraints(minHeight: kOmiMinTapTarget),
++                    child: Padding(
++                      padding: const EdgeInsets.symmetric(vertical: OmiSpacing.xs),
++                      child: Row(
++                        crossAxisAlignment: CrossAxisAlignment.start,
++                        children: [
++                          ConstrainedBox(
++                            // Fits m:ss and h:mm:ss; a longer offset widens the column instead of overflowing.
++                            constraints: const BoxConstraints(minWidth: 56),
++                            child: Padding(
++                              padding: const EdgeInsetsDirectional.only(end: OmiSpacing.xs),
++                              child: Text(OmiDuration.offset(source.start), style: timeStyle),
++                            ),
++                          ),
++                          Expanded(
++                            child: Text.rich(
++                              TextSpan(children: [
++                                TextSpan(
++                                  text: speaker,
++                                  style: OmiType.subhead.copyWith(fontWeight: FontWeight.w600),
++                                ),
++                                TextSpan(text: ' · ', style: OmiType.subhead.copyWith(color: OmiColors.textTertiary)),
++                                TextSpan(text: text, style: OmiType.subhead.copyWith(color: OmiColors.textSecondary)),
++                              ]),
++                              maxLines: 3,
++                              overflow: TextOverflow.ellipsis,
++                            ),
++                          ),
++                          Icon(Icons.play_arrow_rounded, size: 20, color: OmiColors.textTertiary),
++                        ],
++                      ),
++                    ),
++                  ),
++                ),
++              );
++            }),
++          const SizedBox(height: OmiSpacing.sm),
++        ],
++      ),
++    );
++  }
++}
+diff --git a/app/lib/pages/conversation_detail/widgets/note_sections_sliver.dart b/app/lib/pages/conversation_detail/widgets/note_sections_sliver.dart
+new file mode 100644
+index 0000000000..e0d3981a2f
+--- /dev/null
++++ b/app/lib/pages/conversation_detail/widgets/note_sections_sliver.dart
+@@ -0,0 +1,79 @@
++import 'package:flutter/material.dart';
++
++import 'package:omi/backend/schema/structured.dart';
++import 'package:omi/backend/schema/transcript_segment.dart';
++import 'package:omi/ui/ui.dart';
++import 'conversation_markdown_widget.dart';
++import 'conversation_section_sources.dart';
++
++/// First-party notes retain section provenance; editing still addresses the complete summary.
++///
++/// Each heading is its own row so the section's sources control sits beside it instead of under
++/// the prose. The row keeps the 44pt touch target with or without the control, so every heading
++/// lines up the same whether or not its section has resolvable sources.
++///
++/// Clone local : repris d'Omi (origin/main 2026-10-19) ; sert aussi aux versions gardées du résumé.
++class NoteSectionsSliver extends StatelessWidget {
++  final List<Section> sections;
++  final List<TranscriptSegment> transcriptSegments;
++  final ValueChanged<String>? onOpenSource;
++  final VoidCallback? onDoubleTap;
++
++  const NoteSectionsSliver(
++      {super.key, required this.sections, required this.transcriptSegments, this.onOpenSource, this.onDoubleTap});
++
++  /// A heading, or a heading-less section whose sources still need a control (it sits right-aligned).
++  bool _hasHeaderRow(Section section) =>
++      section.heading.trim().isNotEmpty ||
++      (onOpenSource != null &&
++          ConversationSectionSourcesButton.resolve(section.sourceSegmentIds ?? [], transcriptSegments).isNotEmpty);
++
++  @override
++  Widget build(BuildContext context) {
++    return SliverMainAxisGroup(slivers: [
++      for (var index = 0; index < sections.length; index++) ...[
++        if (_hasHeaderRow(sections[index]))
++          SliverToBoxAdapter(
++            child: Padding(
++              // conversationMarkdownHeaderPadding's 26pt above, less the touch target's own slack.
++              padding: const EdgeInsets.only(top: 15),
++              child: ConstrainedBox(
++                constraints: const BoxConstraints(minHeight: kOmiMinTapTarget),
++                child: Row(
++                  children: [
++                    // Double-tap-to-edit wraps only the heading text: a double-tap ancestor would
++                    // hold the sources button's single taps in the gesture arena for 300ms.
++                    Expanded(
++                      child: GestureDetector(
++                        behavior: HitTestBehavior.translucent,
++                        onDoubleTap: onDoubleTap,
++                        child: Semantics(
++                          header: true,
++                          child: Text(sections[index].heading.trim(), style: OmiType.headline.copyWith(height: 1.3)),
++                        ),
++                      ),
++                    ),
++                    if (onOpenSource != null)
++                      Transform.translate(
++                        // Align the glyph, not the touch target, with the prose's trailing edge.
++                        offset: const Offset(OmiSpacing.xs, 0),
++                        child: ConversationSectionSourcesButton(
++                          key: ValueKey('section-sources-$index'),
++                          heading: sections[index].heading,
++                          sourceIDs: sections[index].sourceSegmentIds ?? [],
++                          transcriptSegments: transcriptSegments,
++                          onOpenSource: onOpenSource!,
++                        ),
++                      ),
++                  ],
++                ),
++              ),
++            ),
++          ),
++        if (sections[index].bodyMarkdown.trim().isNotEmpty)
++          ConversationMarkdownSliver(content: sections[index].bodyMarkdown, onDoubleTap: onDoubleTap),
++        const SliverToBoxAdapter(child: SizedBox(height: OmiSpacing.sm)),
++      ],
++    ]);
++  }
++}
+diff --git a/app/lib/pages/conversation_detail/widgets/summary_tab.dart b/app/lib/pages/conversation_detail/widgets/summary_tab.dart
+index 825e31dcbc..f6e84143c2 100644
+--- a/app/lib/pages/conversation_detail/widgets/summary_tab.dart
++++ b/app/lib/pages/conversation_detail/widgets/summary_tab.dart
+@@ -25,6 +25,9 @@ import 'summary_correction_sheet.dart';
+ 
+ class SummaryTab extends StatefulWidget {
+   final bool reviewEnabled;
++
++  /// Opens the transcript at a segment a summary section cites (clone local : sources des sections).
++  final ValueChanged<String>? onOpenSource;
+   final String searchQuery;
+   final int currentResultIndex;
+   final VoidCallback? onTapWhenSearchEmpty;
+@@ -32,6 +35,7 @@ class SummaryTab extends StatefulWidget {
+   const SummaryTab(
+       {super.key,
+       this.reviewEnabled = false,
++      this.onOpenSource,
+       this.searchQuery = '',
+       this.currentResultIndex = -1,
+       this.onTapWhenSearchEmpty});
+@@ -108,6 +112,7 @@ class _SummaryTabState extends State<SummaryTab> with AutomaticKeepAliveClientMi
+                         discarded
+                             ? const SliverToBoxAdapter(child: ReprocessDiscardedWidget())
+                             : GetAppsWidgets(
++                                onOpenSource: widget.onOpenSource,
+                                 searchQuery: widget.searchQuery,
+                                 currentResultIndex: widget.currentResultIndex,
+                                 canStartEditing: () {
+diff --git a/app/lib/utils/note_citations.dart b/app/lib/utils/note_citations.dart
+new file mode 100644
+index 0000000000..f23d1e4f7c
+--- /dev/null
++++ b/app/lib/utils/note_citations.dart
+@@ -0,0 +1,156 @@
++// Clone local : repris d'Omi (app/lib/utils/note_citations.dart, origin/main 2026-10-19, sans la réparation des
++// titres) : les crochets de citation que le modèle laisse dans les notes (« [s01234] », « [segment-id 3] »…) sont
++// retirés à l'affichage, et les identifiants de passages qu'ils portaient deviennent des sources de la section.
++
++/// Protected-unit keys: a prefix the input does not contain, the unit's index in base 254 over
++/// U+E002..U+E0FF, then U+E001. Private-use characters match no repair pattern, and the keys stay
++/// short however many units a note holds.
++const _keyBase = 254;
++String _keyDigits(int index) {
++  final codes = <int>[];
++  do {
++    codes.insert(0, 0xE002 + index % _keyBase);
++    index ~/= _keyBase;
++  } while (index > 0);
++  return String.fromCharCodes(codes);
++}
++
++/// Read-time note repair. Never writes a conversation; numeric chat citations remain separate.
++({String text, List<String> sourceIDs}) _repairPass(String input, Iterable<String> knownIDs) {
++  final valid = knownIDs.toSet();
++  final protected = <String, String>{};
++  var prefix = '\uE000';
++  while (input.contains(prefix)) {
++    prefix += '\uE000';
++  }
++  String protect(String value) {
++    final key = '$prefix${_keyDigits(protected.length)}\uE001';
++    protected[key] = value;
++    return key;
++  }
++
++  const marker = '\x00';
++  var text = input.replaceAllMapped(
++    RegExp(
++      r'^[ \t]{0,3}(`{3,}|~{3,})[^\n]*\n[\s\S]*?(?:^[ \t]{0,3}\1[`~]*[ \t]*(?:\n|$)|(?![\s\S]))|(`+)(?!`)[\s\S]*?(?<!`)\2(?!`)',
++      multiLine: true,
++    ),
++    (match) => protect(match[0]!),
++  );
++  final recovered = <String>[];
++  String remove([List<String> ids = const []]) {
++    recovered.addAll(ids);
++    return marker;
++  }
++
++  String cleanSeparators(String value) => value
++      .replaceAll(RegExp(r'[\x00\x01]'), '')
++      .replaceAll(RegExp(r'^[\s,;]+|[\s,;]+$'), '')
++      .replaceAllMapped(RegExp(r'([,;])(?:\s*[,;])+'), (match) => match[1]!);
++
++  final linkPattern = RegExp(r'^\[([^\]\n]*)\]\(([^)\n]*)\)$');
++  String unit(String value) {
++    final link = linkPattern.firstMatch(value);
++    if (link != null) {
++      final label = link[1]!.trim();
++      if (label.isEmpty) return remove();
++      if (valid.contains(label)) return remove([label]);
++      final destination = link[2]!.trim();
++      final scheme = destination.contains(':') ? destination.split(':').first.toLowerCase() : '';
++      return const ['http', 'https', 'mailto'].contains(scheme) ? protect(value) : label;
++    }
++    if (value.startsWith('(')) {
++      final ids = value
++          .substring(1, value.length - 1)
++          .split(RegExp('[;,]'))
++          .map((token) {
++            final nested = linkPattern.firstMatch(token.trim());
++            return nested == null ? token.trim() : nested[1]!.trim();
++          })
++          .where((token) => token.isNotEmpty)
++          .toList();
++      return ids.isNotEmpty && ids.every(valid.contains)
++          ? remove(ids)
++          : value.replaceAllMapped(
++              RegExp(r'\[[^\[\]\n]*\]\([^\n)]*\)|[\[［【][^\[\]［］【】\n]*[\]］】]'), (match) => unit(match[0]!));
++    }
++    final content =
++        value.substring(1, value.length - 1).replaceAll(RegExp('[\u200b\u200c\u200d\u2060\ufeff]'), '').trim();
++    final tokens = content.split(RegExp(r'[\s,;]+')).where((token) => token.isNotEmpty).toList();
++    if (tokens.isNotEmpty && tokens.every(valid.contains)) return remove(tokens);
++    final header = content.split(RegExp(r'\s+'));
++    if (header.length == 2 && valid.contains(header[0]) && RegExp(r'^[?]?[0-9A-Za-z]{1,3}$').hasMatch(header[1])) {
++      return remove([header[0]]);
++    }
++    final mixedIDs = tokens.where(valid.contains).toList();
++    if (mixedIDs.isNotEmpty) {
++      recovered.addAll(mixedIDs);
++      return cleanSeparators(
++          content.replaceAllMapped(RegExp(r'[^\s,;]+'), (match) => valid.contains(match[0]) ? '' : match[0]!));
++    }
++    if (tokens.isEmpty ||
++        RegExp(r'^(?:spk|speaker)[ _]\p{Nd}+:?$', caseSensitive: false, unicode: true).hasMatch(content) ||
++        RegExp(r'^(?:[A-Za-z0-9][A-Za-z0-9._:-]{0,95}|\^\d+)$').hasMatch(content)) {
++      return remove();
++    }
++    return protect(value);
++  }
++
++  text = text.replaceAllMapped(
++      RegExp(r'\[[^\[\]\n]*\]\([^\n)]*\)|(?<!\])\(((?:[^()\n]|\([^()\n]*\))+)\)|[\[［【][^\[\]［］【】\n]*[\]］】]'),
++      (match) => unit(match[0]!));
++  final sorted = valid.toList()..sort((a, b) => b.length.compareTo(a.length));
++  for (final id in sorted) {
++    text =
++        text.replaceAll(RegExp('(?<![\\p{L}\\p{N}_-])${RegExp.escape(id)}(?![\\p{L}\\p{N}_-])', unicode: true), marker);
++  }
++  // Word boundaries and digits are Unicode, as in Python generation and Swift (ICU): an ID or
++  // speaker label glued to CJK text is part of a word, not a citation, and `Speaker_١٢` is a label.
++  text = text.replaceAll(
++      RegExp(r'(?<![\p{L}\p{N}_])(?:spk|speaker)[ _]\p{Nd}+(?![\p{L}\p{N}_]):?[ \t]*',
++          caseSensitive: false, unicode: true),
++      marker);
++  while (true) {
++    final cleaned = text.replaceAllMapped(RegExp(r'\([^()\n]*\)'), (match) {
++      final value = match[0]!;
++      if (!RegExp(r'[\x00\x01]').hasMatch(value)) return value;
++      final content = cleanSeparators(value.substring(1, value.length - 1));
++      return content.isEmpty ? '\x01' : '($content)';
++    });
++    if (cleaned == text) break;
++    text = cleaned;
++  }
++  if (text.contains(marker)) {
++    text = text
++        .replaceAll(RegExp('$marker(?:[ \\t]*$marker)+'), marker)
++        .replaceAll(RegExp('[ \\t]+$marker[ \\t]+'), ' ')
++        .replaceAll(RegExp('[ \\t]+$marker(?=[,.;:]|\\n|\$)'), '')
++        .replaceAll(RegExp('$marker[ \\t]+'), '')
++        .replaceAll(marker, '')
++        .trim();
++  }
++  if (text.contains('\x01')) text = text.replaceAll('\x01', '').trim();
++  // One pass, restoring nested units (a link label that held a code span) recursively.
++  final keyPattern = RegExp('$prefix[\uE002-\uE0FF]+\uE001');
++  String restore(String value) => value.replaceAllMapped(keyPattern, (match) {
++        final unit = protected[match[0]!];
++        return unit == null ? match[0]! : restore(unit);
++      });
++  text = restore(text);
++  return (text: text, sourceIDs: recovered.toSet().toList());
++}
++
++({String text, List<String> sourceIDs}) repairNoteCitations(String input, Iterable<String> knownIDs) {
++  // An id-less segment reaches here as '' (TranscriptSegment.fromGenerated); as a pattern it would
++  // match between every two non-word characters and the cleanup would then eat the whitespace
++  // around each match. Web and macOS drop empty ids before calling their repair; do the same.
++  final ids = knownIDs.where((id) => id.isNotEmpty).toList();
++  final recovered = <String>[];
++  var text = input;
++  while (true) {
++    final result = _repairPass(text, ids);
++    recovered.addAll(result.sourceIDs);
++    if (result.text == text) return (text: text, sourceIDs: recovered.toSet().toList());
++    text = result.text;
++  }
++}
+diff --git a/app/test/fixtures/note_citation_contract.json b/app/test/fixtures/note_citation_contract.json
+new file mode 100644
+index 0000000000..2874d31d41
+--- /dev/null
++++ b/app/test/fixtures/note_citation_contract.json
+@@ -0,0 +1,67 @@
++{
++  "version": 3,
++  "description": "Hand-authored render-time examples. Known citation units recover provenance; mixed brackets unwrap after known IDs are removed. Code and ordinary links survive. Strict writer expectations are explicit where ambiguous prose requires revision.",
++  "known_ids": ["s01234", "s01235", "s01236"],
++  "cases": [
++    {"name":"bare prose", "input":"Read s01234 today.", "output":"Read today.", "source_ids":[]},
++    {"name":"whole bracket", "input":"Fact. [s01234]", "output":"Fact.", "source_ids":["s01234"]},
++    {"name":"header cluster", "input":"Fact [s01234 0].", "output":"Fact.", "source_ids":["s01234"]},
++    {"name":"uncertain cluster", "input":"Fact [s01234 ?A2].", "output":"Fact.", "source_ids":["s01234"]},
++    {"name":"long cluster unwraps remaining prose", "input":"Fact [s01234 abcd].", "output":"Fact abcd.", "source_ids":["s01234"], "strict_output":"Fact [s01234 abcd].", "strict_violations":["source_id_in_prose"], "strict_source_ids":[]},
++    {"name":"parenthetical", "input":"Fact (s01234).", "output":"Fact.", "source_ids":["s01234"]},
++    {"name":"citation link", "input":"Fact [s01234](https://example.com).", "output":"Fact.", "source_ids":["s01234"]},
++    {"name":"nested citation link", "input":"Fact ([s01234](https://example.com); s01235).", "output":"Fact.", "source_ids":["s01234","s01235"]},
++    {"name":"comma list", "input":"Fact [s01234, s01235].", "output":"Fact.", "source_ids":["s01234","s01235"]},
++    {"name":"space list", "input":"Fact [s01235 s01234].", "output":"Fact.", "source_ids":["s01235","s01234"]},
++    {"name":"semicolon list", "input":"Fact [s01234; s01235].", "output":"Fact.", "source_ids":["s01234","s01235"]},
++    {"name":"mixed known and unknown unwrap", "input":"Fact [s01234, missing].", "output":"Fact missing.", "source_ids":["s01234"], "strict_output":"Fact [s01234, missing].", "strict_violations":["source_id_in_prose"], "strict_source_ids":[]},
++    {"name":"unknown bracket", "input":"Fact [missing-segment].", "output":"Fact.", "source_ids":[]},
++    {"name":"unknown UUID prose", "input":"Reference 11111111-2222-3333-4444-555555555555.", "output":"Reference 11111111-2222-3333-4444-555555555555.", "source_ids":[]},
++    {"name":"unknown UUID bracket", "input":"Fact [11111111-2222-3333-4444-555555555555].", "output":"Fact.", "source_ids":[]},
++    {"name":"numeric note debris", "input":"Fact [1][2].", "output":"Fact.", "source_ids":[]},
++    {"name":"footnote note debris", "input":"Fact [^1].", "output":"Fact.", "source_ids":[]},
++    {"name":"fullwidth numeric", "input":"Fact 【1】 ［2］.", "output":"Fact.", "source_ids":[]},
++    {"name":"fullwidth source", "input":"Fact ［s01234］.", "output":"Fact.", "source_ids":["s01234"]},
++    {"name":"zero width source", "input":"Fact [\u200bs01234\u200d].", "output":"Fact.", "source_ids":["s01234"]},
++    {"name":"repeated shells", "input":"Fact. [] [] [] []", "output":"Fact.", "source_ids":[]},
++    {"name":"separator shell", "input":"Fact [ , ; ].", "output":"Fact.", "source_ids":[]},
++    {"name":"only shells", "input":"[] []", "output":"", "source_ids":[]},
++    {"name":"speaker bracket", "input":"Fact [spk 1].", "output":"Fact.", "source_ids":[]},
++    {"name":"speaker prose", "input":"Speaker_00: Fact.", "output":"Fact.", "source_ids":[]},
++    {"name":"speaker repeated", "input":"Fact [spk 1] [Speaker_02].", "output":"Fact.", "source_ids":[]},
++    {"name":"ordinary brackets", "input":"Fact [see appendix].", "output":"Fact [see appendix].", "source_ids":[]},
++    {"name":"ordinary ID label link", "input":"Open [RFC-123](https://example.com).", "output":"Open [RFC-123](https://example.com).", "source_ids":[]},
++    {"name":"ordinary link", "input":"Open [see appendix](https://example.com).", "output":"Open [see appendix](https://example.com).", "source_ids":[]},
++    {"name":"unsafe link", "input":"Open [local file](file:///tmp/private).", "output":"Open local file.", "source_ids":[]},
++    {"name":"inline code", "input":"Use `[s01234]` and `[]`.", "output":"Use `[s01234]` and `[]`.", "source_ids":[]},
++    {"name":"multi backtick code", "input":"Use `` `[s01234]` [] ``. [s01235]", "output":"Use `` `[s01234]` [] ``.", "source_ids":["s01235"]},
++    {"name":"fenced code", "input":"```md\n[s01234] [] spk 1\n```\nFact. [s01235]", "output":"```md\n[s01234] [] spk 1\n```\nFact.", "source_ids":["s01235"]},
++    {"name":"tilde code", "input":"~~~md\n[s01234] []\n~~~\nFact. [s01235]", "output":"~~~md\n[s01234] []\n~~~\nFact.", "source_ids":["s01235"]},
++    {"name":"unclosed fence", "input":"```md\n[s01234] []", "output":"```md\n[s01234] []", "source_ids":[]},
++    {"name":"first mention order", "input":"Fact [s01235] (s01234) [s01235] [s01236](https://example.com).", "output":"Fact.", "source_ids":["s01235","s01234","s01236"]},
++    {"name":"markdown layout", "input":"- Fact. [s01234]\n  - Nested detail.\nHard break.  \nNext line.", "output":"- Fact.\n  - Nested detail.\nHard break.  \nNext line.", "source_ids":["s01234"]},
++    {"name":"nested empty shells", "input":"Fact. [[[[]]]]", "output":"Fact.", "source_ids":[]},
++    {"name":"empty link shell", "input":"Fact. [](https://example.com)", "output":"Fact.", "source_ids":[]},
++    {"name":"code and prose speaker", "input":"spk 1: Use `[s01234] [] spk 1`.", "output":"Use `[s01234] [] spk 1`.", "source_ids":[]},
++    {"name":"identifier boundary", "input":"Keep xs01234 and s01234suffix.", "output":"Keep xs01234 and s01234suffix.", "source_ids":[]},
++    {"name":"unicode identifier boundary", "input":"会议s01234今天 and été_s01235.", "output":"会议s01234今天 and été_s01235.", "source_ids":[]},
++    {"name":"unicode speaker boundary", "input":"会议speaker 1今天 kept; 会议 spk 2 removed.", "output":"会议speaker 1今天 kept; 会议 removed.", "source_ids":[]},
++    {"name":"bare id between CJK spaces", "input":"会议 s01234 今天", "output":"会议 今天", "source_ids":[]},
++    {"name":"unicode speaker digits", "input":"Speaker_١٢: Fact [spk ٣].", "output":"Fact.", "source_ids":[]},
++    {"name":"parenthetical ordinary brackets", "input":"Fact (see [s01234, missing]).", "output":"Fact (see missing).", "source_ids":["s01234"], "strict_output":"Fact (see [s01234, missing]).", "strict_violations":["source_id_in_prose"], "strict_source_ids":[]},
++    {"name":"cluster header requires whitespace", "input":"Fact [s01234, 0].", "output":"Fact 0.", "source_ids":["s01234"], "strict_output":"Fact [s01234, 0].", "strict_violations":["source_id_in_prose"], "strict_source_ids":[]},
++    {"name":"numeric identity cannot corrupt code masks", "known_ids":["0"], "input":"Use `[s01234] [] spk 1` and [0].", "output":"Use `[s01234] [] spk 1` and.", "source_ids":["0"]},
++    {"name":"nested known bracket", "input":"Fact ([s01234]).", "output":"Fact .", "source_ids":["s01234"], "strict_output":"Fact .", "strict_violations":[], "strict_source_ids":["s01234"]},
++    {"name":"nested unknown bracket", "input":"Fact ([s99999]).", "output":"Fact .", "source_ids":[], "strict_output":"Fact ([s99999]).", "strict_violations":["source_id_in_prose"], "strict_source_ids":[]},
++    {"name":"prose parenthetical leading ID", "input":"Mixed (s01234, see appendix)", "output":"Mixed (see appendix)", "source_ids":[], "strict_output":"Mixed (s01234, see appendix)", "strict_violations":["source_id_in_prose"], "strict_source_ids":[]},
++    {"name":"prose parenthetical trailing ID", "input":"Mixed (see appendix; s01234)", "output":"Mixed (see appendix)", "source_ids":[], "strict_output":"Mixed (see appendix; s01234)", "strict_violations":["source_id_in_prose"], "strict_source_ids":[]},
++    {"name":"prose parenthetical doubled separators", "input":"Mixed (see appendix, s01234; later)", "output":"Mixed (see appendix, later)", "source_ids":[], "strict_output":"Mixed (see appendix, s01234; later)", "strict_violations":["source_id_in_prose"], "strict_source_ids":[]},
++    {"name":"empty parenthetical separators", "input":"Fact (s01234, ;).", "output":"Fact.", "source_ids":["s01234"], "strict_output":"Fact.", "strict_violations":[], "strict_source_ids":["s01234"]},
++    {"name":"mixed known unknown IDs", "input":"Mixed [s01234, s99999] group", "output":"Mixed s99999 group", "source_ids":["s01234"], "strict_output":"Mixed [s01234, s99999] group", "strict_violations":["source_id_in_prose"], "strict_source_ids":[]},
++    {"name":"mixed known prose", "input":"Fact [see appendix, s01234; later].", "output":"Fact see appendix, later.", "source_ids":["s01234"], "strict_output":"Fact [see appendix, s01234; later].", "strict_violations":["source_id_in_prose"], "strict_source_ids":[]},
++    {"name":"nested bracket separators", "input":"Fact (([s01234], ;)).", "output":"Fact .", "source_ids":["s01234"], "strict_output":"Fact .", "strict_violations":[], "strict_source_ids":["s01234"]},
++    {"name":"nested code survives", "input":"Fact (`[s01234]`, see appendix).", "output":"Fact (`[s01234]`, see appendix).", "source_ids":[], "strict_output":"Fact (`[s01234]`, see appendix).", "strict_violations":[], "strict_source_ids":[]},
++    {"name":"parenthetical link survives", "input":"Fact ([RFC-123](https://example.com), see appendix).", "output":"Fact ([RFC-123](https://example.com), see appendix).", "source_ids":[], "strict_output":"Fact ([RFC-123](https://example.com), see appendix).", "strict_violations":[], "strict_source_ids":[]},
++    {"name":"ordinary empty parenthetical survives", "input":"Fact () and [see appendix].", "output":"Fact () and [see appendix].", "source_ids":[], "strict_output":"Fact () and [see appendix].", "strict_violations":[], "strict_source_ids":[]}
++  ]
++}
+diff --git a/app/test/unit/note_citations_test.dart b/app/test/unit/note_citations_test.dart
+new file mode 100644
+index 0000000000..c17f03a7f1
+--- /dev/null
++++ b/app/test/unit/note_citations_test.dart
+@@ -0,0 +1,45 @@
++// Clone local : réparation des crochets de citation des notes (repris d'Omi, test/unit/note_citation_contract_test.dart ;
++// le contrat est copié dans test/fixtures, la racine du dépôt d'Omi n'étant pas dans la copie de l'app).
++import 'dart:convert';
++import 'dart:io';
++
++import 'package:flutter_test/flutter_test.dart';
++
++import 'package:omi/utils/note_citations.dart';
++
++void main() {
++  final contract =
++      jsonDecode(File('test/fixtures/note_citation_contract.json').readAsStringSync()) as Map<String, dynamic>;
++  final knownIDs = (contract['known_ids'] as List).cast<String>();
++  for (final item in contract['cases'] as List) {
++    test(item['name'] as String, () {
++      final ids = (item['known_ids'] as List?)?.cast<String>() ?? knownIDs;
++      final result = repairNoteCitations(item['input'] as String, ids);
++      expect(result.text, item['output']);
++      expect(result.sourceIDs, item['source_ids']);
++      expect(repairNoteCitations(result.text, ids).text, item['output']);
++    });
++  }
++
++  test('a transcript segment without an id never rewrites the note', () {
++    const input = '## Decisions\n\n- Fact. [s01234]\n  - Nested detail.\nHard break.  \nNext line.';
++    final result = repairNoteCitations(input, ['', 's01234']);
++    expect(result.text, '## Decisions\n\n- Fact.\n  - Nested detail.\nHard break.  \nNext line.');
++    expect(result.sourceIDs, ['s01234']);
++  });
++
++  test('thousands of protected units restore exactly, including code nested in a link', () {
++    final many = List.generate(3000, (i) => '`c$i` [s01234]').join(' ');
++    final kept = List.generate(3000, (i) => '`c$i`').join(' ');
++    expect(repairNoteCitations(many, ['s01234']).text, kept);
++    final nested = repairNoteCitations('See [`x`](https://e.com) [s01234].', ['s01234']);
++    expect(nested.text, 'See [`x`](https://e.com).');
++    expect(nested.sourceIDs, ['s01234']);
++  });
++
++  test('French notes keep their text and lose only the citation', () {
++    final result = repairNoteCitations('Marie relancera le devis lundi [seg-2].', ['seg-1', 'seg-2']);
++    expect(result.text, 'Marie relancera le devis lundi.');
++    expect(result.sourceIDs, ['seg-2']);
++  });
++}
+diff --git a/app/test/unit/summary_section_sources_test.dart b/app/test/unit/summary_section_sources_test.dart
+new file mode 100644
+index 0000000000..aac6e0e048
+--- /dev/null
++++ b/app/test/unit/summary_section_sources_test.dart
+@@ -0,0 +1,239 @@
++// Clone local : sources des sections du résumé (0011) — lecture du schéma, versions gardées, rapprochement par titre.
++import 'package:flutter_test/flutter_test.dart';
++
++import 'package:omi/backend/schema/conversation.dart';
++import 'package:omi/backend/schema/structured.dart';
++import 'package:omi/backend/schema/summary_version.dart';
++import 'package:omi/backend/schema/transcript_segment.dart';
++import 'package:omi/pages/conversation_detail/conversation_summary_selection.dart';
++
++TranscriptSegment _segment(String id, double start, {int speakerId = 0, bool isUser = false, String? text}) =>
++    TranscriptSegment(
++      id: id,
++      text: text ?? 'Phrase $id',
++      speaker: 'SPEAKER_0$speakerId',
++      isUser: isUser,
++      personId: null,
++      start: start,
++      end: start + 4,
++      translations: [],
++    );
++
++ServerConversation _conversation({
++  List<Section> sections = const [],
++  String? overview,
++  List<SummaryVersion> history = const [],
++}) {
++  final structured = Structured('Point devis', overview ?? ConversationSummarySelection.renderSections(sections));
++  structured.sections = [...sections];
++  return ServerConversation(
++    id: 'conv-1',
++    createdAt: DateTime.utc(2026, 10, 19, 9),
++    structured: structured,
++    transcriptSegments: [_segment('s1', 3), _segment('s2', 65, speakerId: 1), _segment('s3', 130)],
++    summaryHistory: history,
++  );
++}
++
++SummaryVersion _version({
++  String content = '## Décisions\n\nOn signe vendredi.\n\n## Risques\n\nLe budget.',
++  String kind = 'omi',
++  Object? sources,
++}) =>
++    SummaryVersion.tryParse({
++      'id': 'v1',
++      'kind': kind,
++      if (kind == 'app') 'app_id': 'meeting-notes',
++      'content': content,
++      'recorded_at': '2026-10-18T10:00:00Z',
++      if (sources != null) 'sources': sources,
++    })!;
++
++List<String> _sources(List<SummarySectionSources> sources) =>
++    [for (final entry in sources) '${entry.heading}: ${entry.sourceSegmentIds.join(',')}'];
++
++List<String> _sections(List<Section> sections) =>
++    [for (final section in sections) '${section.heading}: ${(section.sourceSegmentIds ?? []).join(',')}'];
++
++void main() {
++  group('schéma', () {
++    test('the structured notes read each section\'s source_segment_ids', () {
++      final structured = Structured.fromJson({
++        'title': 'Point devis',
++        'overview': '## Décisions\n\nOn signe vendredi.',
++        'emoji': '🧠',
++        'category': 'other',
++        'sections': [
++          {
++            'heading': 'Décisions',
++            'body_markdown': 'On signe vendredi.',
++            'kind': 'main',
++            'source_segment_ids': ['s1', 's2'],
++          },
++          {'heading': 'Risques', 'body_markdown': 'Le budget.'},
++        ],
++      });
++      expect(structured.sections.map((s) => s.sourceSegmentIds), [
++        ['s1', 's2'],
++        null,
++      ]);
++    });
++
++    test('a kept version reads its optional sources and drops unreadable entries', () {
++      final version = _version(sources: [
++        {
++          'heading': 'Décisions',
++          'source_segment_ids': ['s1', '', 7, 's2']
++        },
++        {'heading': 'Vide', 'source_segment_ids': []},
++        {'heading': 'Cassé', 'source_segment_ids': 'pas une liste'},
++        'pas un objet',
++        {
++          'source_segment_ids': ['s3']
++        },
++      ]);
++      expect(_sources(version.sources), ['Décisions: s1,s2', ': s3']);
++      final again = SummaryVersion.tryParse(version.toJson())!;
++      expect(_sources(again.sources), ['Décisions: s1,s2', ': s3']);
++      expect(_version().sources, isEmpty);
++      expect(_version().toJson().containsKey('sources'), isFalse);
++    });
++
++    test('the summaries menu carries a kept version\'s sources', () {
++      final conversation = _conversation(
++        sections: const [Section(heading: 'Décisions', bodyMarkdown: 'Nouveau texte.')],
++        history: [
++          _version(sources: [
++            {
++              'heading': 'Risques',
++              'source_segment_ids': ['s3']
++            }
++          ])
++        ],
++      );
++      final kept = ConversationSummarySelection.choices(conversation).where((c) => !c.isCurrent).single;
++      expect(kept.sources.single.heading, 'Risques');
++      expect(kept.sources.single.sourceSegmentIds, ['s3']);
++    });
++  });
++
++  group('version actuelle', () {
++    test('sections keep known sources, add recovered inline citations and lose the brackets', () {
++      final conversation = _conversation(sections: const [
++        Section(
++            heading: 'Décisions', bodyMarkdown: 'On signe vendredi. [s2]', sourceSegmentIds: ['missing', 's1', 's1']),
++        Section(heading: 'Risques', bodyMarkdown: 'Le budget.'),
++      ]);
++      final selection = ConversationSummarySelection.select(conversation);
++      expect(selection.kind, ConversationSummaryKind.sections);
++      expect(selection.sections.map((s) => s.sourceSegmentIds), [
++        ['s1', 's2'],
++        isEmpty,
++      ]);
++      expect(selection.sections.first.bodyMarkdown, 'On signe vendredi.');
++      expect(selection.content, isNot(contains('[s2]')));
++      // The stored note is never rewritten.
++      expect(conversation.structured.sections.first.bodyMarkdown, 'On signe vendredi. [s2]');
++      expect(selection.canEdit(conversation), isTrue);
++    });
++
++    test('an overview that is no longer the projection keeps sources where its headings still match', () {
++      final conversation = _conversation(
++        sections: const [
++          Section(heading: 'Décisions', bodyMarkdown: 'On signe vendredi.', sourceSegmentIds: ['s1']),
++          Section(heading: 'Risques', bodyMarkdown: 'Le budget.', sourceSegmentIds: ['s3']),
++        ],
++        overview: '## Décisions\n\nOn signe vendredi, corrigé à la main.\n\n## Autre\n\nAjout.',
++      );
++      final selection = ConversationSummarySelection.select(conversation);
++      expect(selection.kind, ConversationSummaryKind.overview);
++      expect(_sections(selection.sections), ['Décisions: s1', 'Autre: ']);
++      expect(selection.canEdit(conversation), isTrue);
++    });
++
++    test('an overview without any matching heading stays one flat block', () {
++      final conversation = _conversation(
++        sections: const [
++          Section(heading: 'Décisions', bodyMarkdown: 'x', sourceSegmentIds: ['s1'])
++        ],
++        overview: 'Un aperçu écrit à la main.',
++      );
++      expect(ConversationSummarySelection.select(conversation).sections, isEmpty);
++    });
++  });
++
++  group('versions gardées', () {
++    test('an Omi version with sources reads section by section, matched by heading', () {
++      final conversation = _conversation(
++        sections: const [Section(heading: 'Décisions', bodyMarkdown: 'Texte actuel.')],
++        history: [
++          _version(
++            content: 'Intro sans titre. [s2]\n\n## **Décisions** :\n\nOn signe vendredi.\n\n## Risques\n\nLe budget.',
++            sources: [
++              {
++                'heading': 'décisions',
++                'source_segment_ids': ['s1', 'inconnu']
++              },
++              {
++                'heading': 'Absent',
++                'source_segment_ids': ['s3']
++              },
++            ],
++          ),
++        ],
++      );
++      final choice = ConversationSummarySelection.choices(conversation).firstWhere((c) => !c.isCurrent);
++      final selection = ConversationSummarySelection.fromChoice(choice, conversation);
++      expect(selection.isArchived, isTrue);
++      expect(selection.canEdit(conversation), isFalse);
++      expect(selection.content, startsWith('Intro sans titre.\n'));
++      expect(_sections(selection.sections), [': s2', 'Décisions :: s1', 'Risques: ']);
++    });
++
++    test('a version without sources, or whose ids are all unknown, stays one flat block', () {
++      for (final sources in <Object?>[
++        null,
++        [
++          {
++            'heading': 'Décisions',
++            'source_segment_ids': ['inconnu']
++          }
++        ],
++      ]) {
++        final conversation = _conversation(history: [_version(sources: sources)]);
++        final choice = ConversationSummarySelection.choices(conversation).firstWhere((c) => !c.isCurrent);
++        final selection = ConversationSummarySelection.fromChoice(choice, conversation);
++        expect(selection.sections, isEmpty, reason: '$sources');
++        expect(selection.content, _version().content);
++      }
++    });
++
++    test('an app version is shown as written', () {
++      final conversation = _conversation(history: [
++        _version(kind: 'app', content: '## Décisions\n\nTexte [s1]', sources: [
++          {
++            'heading': 'Décisions',
++            'source_segment_ids': ['s1']
++          }
++        ]),
++      ]);
++      final choice = ConversationSummarySelection.choices(conversation).firstWhere((c) => !c.isCurrent);
++      final selection = ConversationSummarySelection.fromChoice(choice, conversation);
++      expect(selection.sections, isEmpty);
++      expect(selection.content, '## Décisions\n\nTexte [s1]');
++    });
++  });
++
++  group('découpage', () {
++    test('cuts at level-2 headings only, outside code blocks', () {
++      final sections = ConversationSummarySelection.splitMarkdownSections(
++          'Avant\n\n## Un ##\n\nCorps\n### Sous-titre\n```\n## pas un titre\n```\n## Deux\nFin');
++      expect(sections.map((s) => s.heading), ['', 'Un', 'Deux']);
++      expect(sections.map((s) => s.bodyMarkdown), [
++        'Avant',
++        'Corps\n### Sous-titre\n```\n## pas un titre\n```',
++        'Fin',
++      ]);
++    });
++  });
++}
+diff --git a/app/test/widgets/summary_section_sources_test.dart b/app/test/widgets/summary_section_sources_test.dart
+new file mode 100644
+index 0000000000..9e5bd80e8e
+--- /dev/null
++++ b/app/test/widgets/summary_section_sources_test.dart
+@@ -0,0 +1,269 @@
++// Clone local : sources des sections du résumé (0011). L'icône à côté d'un titre ouvre la liste des passages cités
++// (« m:ss · locuteur · texte ») ; toucher un passage ouvre la transcription sur lui, le met en évidence et y cale
++// la lecture.
++import 'dart:async';
++
++import 'package:flutter/material.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:provider/provider.dart';
++import 'package:shared_preferences/shared_preferences.dart';
++
++import 'package:omi/backend/preferences.dart';
++import 'package:omi/backend/schema/conversation.dart';
++import 'package:omi/backend/schema/structured.dart';
++import 'package:omi/backend/schema/summary_version.dart';
++import 'package:omi/backend/schema/transcript_segment.dart';
++import 'package:omi/l10n/app_localizations.dart';
++import 'package:omi/pages/conversation_detail/conversation_detail_provider.dart';
++import 'package:omi/pages/conversation_detail/conversation_summary_selection.dart';
++import 'package:omi/pages/conversation_detail/page.dart';
++import 'package:omi/pages/conversation_detail/widgets.dart';
++import 'package:omi/pages/conversation_detail/widgets/conversation_section_sources.dart';
++import 'package:omi/providers/app_provider.dart';
++import 'package:omi/providers/connectivity_provider.dart';
++import 'package:omi/providers/conversation_provider.dart';
++import 'package:omi/providers/folder_provider.dart';
++import 'package:omi/providers/integration_provider.dart';
++import 'package:omi/providers/people_provider.dart';
++import 'package:omi/ui/ui.dart';
++import 'package:omi/utils/audio/conversation_playback_controller.dart';
++import 'package:omi/utils/platform/platform_manager.dart';
++import 'package:omi/widgets/conversation_bottom_bar.dart';
++
++TranscriptSegment _segment(String id, double start, String text, {int speakerId = 0, bool isUser = false}) =>
++    TranscriptSegment(
++      id: id,
++      text: text,
++      speaker: 'SPEAKER_0$speakerId',
++      isUser: isUser,
++      personId: null,
++      start: start,
++      end: start + 5,
++      translations: [],
++    );
++
++List<TranscriptSegment> _segments() => [
++      _segment('s1', 3, 'On part sur vendredi.', isUser: true),
++      _segment('s2', 75, 'Le devis arrive lundi.', speakerId: 1),
++      _segment('s3', 130, 'Il faudra prévoir le budget.', speakerId: 2),
++    ];
++
++ServerConversation _conversation({List<SummaryVersion> history = const []}) {
++  final sections = [
++    const Section(heading: 'Décisions', bodyMarkdown: 'On signe vendredi.', sourceSegmentIds: ['s2', 'inconnu', 's1']),
++    const Section(heading: 'Risques', bodyMarkdown: 'Le budget.', sourceSegmentIds: ['inconnu']),
++  ];
++  final structured = Structured('Point devis', ConversationSummarySelection.renderSections(sections), emoji: '🧠');
++  structured.sections = sections;
++  return ServerConversation(
++    id: 'conv-sources',
++    createdAt: DateTime.utc(2026, 10, 19, 9),
++    structured: structured,
++    transcriptSegments: _segments(),
++    summaryHistory: history,
++  );
++}
++
++Future<void> _pumpSummary(
++  WidgetTester tester,
++  ConversationSummarySelection selection,
++  ServerConversation conversation, {
++  ValueChanged<String>? onOpenSource,
++}) async {
++  await tester.pumpWidget(
++    MaterialApp(
++      localizationsDelegates: AppLocalizations.localizationsDelegates,
++      supportedLocales: AppLocalizations.supportedLocales,
++      locale: const Locale('fr'),
++      home: Scaffold(
++        body: CustomScrollView(
++          slivers: [
++            AppResultDetailWidget(
++              summarySelection: selection,
++              app: null,
++              conversation: conversation,
++              onSaveSummarySelection: (_, __) {},
++              onOpenSource: onOpenSource,
++              asSliver: true,
++            ),
++          ],
++        ),
++      ),
++    ),
++  );
++  await tester.pump();
++}
++
++void main() {
++  setUp(() async {
++    SharedPreferences.setMockInitialValues({'has_first_conversation': true});
++    await SharedPreferencesUtil.init();
++    OmiColors.active = OmiPalette.light;
++  });
++
++  testWidgets('only a section with findable passages gets the sources control', (tester) async {
++    final conversation = _conversation();
++    await _pumpSummary(tester, ConversationSummarySelection.select(conversation), conversation, onOpenSource: (_) {});
++    expect(find.text('Décisions'), findsOneWidget);
++    expect(find.text('Risques'), findsOneWidget);
++    expect(find.byKey(const ValueKey('section-sources')), findsOneWidget);
++    final row = find.ancestor(of: find.text('Décisions'), matching: find.byType(Row)).first;
++    expect(find.descendant(of: row, matching: find.byKey(const ValueKey('section-sources'))), findsOneWidget);
++    expect(find.byTooltip('Afficher les sources'), findsOneWidget);
++    // Light theme: the quiet control is the tertiary text colour, never a red/green signal.
++    final icon = tester.widget<Icon>(find.byIcon(Icons.graphic_eq_rounded));
++    expect(icon.color ?? IconTheme.of(tester.element(find.byIcon(Icons.graphic_eq_rounded))).color,
++        OmiPalette.light.textTertiary);
++  });
++
++  testWidgets('without a transcript callback no control is shown', (tester) async {
++    final conversation = _conversation();
++    await _pumpSummary(tester, ConversationSummarySelection.select(conversation), conversation);
++    expect(find.byKey(const ValueKey('section-sources')), findsNothing);
++    expect(find.text('Décisions'), findsOneWidget);
++  });
++
++  testWidgets('the sheet lists m:ss · speaker · text and a tap opens the passage', (tester) async {
++    final conversation = _conversation();
++    final opened = <String>[];
++    final controller = ConversationPlaybackController(segments: conversation.transcriptSegments);
++    addTearDown(controller.dispose);
++    await _pumpSummary(tester, ConversationSummarySelection.select(conversation), conversation, onOpenSource: (id) {
++      opened.add(id);
++      final segment = conversation.transcriptSegments.singleWhere((segment) => segment.id == id);
++      controller.seek(segment.start, strict: true);
++    });
++
++    await tester.tap(find.byKey(const ValueKey('section-sources')));
++    await tester.pumpAndSettle();
++    // Sheet titled by the heading; passages in citation order, unknown ids silently left out.
++    expect(find.text('Décisions'), findsNWidgets(2));
++    final rows = find.byType(SectionSourcesList);
++    expect(find.descendant(of: rows, matching: find.text('1:15')), findsOneWidget);
++    expect(find.descendant(of: rows, matching: find.text('0:03')), findsOneWidget);
++    expect(find.descendant(of: rows, matching: find.textContaining('Le devis arrive lundi.', findRichText: true)),
++        findsOneWidget);
++    expect(find.descendant(of: rows, matching: find.textContaining('Locuteur 1', findRichText: true)), findsOneWidget);
++    expect(find.descendant(of: rows, matching: find.textContaining('Vous', findRichText: true)), findsOneWidget);
++    expect(tester.getTopLeft(find.byKey(const ValueKey('section-source-s2'))).dy,
++        lessThan(tester.getTopLeft(find.byKey(const ValueKey('section-source-s1'))).dy));
++
++    await tester.tap(find.byKey(const ValueKey('section-source-s2')));
++    await tester.pumpAndSettle();
++    expect(opened, ['s2']);
++    expect(find.byType(SectionSourcesList), findsNothing);
++    expect(controller.currentSegmentId, 's2');
++    expect(controller.followTargetSegmentId, 's2');
++    expect(controller.followRequest, 1);
++    expect(controller.pendingWallSeconds, 75);
++    expect(controller.isPlaying, isFalse);
++  });
++
++  testWidgets('a named person is shown by name', (tester) async {
++    final segments = _segments();
++    segments[1].personId = 'p-marie';
++    final list = SectionSourcesList(
++      sources: [segments[1]],
++      speakerName: (segment) => segment.personId == 'p-marie' ? 'Marie' : '?',
++      onOpenSource: (_) {},
++    );
++    await tester.pumpWidget(MaterialApp(
++      localizationsDelegates: AppLocalizations.localizationsDelegates,
++      supportedLocales: AppLocalizations.supportedLocales,
++      locale: const Locale('fr'),
++      home: Scaffold(body: list),
++    ));
++    final rich = tester.widget<RichText>(find.textContaining('Marie', findRichText: true));
++    expect(rich.text.toPlainText(), 'Marie · Le devis arrive lundi.');
++    expect(find.text('1:15'), findsOneWidget);
++    expect(find.bySemanticsLabel(RegExp(r'^Aller à .*Marie : Le devis arrive lundi\.$')), findsOneWidget);
++  });
++
++  testWidgets('a kept version with sources shows them; editing stays off', (tester) async {
++    final conversation = _conversation(history: [
++      SummaryVersion.tryParse({
++        'id': 'v-old',
++        'kind': 'omi',
++        'content': '## Ancienne décision\n\nOn signait jeudi. [s3]\n\n## Sans source\n\nRien.',
++        'recorded_at': '2026-10-18T10:00:00Z',
++        'sources': [
++          {
++            'heading': 'Ancienne décision',
++            'source_segment_ids': ['s1']
++          },
++        ],
++      })!,
++    ]);
++    final choice = ConversationSummarySelection.choices(conversation).firstWhere((c) => !c.isCurrent);
++    final selection = ConversationSummarySelection.fromChoice(choice, conversation);
++    await _pumpSummary(tester, selection, conversation, onOpenSource: (_) {});
++    expect(find.text('Ancienne décision'), findsOneWidget);
++    expect(find.textContaining('[s3]', findRichText: true), findsNothing);
++    expect(find.byKey(const ValueKey('section-sources')), findsOneWidget);
++    await tester.tap(find.byKey(const ValueKey('section-sources')));
++    await tester.pumpAndSettle();
++    expect(find.byKey(const ValueKey('section-source-s1')), findsOneWidget);
++    expect(find.byKey(const ValueKey('section-source-s3')), findsOneWidget);
++  });
++
++  testWidgets('on the detail page a passage opens the transcript highlighted there', (tester) async {
++    PlatformManager.initializeForLocalHarness();
++    final initial = _conversation();
++    final details = Completer<ServerConversation?>()..complete(initial);
++    final conversations = ConversationProvider(isSignedIn: () => false);
++    conversations.conversations = [initial];
++    conversations.groupedConversations = {
++      conversationLocalDayKey(initial.createdAt): [initial],
++    };
++    conversations.conversationDetailsFetcherOverride = (_) => details.future;
++    final detail = ConversationDetailProvider();
++    final apps = AppProvider();
++    detail.setProviders(apps, conversations);
++    addTearDown(() {
++      detail.dispose();
++      conversations.dispose();
++      apps.dispose();
++    });
++
++    await tester.pumpWidget(MaterialApp(
++      localizationsDelegates: AppLocalizations.localizationsDelegates,
++      supportedLocales: AppLocalizations.supportedLocales,
++      home: MultiProvider(
++        providers: [
++          ChangeNotifierProvider<ConversationProvider>.value(value: conversations),
++          ChangeNotifierProvider<ConversationDetailProvider>.value(value: detail),
++          ChangeNotifierProvider<AppProvider>.value(value: apps),
++          ChangeNotifierProvider(create: (_) => FolderProvider(foldersFetcher: () async => [])),
++          ChangeNotifierProvider(create: (_) => ConnectivityProvider()),
++          ChangeNotifierProvider(create: (_) => PeopleProvider()),
++          ChangeNotifierProvider(
++            create: (_) => IntegrationProvider(
++              fetchStatus: (_) async => null,
++              saveStatus: (_, __) async => false,
++              deleteStatus: (_) async => false,
++              persistPref: (_, __) async {},
++            ),
++          ),
++        ],
++        child: ConversationDetailPage(conversation: initial, initialTab: ConversationTab.summary),
++      ),
++    ));
++    await tester.pump();
++    await tester.pump(const Duration(milliseconds: 300));
++    final page = tester.state<ConversationDetailPageState>(find.byType(ConversationDetailPage));
++    expect(page.selectedTab, ConversationTab.summary);
++
++    await tester.tap(find.byKey(const ValueKey('section-sources')));
++    await tester.pump();
++    await tester.pump(const Duration(milliseconds: 400));
++    await tester.tap(find.byKey(const ValueKey('section-source-s2')));
++    await tester.pump();
++    await tester.pump(const Duration(milliseconds: 400));
++    await tester.pump(const Duration(milliseconds: 400));
++
++    expect(page.selectedTab, ConversationTab.transcript);
++    expect(find.byKey(const ValueKey('transcript_current_s2')), findsOneWidget);
++    expect(find.byKey(const ValueKey('transcript_current_s1')), findsNothing);
++    expect(tester.takeException(), isNull);
++  });
++}

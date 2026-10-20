@@ -1,0 +1,1004 @@
+From a667202655bed78a05f46d0d67944c6107176128 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 20 Oct 2026 21:13:38 +0000
+Subject: [PATCH] =?UTF-8?q?R=C3=A9sum=C3=A9=20:=20r=C3=A9g=C3=A9n=C3=A9rat?=
+ =?UTF-8?q?ion=20fiable=20(repris=20d'Omi)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Repris d'Omi 922c9a86dc (parties hors drapeau) et du côté client de c985d982de :
+- le POST de régénération part une seule fois (plus de nouvel essai automatique, qui relançait un
+  deuxième traitement complet en double) et attend au plus 320 s (180 s chez Omi : notre serveur accorde
+  jusqu'à 300 s à une requête de premier plan, l'app n'abandonne jamais avant lui) ;
+- la réponse est typée (ReprocessResult) : réussite, Omi déjà en train de traiter (409
+  conversation_processing_in_progress), trop de demandes (429), échec ; une réponse 200 qui n'apporte pas
+  le résumé demandé (aucun résumé, ou pas celui du modèle choisi) est un échec ;
+- la page dit ce qui s'est passé : déjà en cours, trop de demandes, pas de réponse en 5 minutes (Omi
+  finit peut-être), modèle choisi sans résumé, aucun résumé renvoyé ; « Réessayer » seulement là où un
+  nouvel essai a une chance ; une erreur de rapport de plantage ne laisse plus la page en chargement.
+
+Inchangé : en cas d'échec, rien ne bouge sur la page (résumé affiché, version gardée choisie dans le menu
+0007) ; une réussite affiche le nouveau résumé comme avant ; « app seule » (le modèle choisi relancé seul
+par notre serveur) est une réussite dès que son résultat revient. Les lignes de la liste et la carte de
+traitement gardent reProcessConversationServer (conversation ou rien), avec le même envoi unique.
+
+Avec aussi, repris d'Omi 98acad7751 : en profil local_dev, un nom Tailscale MagicDNS (*.ts.net, en http
+ou https derrière `tailscale serve`) est accepté comme serveur, comme l'adresse 100.x qu'il désigne ; il ne
+change pas quand une machine rejoint à nouveau le tailnet. Le suffixe doit être exact (« ts.net.example.com »
+reste refusé) et la production refuse toujours un nom de tailnet. La recette compile encore avec l'adresse
+100.80.3.54 ; passer au nom reste un choix à faire dans build-ios.yml (OMI_DEV_HOST).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ app/lib/backend/http/api/conversations.dart   | 141 +++++++++-
+ app/lib/env/env.dart                          |   9 +
+ app/lib/l10n/app_en.arb                       |  20 ++
+ app/lib/l10n/app_fr.arb                       |   5 +
+ .../conversation_detail_provider.dart         | 145 ++++++++--
+ app/lib/pages/conversation_detail/page.dart   |  25 +-
+ .../summary_failure_message.dart              |  12 +
+ app/test/unit/env_test.dart                   |  14 +
+ app/test/unit/reprocess_reliability_test.dart | 264 ++++++++++++++++++
+ .../reprocess_failure_message_test.dart       | 152 ++++++++++
+ 10 files changed, 740 insertions(+), 47 deletions(-)
+ create mode 100644 app/lib/pages/conversation_detail/summary_failure_message.dart
+ create mode 100644 app/test/unit/reprocess_reliability_test.dart
+ create mode 100644 app/test/widgets/reprocess_failure_message_test.dart
+
+diff --git a/app/lib/backend/http/api/conversations.dart b/app/lib/backend/http/api/conversations.dart
+index eecec1fbf7..b18dea2fbf 100644
+--- a/app/lib/backend/http/api/conversations.dart
++++ b/app/lib/backend/http/api/conversations.dart
+@@ -119,27 +119,138 @@ Future<({List<ServerConversation> items, bool ok, bool truncated})> getConversat
+ 
+ bool hasSpeakerReceiptSummaryCapability(Map<String, String> headers) => headers['x-omi-speaker-receipt-summary'] == '1';
+ 
+-Future<ServerConversation?> reProcessConversationServer(
++/// What POST /v1/conversations/{id}/reprocess did (repris d'Omi 922c9a86dc). The detail page needs to tell
++/// "the server is already working on it" (409) and "too many requests" (429) from a plain failure.
++sealed class ReprocessResult {
++  const ReprocessResult();
++
++  /// The reprocessed conversation, only on [ReprocessSuccess].
++  ServerConversation? get conversation => null;
++
++  /// Adapts a call that only knows "a conversation or nothing" (older seams, list-row retries).
++  static ReprocessResult fromConversation(ServerConversation? conversation) =>
++      conversation == null ? const ReprocessFailed() : ReprocessSuccess(conversation);
++}
++
++final class ReprocessSuccess extends ReprocessResult {
++  const ReprocessSuccess(this.conversation);
++
++  @override
++  final ServerConversation conversation;
++}
++
++/// Another writer holds the conversation's processing claim (HTTP 409 `conversation_processing_in_progress`).
++final class ReprocessBusy extends ReprocessResult {
++  const ReprocessBusy();
++}
++
++/// The hourly reprocess limit, or the model provider's (HTTP 429). [retryAfter] when the server said how long.
++final class ReprocessRateLimited extends ReprocessResult {
++  const ReprocessRateLimited({this.retryAfter});
++
++  final Duration? retryAfter;
++}
++
++/// Anything else: transport failure, 5xx (502 `app_result_failed` when the selected template returned nothing),
++/// an app the server will not run, an unacknowledged speaker receipt, an undecodable body. [timedOut] when no
++/// answer came within [reprocessRequestTimeout] (the server may still finish the summary).
++final class ReprocessFailed extends ReprocessResult {
++  const ReprocessFailed({this.statusCode, this.timedOut = false});
++
++  final int? statusCode;
++  final bool timedOut;
++}
++
++/// A reprocess runs the whole summary pipeline and can take minutes. It is not idempotent, so the pool must
++/// never retry it (a timeout or 5xx retry starts a second, duplicate reprocess).
++///
++/// Clone local : 320 s (180 s chez Omi). Le serveur personnel accorde jusqu'à 300 s à une requête de premier
++/// plan (OMI_FOREGROUND_REQUEST_TIMEOUT_SECONDS) ; l'app ne doit jamais abandonner avant lui.
++const Duration reprocessRequestTimeout = Duration(seconds: 320);
++
++/// Sends the reprocess POST: [timeout] and [retries] are what the request must use (a test seam).
++typedef ReprocessSend = Future<http.Response?> Function(String url, {required Duration timeout, required int retries});
++
++Future<http.Response?> _sendReprocess(String url, {required Duration timeout, required int retries}) =>
++    makeApiCall(url: url, headers: {}, method: 'POST', body: '', timeout: timeout, retries: retries);
++
++/// POST /v1/conversations/{id}/reprocess, sent once (no automatic retry), waiting at most
++/// [reprocessRequestTimeout].
++Future<ReprocessResult> reprocessConversationResult(
+   String conversationId, {
+   String? appId,
+   bool requireSpeakerReceipt = false,
++  @visibleForTesting ReprocessSend? send,
++  @visibleForTesting DateTime Function() now = DateTime.now,
+ }) async {
+-  var response = await makeApiCall(
+-    url: '${Env.apiBaseUrl}v1/conversations/$conversationId/reprocess${appId != null ? '?app_id=$appId' : ''}',
+-    headers: {},
+-    method: 'POST',
+-    body: '',
++  final started = now();
++  final response = await (send ?? _sendReprocess)(
++    '${Env.apiBaseUrl}v1/conversations/$conversationId/reprocess${appId != null ? '?app_id=$appId' : ''}',
++    timeout: reprocessRequestTimeout,
++    retries: 0,
+   );
+-  if (response == null) return null;
+-  Logger.debug('reProcessConversationServer: ${response.body}');
+-  if (response.statusCode == 200) {
+-    // A pre-fix backend can return 200 with a summary made from stale speaker
+-    // labels. Keep the detail page's retry action until the receipt-aware
+-    // processor explicitly acknowledges its summary path.
+-    if (requireSpeakerReceipt && !hasSpeakerReceiptSummaryCapability(response.headers)) return null;
+-    return ServerConversation.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
++  if (response == null) return reprocessResultWithoutResponse(now().difference(started));
++  Logger.debug('reProcessConversationServer: ${response.statusCode}');
++  return reprocessResultFromResponse(response, requireSpeakerReceipt: requireSpeakerReceipt);
++}
++
++/// The reprocessed conversation, or null on any failure (list rows and the processing card only need that).
++Future<ServerConversation?> reProcessConversationServer(
++  String conversationId, {
++  String? appId,
++  bool requireSpeakerReceipt = false,
++}) async =>
++    (await reprocessConversationResult(conversationId, appId: appId, requireSpeakerReceipt: requireSpeakerReceipt))
++        .conversation;
++
++/// No response at all: a request that used up [reprocessRequestTimeout] timed out; anything sooner is a
++/// transport failure. ([makeApiCall] reports both as null.)
++@visibleForTesting
++ReprocessResult reprocessResultWithoutResponse(Duration elapsed) =>
++    ReprocessFailed(timedOut: elapsed >= reprocessRequestTimeout - const Duration(seconds: 2));
++
++/// Maps a reprocess response to its [ReprocessResult].
++@visibleForTesting
++ReprocessResult reprocessResultFromResponse(http.Response response, {bool requireSpeakerReceipt = false}) {
++  switch (response.statusCode) {
++    case 200:
++      // A pre-fix backend can return 200 with a summary made from stale speaker
++      // labels. Keep the detail page's retry action until the receipt-aware
++      // processor explicitly acknowledges its summary path.
++      if (requireSpeakerReceipt && !hasSpeakerReceiptSummaryCapability(response.headers)) {
++        return const ReprocessFailed(statusCode: 200);
++      }
++      try {
++        return ReprocessSuccess(ServerConversation.fromJson(jsonDecode(response.body) as Map<String, dynamic>));
++      } catch (e) {
++        Logger.debug('reProcessConversationServer decode failed: ${e.runtimeType}');
++        return const ReprocessFailed(statusCode: 200);
++      }
++    case 409:
++      // 409 is busy only with the structured `conversation_processing_in_progress` detail. The same
++      // route answers 409 with a string detail when the selected app is disabled or not enabled:
++      // that is the template failing, not the conversation being busy.
++      return _reprocessDetailCode(response.body) == 'conversation_processing_in_progress'
++          ? const ReprocessBusy()
++          : const ReprocessFailed(statusCode: 409);
++    case 429:
++      final seconds = int.tryParse(response.headers['retry-after']?.trim() ?? '');
++      return ReprocessRateLimited(retryAfter: seconds == null || seconds < 0 ? null : Duration(seconds: seconds));
++    default:
++      return ReprocessFailed(statusCode: response.statusCode);
++  }
++}
++
++/// The `detail.code` of an error body (`{"detail": {"code": ..., "message": ...}}`), if any.
++String? _reprocessDetailCode(String body) {
++  try {
++    final decoded = jsonDecode(body);
++    final detail = decoded is Map ? decoded['detail'] : null;
++    final code = detail is Map ? detail['code'] : null;
++    return code is String ? code : null;
++  } catch (_) {
++    return null;
+   }
+-  return null;
+ }
+ 
+ Future<bool> deleteConversationServer(String conversationId) async {
+diff --git a/app/lib/env/env.dart b/app/lib/env/env.dart
+index 650f5da594..ec9b0f3020 100644
+--- a/app/lib/env/env.dart
++++ b/app/lib/env/env.dart
+@@ -133,6 +133,15 @@ abstract class Env {
+     if (host == 'localhost' || host == 'host.docker.internal' || host == '::1') {
+       return true;
+     }
++    // A Tailscale MagicDNS name. It resolves into 100.64.0.0/10 — the same
++    // shared address space accepted below — so it is exactly as private as the
++    // literal address, and it is the better thing to configure: a tailnet
++    // address changes when a machine re-joins, the name does not. Matched on
++    // the full suffix so a host merely containing it ('ts.net.example.com')
++    // stays rejected.
++    if (host == 'ts.net' || host.endsWith('.ts.net')) {
++      return true;
++    }
+     final octets = host.split('.').map(int.tryParse).toList();
+     if (octets.length != 4 || octets.any((octet) => octet == null || octet < 0 || octet > 255)) {
+       return false;
+diff --git a/app/lib/l10n/app_en.arb b/app/lib/l10n/app_en.arb
+index b6f10a6cd0..97445ea24c 100644
+--- a/app/lib/l10n/app_en.arb
++++ b/app/lib/l10n/app_en.arb
+@@ -4525,6 +4525,26 @@
+     "@summarySectionSourcesTitle": {
+         "description": "Title of the sheet listing the transcript moments a summary section without a heading cites"
+     },
++    "summaryFailureBusy": "Omi is already working on this conversation. Try again in a moment.",
++    "@summaryFailureBusy": {
++        "description": "Error after asking to regenerate a summary while the server was already processing the conversation (HTTP 409)"
++    },
++    "summaryFailureRateLimited": "Too many summary requests for now. Try again in a few minutes.",
++    "@summaryFailureRateLimited": {
++        "description": "Error after asking to regenerate a summary when the server or the model provider limits requests (HTTP 429)"
++    },
++    "summaryFailureTimedOut": "Omi didn't answer within 5 minutes and may still be finishing. Reopen the conversation in a moment.",
++    "@summaryFailureTimedOut": {
++        "description": "Error when a summary regeneration got no answer within 5 minutes; the server may still complete it"
++    },
++    "summaryFailureTemplate": "The chosen summary template produced no summary. Try again or pick another one.",
++    "@summaryFailureTemplate": {
++        "description": "Error when the summary template the user picked returned nothing"
++    },
++    "summaryFailureEmpty": "Omi came back without a summary. Try again.",
++    "@summaryFailureEmpty": {
++        "description": "Error when a summary regeneration answered but without any summary"
++    },
+     "auto": "Auto",
+     "noSummaryForApp": "No summary available for this app. Try another app for better results.",
+     "tryAnotherApp": "Try Another App",
+diff --git a/app/lib/l10n/app_fr.arb b/app/lib/l10n/app_fr.arb
+index 32bcdea4f3..b0e35886b2 100644
+--- a/app/lib/l10n/app_fr.arb
++++ b/app/lib/l10n/app_fr.arb
+@@ -1193,6 +1193,11 @@
+     "quoteShowSources": "Afficher les sources",
+     "quoteJumpToTime": "Aller à {duration}",
+     "summarySectionSourcesTitle": "Sources",
++    "summaryFailureBusy": "Omi est déjà en train de traiter cette conversation. Réessayez dans un instant.",
++    "summaryFailureRateLimited": "Trop de demandes de résumé pour le moment. Réessayez dans quelques minutes.",
++    "summaryFailureTimedOut": "Omi n’a pas répondu en 5 minutes ; il est peut-être encore en train de finir. Rouvrez la conversation dans un moment.",
++    "summaryFailureTemplate": "Le modèle de résumé choisi n’a produit aucun résumé. Réessayez ou choisissez-en un autre.",
++    "summaryFailureEmpty": "Omi n’a renvoyé aucun résumé. Réessayez.",
+     "auto": "Automatique",
+     "noSummaryForApp": "Aucun résumé disponible pour cette application. Essayez une autre application pour de meilleurs résultats.",
+     "tryAnotherApp": "Essayer une autre application",
+diff --git a/app/lib/pages/conversation_detail/conversation_detail_provider.dart b/app/lib/pages/conversation_detail/conversation_detail_provider.dart
+index c582f0b5d4..65abb2f467 100644
+--- a/app/lib/pages/conversation_detail/conversation_detail_provider.dart
++++ b/app/lib/pages/conversation_detail/conversation_detail_provider.dart
+@@ -33,10 +33,62 @@ typedef SpeakerAssignmentCall = Future<bool> Function(String, List<String>,
+     {bool? isUser, String? personId, int? speakerId});
+ typedef ConversationReprocessCall = Future<ServerConversation?> Function(String,
+     {String? appId, bool requireSpeakerReceipt});
++
++/// The typed reprocess seam (repris d'Omi 922c9a86dc) : busy, rate limited, timed out and failed told apart.
++typedef ConversationReprocessResultCall = Future<ReprocessResult> Function(String,
++    {String? appId, bool requireSpeakerReceipt});
+ typedef ConversationDetailFetchCall = Future<ServerConversation?> Function(String);
+ typedef ConversationCorrectionCall = Future<ApiResult<ConversationCorrectionResult>> Function(String conversationId,
+     {required String id, required String text});
+ 
++/// Why the last summary request on a conversation produced no summary (repris d'Omi 922c9a86dc, avec deux cas
++/// du clone : [empty] et [timedOut]).
++enum SummaryFailureKind {
++  /// The chosen template ran but returned nothing (or the server would not run it).
++  template,
++
++  /// Omi's own summary came back without a summary (a 200 with an empty result).
++  empty,
++
++  /// Another writer was already processing the conversation (HTTP 409).
++  busy,
++
++  /// The hourly regenerate limit, or the model provider's (HTTP 429).
++  rateLimited,
++
++  /// No answer within [reprocessRequestTimeout]; the server may still finish.
++  timedOut,
++
++  /// Anything else.
++  generic,
++}
++
++/// The last failed summary request, scoped to the conversation it was for.
++@immutable
++class SummaryFailure {
++  const SummaryFailure({required this.conversationId, required this.kind, this.appId, this.retryAfter});
++
++  final String conversationId;
++  final SummaryFailureKind kind;
++
++  /// The template that was asked for; null for Omi's own summary.
++  final String? appId;
++
++  /// How long the server asked to wait, for [SummaryFailureKind.rateLimited].
++  final Duration? retryAfter;
++}
++
++/// Whether [conversation] carries the summary a reprocess asked for: the template's non-empty result when
++/// [appId] is set, otherwise a non-empty Omi overview (or any non-empty result).
++bool conversationHasRequestedSummary(ServerConversation conversation, String? appId) {
++  if (appId != null) {
++    return conversation.appResults.any((result) => result.appId == appId && result.content.trim().isNotEmpty);
++  }
++  return conversation.structured.overview.trim().isNotEmpty ||
++      conversation.structured.sections.any((section) => section.bodyMarkdown.trim().isNotEmpty) ||
++      conversation.appResults.any((result) => result.content.trim().isNotEmpty);
++}
++
+ /// Where the open conversation's full detail fetch stands. The page renders the list's copy first;
+ /// a tab with nothing to show yet uses this to say "loading" or "couldn't load" instead of blank.
+ enum ConversationDetailLoad { idle, loading, failed }
+@@ -47,17 +99,22 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
+   ConversationDetailProvider({
+     SpeakerAssignmentCall? assignSpeaker,
+     ConversationReprocessCall? reprocess,
++    ConversationReprocessResultCall? reprocessResult,
+     ConversationDetailFetchCall? fetchConversation,
+     SpeakerRejectionCall? rejectSpeaker,
+     ConversationCorrectionCall? correctSummary,
+   })  : _assignSpeaker = assignSpeaker ?? assignBulkConversationTranscriptSegments,
+         _rejectSpeaker = rejectSpeaker ?? rejectConversationSpeaker,
+-        _reprocess = reprocess ?? reProcessConversationServer,
++        _reprocess = reprocessResult ??
++            (reprocess == null
++                ? reprocessConversationResult
++                : (id, {appId, requireSpeakerReceipt = false}) async => ReprocessResult.fromConversation(
++                    await reprocess(id, appId: appId, requireSpeakerReceipt: requireSpeakerReceipt))),
+         _fetchConversation = fetchConversation ?? getConversationById,
+         _correctSummary = correctSummary ?? ConversationCorrectionsApi().correct;
+   final ConversationCorrectionCall _correctSummary;
+   final SpeakerAssignmentCall _assignSpeaker;
+-  final ConversationReprocessCall _reprocess;
++  final ConversationReprocessResultCall _reprocess;
+   final ConversationDetailFetchCall _fetchConversation;
+   final SpeakerRejectionCall _rejectSpeaker;
+   String? _speakerSummaryConversationId;
+@@ -1022,20 +1079,35 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
+     Logger.debug('_reProcessConversation with appId: $appId');
+     lastFailedReprocessConversationId = null;
+     lastFailedReprocessAppId = null;
++    _summaryFailure = null;
+     updateReprocessConversationLoadingState(true);
+     updateReprocessConversationId(conversation.id);
+     notifyInfo('REPROCESS_STARTED');
+     try {
+-      var updatedConversation = await _reprocess(target.id, appId: appId, requireSpeakerReceipt: requireSpeakerReceipt);
++      final result = await _reprocess(target.id, appId: appId, requireSpeakerReceipt: requireSpeakerReceipt);
+       if (_isDisposed) return false;
+-      PlatformManager.instance.analytics.reProcessConversation(conversation);
++      PlatformManager.instance.analytics.reProcessConversation(target);
+       updateReprocessConversationLoadingState(false);
+       updateReprocessConversationId('');
+-      if (updatedConversation == null) {
+-        lastFailedReprocessConversationId = target.id;
+-        lastFailedReprocessAppId = appId;
+-        notifyError('REPROCESS_FAILED');
+-        notifyListeners();
++      final updatedConversation = result.conversation;
++      // Repris d'Omi 922c9a86dc : a 200 without the summary that was asked for is a failure too (an older
++      // backend echoes the stale conversation when another writer holds the claim). Nothing on the page
++      // changes: the summary shown, the kept versions and the chosen one stay as they were.
++      if (updatedConversation == null || !conversationHasRequestedSummary(updatedConversation, appId)) {
++        _failReprocess(
++          target,
++          appId,
++          switch (result) {
++            ReprocessBusy() => SummaryFailureKind.busy,
++            ReprocessRateLimited() => SummaryFailureKind.rateLimited,
++            ReprocessFailed(timedOut: true) => SummaryFailureKind.timedOut,
++            ReprocessFailed(statusCode: null) => SummaryFailureKind.generic,
++            _ when appId != null => SummaryFailureKind.template,
++            ReprocessSuccess() => SummaryFailureKind.empty,
++            _ => SummaryFailureKind.generic,
++          },
++          retryAfter: result is ReprocessRateLimited ? result.retryAfter : null,
++        );
+         return false;
+       }
+ 
+@@ -1070,26 +1142,49 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
+       notifyListeners();
+       return true;
+     } catch (err, stacktrace) {
+-      print(err);
+-      var conversationReporting = PlatformManager.instance.analytics.getConversationEventProperties(conversation);
+-      await PlatformManager.instance.crashReporter.reportCrash(
+-        err,
+-        stacktrace,
+-        userAttributes: {
+-          'conversation_transcript_length': conversationReporting['transcript_length'].toString(),
+-          'conversation_transcript_word_count': conversationReporting['transcript_word_count'].toString(),
+-        },
+-      );
+-      lastFailedReprocessConversationId = target.id;
+-      lastFailedReprocessAppId = appId;
+-      notifyError('REPROCESS_FAILED');
+-      updateReprocessConversationLoadingState(false);
+-      updateReprocessConversationId('');
+-      notifyListeners();
++      Logger.debug('reprocessConversation failed: ${err.runtimeType}');
++      // Repris d'Omi 922c9a86dc : settle the page first; crash reporting is best effort and must never leave
++      // it loading.
++      if (!_isDisposed && loadingReprocessConversation && reprocessConversationId == target.id) {
++        updateReprocessConversationLoadingState(false);
++        updateReprocessConversationId('');
++        _failReprocess(target, appId, SummaryFailureKind.generic);
++      }
++      try {
++        final conversationReporting = PlatformManager.instance.analytics.getConversationEventProperties(target);
++        await PlatformManager.instance.crashReporter.reportCrash(
++          err,
++          stacktrace,
++          userAttributes: {
++            'conversation_transcript_length': conversationReporting['transcript_length'].toString(),
++            'conversation_transcript_word_count': conversationReporting['transcript_word_count'].toString(),
++          },
++        );
++      } catch (reportError) {
++        Logger.debug('reprocess crash report failed: ${reportError.runtimeType}');
++      }
+       return false;
+     }
+   }
+ 
++  SummaryFailure? _summaryFailure;
++
++  /// Why the open conversation's last summary request produced nothing, until the next request starts.
++  /// Null for any other conversation.
++  SummaryFailure? get summaryFailure {
++    final failure = _summaryFailure;
++    if (failure == null || failure.conversationId != conversationOrNull?.id) return null;
++    return failure;
++  }
++
++  void _failReprocess(ServerConversation target, String? appId, SummaryFailureKind kind, {Duration? retryAfter}) {
++    lastFailedReprocessConversationId = target.id;
++    lastFailedReprocessAppId = appId;
++    _summaryFailure = SummaryFailure(conversationId: target.id, kind: kind, appId: appId, retryAfter: retryAfter);
++    notifyError('REPROCESS_FAILED');
++    notifyListeners();
++  }
++
+   /// Returns the explicit source and body used by every summary surface.
+   ///
+   /// Clone local : le résumé choisi dans le menu des résumés quand il y en a un, sinon le résumé actuel.
+diff --git a/app/lib/pages/conversation_detail/page.dart b/app/lib/pages/conversation_detail/page.dart
+index fe5817c887..82e940ed3c 100644
+--- a/app/lib/pages/conversation_detail/page.dart
++++ b/app/lib/pages/conversation_detail/page.dart
+@@ -39,6 +39,7 @@ import 'package:omi/widgets/conversation_bottom_bar.dart';
+ import 'package:omi/widgets/extensions/string.dart';
+ import 'conversation_detail_provider.dart';
+ import 'conversation_summary_selection.dart';
++import 'summary_failure_message.dart';
+ import 'share.dart';
+ import 'test_prompts.dart';
+ import 'widgets/audio_download_progress_sheet.dart';
+@@ -1086,15 +1087,25 @@ class ConversationDetailPageState extends State<ConversationDetailPage>
+             final failedId = detailProvider.lastFailedReprocessConversationId;
+             if (failedId == null || failedId != detailProvider.conversationOrNull?.id) break;
+             final appId = detailProvider.lastFailedReprocessAppId;
++            // Clone local (repris d'Omi 922c9a86dc) : un message qui dit ce qui s'est passé. Réessayer n'est
++            // proposé que là où un nouvel essai a une chance (pas pendant un traitement en cours, ni sous une
++            // limite, ni quand Omi est peut-être encore en train de finir).
++            final kind = detailProvider.summaryFailure?.kind ?? SummaryFailureKind.generic;
++            final offersRetry = switch (kind) {
++              SummaryFailureKind.busy || SummaryFailureKind.rateLimited || SummaryFailureKind.timedOut => false,
++              _ => true,
++            };
+             OmiFeedback.error(
+               context,
+-              context.l10n.errorProcessingConversation,
+-              actionLabel: context.l10n.tryAgain,
+-              onAction: () {
+-                if (detailProvider.conversationOrNull?.id == failedId) {
+-                  detailProvider.reprocessConversation(appId: appId);
+-                }
+-              },
++              summaryFailureMessage(context.l10n, kind),
++              actionLabel: offersRetry ? context.l10n.tryAgain : null,
++              onAction: !offersRetry
++                  ? null
++                  : () {
++                      if (detailProvider.conversationOrNull?.id == failedId) {
++                        detailProvider.reprocessConversation(appId: appId);
++                      }
++                    },
+             );
+           case 'SEGMENT_EDIT_FAILED':
+           case 'SUMMARY_EDIT_FAILED':
+diff --git a/app/lib/pages/conversation_detail/summary_failure_message.dart b/app/lib/pages/conversation_detail/summary_failure_message.dart
+new file mode 100644
+index 0000000000..50e2f43f7f
+--- /dev/null
++++ b/app/lib/pages/conversation_detail/summary_failure_message.dart
+@@ -0,0 +1,12 @@
++import 'package:omi/l10n/app_localizations.dart';
++import 'package:omi/pages/conversation_detail/conversation_detail_provider.dart';
++
++/// Clone local (repris d'Omi 922c9a86dc) : ce que dit la page quand une régénération du résumé n'a rien donné.
++String summaryFailureMessage(AppLocalizations l10n, SummaryFailureKind kind) => switch (kind) {
++      SummaryFailureKind.busy => l10n.summaryFailureBusy,
++      SummaryFailureKind.rateLimited => l10n.summaryFailureRateLimited,
++      SummaryFailureKind.timedOut => l10n.summaryFailureTimedOut,
++      SummaryFailureKind.template => l10n.summaryFailureTemplate,
++      SummaryFailureKind.empty => l10n.summaryFailureEmpty,
++      SummaryFailureKind.generic => l10n.errorProcessingConversation,
++    };
+diff --git a/app/test/unit/env_test.dart b/app/test/unit/env_test.dart
+index 34913d2b2b..202414640a 100644
+--- a/app/test/unit/env_test.dart
++++ b/app/test/unit/env_test.dart
+@@ -136,6 +136,10 @@ void main() {
+         'https://api.omi.dev/',
+         'https://staging.example.test/',
+         'https://arbitrary.example.test/',
++        // Widening local_dev must not widen the production family. A tailnet
++        // is private to its owner, which is the whole reason local_dev takes
++        // one -- and the whole reason a shipped build must not.
++        'https://device.tailnet-abc123.ts.net/',
+       ]) {
+         expect(
+           () => validateApplicationStartupRouting(environment: Environment.prod, configuredApiBaseUrl: endpoint),
+@@ -160,6 +164,11 @@ void main() {
+         'http://100.64.0.1:8000/',
+         'http://100.105.2.5:8000/',
+         'http://100.127.255.254:8000/',
++        // A MagicDNS name resolves into that same /10. Accepted over https
++        // too, because `tailscale serve` terminates TLS in front of the
++        // harness.
++        'http://device.tailnet-abc123.ts.net:8000/',
++        'https://device.tailnet-abc123.ts.net/',
+       ]) {
+         Env.validateStartupRouting(
+           productionFamily: false,
+@@ -178,6 +187,11 @@ void main() {
+         'http://100.63.255.255:8000/',
+         'http://100.128.0.1:8000/',
+         'http://8.8.8.8:8000/',
++        // The suffix must be the real one. Matched loosely, a host merely
++        // containing it would pass, and everything to the right of an
++        // attacker's own domain is theirs to choose.
++        'https://ts.net.example.com/',
++        'https://notts.net/',
+       ]) {
+         expect(
+           () => Env.validateStartupRouting(
+diff --git a/app/test/unit/reprocess_reliability_test.dart b/app/test/unit/reprocess_reliability_test.dart
+new file mode 100644
+index 0000000000..de69b72dd1
+--- /dev/null
++++ b/app/test/unit/reprocess_reliability_test.dart
+@@ -0,0 +1,264 @@
++// Clone local : fiabilité de la régénération du résumé (0013, repris d'Omi 922c9a86dc hors drapeau et du côté
++// client de c985d982de) — un seul envoi, 320 s au plus (le serveur accorde 300 s), une réponse 200 sans le résumé demandé est un échec,
++// et les versions gardées (0007) comme la relance « app seule » restent intactes.
++import 'dart:convert';
++
++import 'package:flutter/material.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:http/http.dart' as http;
++import 'package:shared_preferences/shared_preferences.dart';
++
++import 'package:omi/backend/http/api/conversations.dart';
++import 'package:omi/backend/preferences.dart';
++import 'package:omi/backend/schema/conversation.dart';
++import 'package:omi/backend/schema/structured.dart';
++import 'package:omi/backend/schema/summary_version.dart';
++import 'package:omi/env/env.dart';
++import 'package:omi/pages/conversation_detail/conversation_detail_provider.dart';
++import 'package:omi/pages/conversation_detail/summary_failure_message.dart';
++import 'package:omi/l10n/app_localizations.dart';
++import 'package:omi/providers/conversation_provider.dart';
++
++Map<String, dynamic> _wire({String overview = 'Résumé régénéré.', List<Map<String, dynamic>> apps = const []}) => {
++      'id': 'c1',
++      'created_at': '2026-10-19T09:00:00Z',
++      'started_at': '2026-10-19T09:00:00Z',
++      'finished_at': '2026-10-19T09:30:00Z',
++      'structured': {'title': 'Point devis', 'overview': overview, 'emoji': '🧠', 'category': 'other'},
++      'transcript_segments': [],
++      'apps_results': apps,
++      'status': 'completed',
++    };
++
++ServerConversation _conversation({
++  String overview = 'Ancien résumé.',
++  List<AppResponse> apps = const [],
++  List<SummaryVersion> history = const [],
++}) =>
++    ServerConversation(
++      id: 'c1',
++      createdAt: DateTime.utc(2026, 10, 19, 9),
++      structured: Structured('Point devis', overview),
++      appResults: apps,
++      summaryHistory: history,
++      status: ConversationStatus.completed,
++    );
++
++({ConversationDetailProvider detail, List<String> errors}) _detail(
++  ServerConversation conversation,
++  Future<ReprocessResult> Function(String id, String? appId) reprocess,
++) {
++  final detail = ConversationDetailProvider(
++    reprocessResult: (id, {appId, requireSpeakerReceipt = false}) => reprocess(id, appId),
++  )
++    ..selectedDate = conversationLocalDayKey(conversation.createdAt)
++    ..setCachedConversation(conversation);
++  final errors = <String>[];
++  detail.addListener(() {
++    if (detail.error case final String message? when message.isNotEmpty) errors.add(message);
++  });
++  return (detail: detail, errors: errors);
++}
++
++http.Response _json(Object body, int status, {Map<String, String> headers = const {}}) => http.Response.bytes(
++      utf8.encode(jsonEncode(body)),
++      status,
++      headers: {'content-type': 'application/json; charset=utf-8', ...headers},
++    );
++
++void main() {
++  setUp(() async {
++    SharedPreferences.setMockInitialValues({});
++    await SharedPreferencesUtil.init();
++    Env.overrideApiBaseUrl('https://omi.test.invalid/');
++  });
++  tearDown(Env.clearApiBaseUrlOverrideForTesting);
++
++  group('envoi', () {
++    test('the POST is sent once, with a 320 s limit (past the server\'s 300 s) and no automatic retry', () async {
++      final calls = <(String, Duration, int)>[];
++      final result = await reprocessConversationResult(
++        'c1',
++        appId: 'meeting-notes',
++        send: (url, {required timeout, required retries}) async {
++          calls.add((url, timeout, retries));
++          return http.Response('{"detail":"boom"}', 500);
++        },
++      );
++      expect(calls, [
++        ('https://omi.test.invalid/v1/conversations/c1/reprocess?app_id=meeting-notes', reprocessRequestTimeout, 0)
++      ]);
++      expect(reprocessRequestTimeout, const Duration(seconds: 320));
++      expect(reprocessRequestTimeout, greaterThan(const Duration(seconds: 300)));
++      expect(result, isA<ReprocessFailed>().having((r) => r.statusCode, 'statusCode', 500));
++    });
++
++    test('no answer: quickly is a transport failure, after the full 320 s it timed out', () async {
++      var clock = DateTime.utc(2026, 10, 19, 9);
++      Future<ReprocessResult> run(Duration wait) => reprocessConversationResult(
++            'c1',
++            now: () => clock,
++            send: (url, {required timeout, required retries}) async {
++              clock = clock.add(wait);
++              return null;
++            },
++          );
++      expect(
++          await run(const Duration(seconds: 2)), isA<ReprocessFailed>().having((r) => r.timedOut, 'timedOut', false));
++      expect(
++          await run(const Duration(seconds: 320)), isA<ReprocessFailed>().having((r) => r.timedOut, 'timedOut', true));
++    });
++
++    test('responses map to success, busy, rate limited or failed', () {
++      expect(reprocessResultFromResponse(_json(_wire(), 200)), isA<ReprocessSuccess>());
++      expect(
++        reprocessResultFromResponse(_json(_wire(), 200), requireSpeakerReceipt: true),
++        isA<ReprocessFailed>().having((r) => r.statusCode, 'statusCode', 200),
++      );
++      expect(
++        reprocessResultFromResponse(
++          _json(_wire(), 200, headers: {'x-omi-speaker-receipt-summary': '1'}),
++          requireSpeakerReceipt: true,
++        ),
++        isA<ReprocessSuccess>(),
++      );
++      expect(reprocessResultFromResponse(http.Response('pas du json', 200)), isA<ReprocessFailed>());
++      expect(
++        reprocessResultFromResponse(http.Response(
++            jsonEncode({
++              'detail': {'code': 'conversation_processing_in_progress', 'message': 'busy'}
++            }),
++            409)),
++        isA<ReprocessBusy>(),
++      );
++      expect(
++        reprocessResultFromResponse(http.Response(jsonEncode({'detail': 'App is disabled'}), 409)),
++        isA<ReprocessFailed>().having((r) => r.statusCode, 'statusCode', 409),
++      );
++      expect(
++        reprocessResultFromResponse(http.Response('{}', 429, headers: {'retry-after': '120'})),
++        isA<ReprocessRateLimited>().having((r) => r.retryAfter, 'retryAfter', const Duration(minutes: 2)),
++      );
++      expect(
++        reprocessResultFromResponse(http.Response('{}', 502)),
++        isA<ReprocessFailed>().having((r) => r.statusCode, 'statusCode', 502),
++      );
++    });
++
++    test('list rows keep their "conversation or nothing" contract', () async {
++      // The adapter used by older seams.
++      expect(ReprocessResult.fromConversation(null), isA<ReprocessFailed>());
++      expect(ReprocessResult.fromConversation(_conversation()).conversation?.id, 'c1');
++    });
++  });
++
++  group('page de la conversation', () {
++    test('a 200 without any summary is a failure that changes nothing', () async {
++      final h = _detail(_conversation(), (id, appId) async => ReprocessSuccess(_conversation(overview: '')));
++      expect(await h.detail.reprocessConversation(), isFalse);
++      expect(h.detail.summaryFailure?.kind, SummaryFailureKind.empty);
++      expect(h.detail.conversation.structured.overview, 'Ancien résumé.');
++      expect(h.detail.loadingReprocessConversation, isFalse);
++      expect(h.detail.lastFailedReprocessConversationId, 'c1');
++      expect(h.errors, contains('REPROCESS_FAILED'));
++      h.detail.dispose();
++    });
++
++    test('a template that came back without its result is a template failure', () async {
++      final h = _detail(
++        _conversation(),
++        (id, appId) async =>
++            ReprocessSuccess(_conversation(overview: 'Résumé', apps: [AppResponse('', appId: 'other')])),
++      );
++      expect(await h.detail.reprocessConversation(appId: 'meeting-notes'), isFalse);
++      expect(h.detail.summaryFailure?.kind, SummaryFailureKind.template);
++      expect(h.detail.summaryFailure?.appId, 'meeting-notes');
++      expect(h.detail.lastFailedReprocessAppId, 'meeting-notes');
++      h.detail.dispose();
++    });
++
++    test('busy, rate limited, timed out and transport failures are told apart', () async {
++      final cases = <ReprocessResult, SummaryFailureKind>{
++        const ReprocessBusy(): SummaryFailureKind.busy,
++        const ReprocessRateLimited(retryAfter: Duration(minutes: 5)): SummaryFailureKind.rateLimited,
++        const ReprocessFailed(timedOut: true): SummaryFailureKind.timedOut,
++        const ReprocessFailed(): SummaryFailureKind.generic,
++        const ReprocessFailed(statusCode: 500): SummaryFailureKind.generic,
++      };
++      for (final MapEntry(key: result, value: kind) in cases.entries) {
++        final h = _detail(_conversation(), (id, appId) async => result);
++        expect(await h.detail.reprocessConversation(), isFalse);
++        expect(h.detail.summaryFailure?.kind, kind, reason: '$result');
++        h.detail.dispose();
++      }
++      final template = _detail(_conversation(), (id, appId) async => const ReprocessFailed(statusCode: 500));
++      expect(await template.detail.reprocessConversation(appId: 'meeting-notes'), isFalse);
++      expect(template.detail.summaryFailure?.kind, SummaryFailureKind.template);
++      template.detail.dispose();
++      final limited =
++          _detail(_conversation(), (id, appId) async => const ReprocessRateLimited(retryAfter: Duration(minutes: 5)));
++      await limited.detail.reprocessConversation();
++      expect(limited.detail.summaryFailure?.retryAfter, const Duration(minutes: 5));
++      limited.detail.dispose();
++    });
++
++    test('a seam that throws settles the page as a plain failure', () async {
++      final h = _detail(_conversation(), (id, appId) async => throw StateError('synthetic'));
++      expect(await h.detail.reprocessConversation(), isFalse);
++      expect(h.detail.loadingReprocessConversation, isFalse);
++      expect(h.detail.summaryFailure?.kind, SummaryFailureKind.generic);
++      expect(h.errors, contains('REPROCESS_FAILED'));
++      h.detail.dispose();
++    });
++
++    test('« app seule » : the chosen template\'s result is a success and is shown', () async {
++      final h = _detail(
++        _conversation(),
++        (id, appId) async => ReprocessSuccess(_conversation(apps: [AppResponse('Compte rendu.', appId: appId)])),
++      );
++      expect(await h.detail.reprocessConversation(appId: 'meeting-notes'), isTrue);
++      expect(h.detail.summaryFailure, isNull);
++      final selection = h.detail.getSummarySelection();
++      expect(selection.isApp, isTrue);
++      expect(selection.content, 'Compte rendu.');
++      h.detail.dispose();
++    });
++
++    test('a failure keeps the kept version being read (0007); a success shows the new summary', () async {
++      final kept = SummaryVersion(
++        id: 'v1',
++        kind: 'omi',
++        content: 'Version de la veille.',
++        recordedAt: DateTime.utc(2026, 10, 18, 10),
++      );
++      var answer = ReprocessSuccess(_conversation(overview: '', history: [kept])) as ReprocessResult;
++      final h = _detail(_conversation(history: [kept]), (id, appId) async => answer);
++      final choice = h.detail.summaryChoices().firstWhere((c) => !c.isCurrent);
++      h.detail.selectSummaryChoice(choice);
++      expect(h.detail.getSummarySelection().content, 'Version de la veille.');
++
++      expect(await h.detail.reprocessConversation(), isFalse);
++      expect(h.detail.getSummarySelection().content, 'Version de la veille.');
++      expect(h.detail.summaryChoices().where((c) => !c.isCurrent), hasLength(1));
++
++      answer = ReprocessSuccess(_conversation(overview: 'Nouveau résumé.', history: [kept]));
++      expect(await h.detail.reprocessConversation(), isTrue);
++      expect(h.detail.summaryFailure, isNull);
++      expect(h.detail.getSummarySelection().content, 'Nouveau résumé.');
++      expect(h.detail.summaryChoices().map((c) => c.content), contains('Version de la veille.'));
++      h.detail.dispose();
++    });
++  });
++
++  test('each failure has its own message, in French and English', () {
++    for (final locale in const [Locale('fr'), Locale('en')]) {
++      final l10n = lookupAppLocalizations(locale);
++      final messages = {for (final kind in SummaryFailureKind.values) kind: summaryFailureMessage(l10n, kind)};
++      expect(messages.values.toSet(), hasLength(SummaryFailureKind.values.length), reason: '$locale');
++      expect(messages[SummaryFailureKind.generic], l10n.errorProcessingConversation);
++    }
++    final fr = lookupAppLocalizations(const Locale('fr'));
++    expect(summaryFailureMessage(fr, SummaryFailureKind.busy), startsWith('Omi est déjà en train'));
++    expect(summaryFailureMessage(fr, SummaryFailureKind.timedOut), contains('5 minutes'));
++  });
++}
+diff --git a/app/test/widgets/reprocess_failure_message_test.dart b/app/test/widgets/reprocess_failure_message_test.dart
+new file mode 100644
+index 0000000000..b1a07686ed
+--- /dev/null
++++ b/app/test/widgets/reprocess_failure_message_test.dart
+@@ -0,0 +1,152 @@
++// Clone local : la page dit clairement pourquoi une régénération du résumé n'a rien donné (0013), en français,
++// et ne propose « Réessayer » que là où un nouvel essai a une chance.
++import 'dart:async';
++
++import 'package:flutter/material.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:provider/provider.dart';
++import 'package:shared_preferences/shared_preferences.dart';
++
++import 'package:omi/backend/http/api/conversations.dart';
++import 'package:omi/backend/preferences.dart';
++import 'package:omi/backend/schema/conversation.dart';
++import 'package:omi/backend/schema/structured.dart';
++import 'package:omi/backend/schema/transcript_segment.dart';
++import 'package:omi/l10n/app_localizations.dart';
++import 'package:omi/pages/conversation_detail/conversation_detail_provider.dart';
++import 'package:omi/pages/conversation_detail/page.dart';
++import 'package:omi/providers/app_provider.dart';
++import 'package:omi/providers/connectivity_provider.dart';
++import 'package:omi/providers/conversation_provider.dart';
++import 'package:omi/providers/folder_provider.dart';
++import 'package:omi/providers/integration_provider.dart';
++import 'package:omi/providers/people_provider.dart';
++import 'package:omi/ui/ui.dart';
++import 'package:omi/utils/platform/platform_manager.dart';
++import 'package:omi/widgets/conversation_bottom_bar.dart';
++
++ServerConversation _conversation({String overview = 'Ancien résumé.'}) => ServerConversation(
++      id: 'c-msg',
++      createdAt: DateTime.utc(2026, 10, 19, 9),
++      structured: Structured('Point devis', overview),
++      status: ConversationStatus.completed,
++      transcriptSegments: [
++        TranscriptSegment(
++          id: 's1',
++          text: 'On signe vendredi.',
++          speaker: 'SPEAKER_00',
++          isUser: false,
++          personId: null,
++          start: 0,
++          end: 3,
++          translations: [],
++        ),
++      ],
++    );
++
++/// [answer] lands one frame after the request starts, as a real request does (after the progress toast).
++Future<ConversationDetailProvider> _pumpPage(WidgetTester tester, ReprocessResult Function() answer) async {
++  PlatformManager.initializeForLocalHarness();
++  final initial = _conversation();
++  final details = Completer<ServerConversation?>()..complete(initial);
++  final conversations = ConversationProvider(isSignedIn: () => false);
++  conversations.conversations = [initial];
++  conversations.groupedConversations = {
++    conversationLocalDayKey(initial.createdAt): [initial],
++  };
++  conversations.conversationDetailsFetcherOverride = (_) => details.future;
++  final detail = ConversationDetailProvider(
++    reprocessResult: (id, {appId, requireSpeakerReceipt = false}) async {
++      await Future<void>.delayed(const Duration(milliseconds: 100));
++      return answer();
++    },
++  );
++  final apps = AppProvider();
++  detail.setProviders(apps, conversations);
++  addTearDown(() {
++    detail.dispose();
++    conversations.dispose();
++    apps.dispose();
++  });
++  await tester.pumpWidget(MaterialApp(
++    theme: buildOmiTheme(brightness: Brightness.light),
++    localizationsDelegates: AppLocalizations.localizationsDelegates,
++    supportedLocales: AppLocalizations.supportedLocales,
++    locale: const Locale('fr'),
++    home: MultiProvider(
++      providers: [
++        ChangeNotifierProvider<ConversationProvider>.value(value: conversations),
++        ChangeNotifierProvider<ConversationDetailProvider>.value(value: detail),
++        ChangeNotifierProvider<AppProvider>.value(value: apps),
++        ChangeNotifierProvider(create: (_) => FolderProvider(foldersFetcher: () async => [])),
++        ChangeNotifierProvider(create: (_) => ConnectivityProvider()),
++        ChangeNotifierProvider(create: (_) => PeopleProvider()),
++        ChangeNotifierProvider(
++          create: (_) => IntegrationProvider(
++            fetchStatus: (_) async => null,
++            saveStatus: (_, __) async => false,
++            deleteStatus: (_) async => false,
++            persistPref: (_, __) async {},
++          ),
++        ),
++      ],
++      child: ConversationDetailPage(conversation: initial, initialTab: ConversationTab.summary),
++    ),
++  ));
++  await tester.pump();
++  await tester.pump(const Duration(milliseconds: 300));
++  return detail;
++}
++
++void main() {
++  setUp(() async {
++    SharedPreferences.setMockInitialValues({'has_first_conversation': true});
++    await SharedPreferencesUtil.init();
++    OmiColors.active = OmiPalette.light;
++  });
++
++  testWidgets('Omi déjà occupé : le dire, sans Réessayer', (tester) async {
++    final detail = await _pumpPage(tester, () => const ReprocessBusy());
++    unawaited(detail.reprocessConversation());
++    await tester.pump();
++    await tester.pump(const Duration(milliseconds: 300));
++    await tester.pump();
++    expect(
++        find.text('Omi est déjà en train de traiter cette conversation. Réessayez dans un instant.'), findsOneWidget);
++    expect(find.text('Réessayer'), findsNothing);
++    expect(find.text('Ancien résumé.', findRichText: true), findsOneWidget);
++    expect(tester.takeException(), isNull);
++  });
++
++  testWidgets('une réponse sans résumé : le dire, et Réessayer relance une seule fois', (tester) async {
++    var calls = 0;
++    final detail = await _pumpPage(tester, () {
++      calls++;
++      return ReprocessSuccess(_conversation(overview: ''));
++    });
++    unawaited(detail.reprocessConversation());
++    await tester.pump();
++    await tester.pump(const Duration(milliseconds: 300));
++    await tester.pump();
++    expect(calls, 1);
++    expect(find.text('Omi n’a renvoyé aucun résumé. Réessayez.'), findsOneWidget);
++    expect(find.text('Ancien résumé.', findRichText: true), findsOneWidget);
++    tester.widget<SnackBarAction>(find.widgetWithText(SnackBarAction, 'Réessayer')).onPressed();
++    await tester.pump();
++    await tester.pump(const Duration(milliseconds: 300));
++    await tester.pump();
++    expect(calls, 2);
++    expect(tester.takeException(), isNull);
++  });
++
++  testWidgets('pas de réponse en 5 minutes : le dire, sans relancer un doublon', (tester) async {
++    final detail = await _pumpPage(tester, () => const ReprocessFailed(timedOut: true));
++    unawaited(detail.reprocessConversation());
++    await tester.pump();
++    await tester.pump(const Duration(milliseconds: 300));
++    await tester.pump();
++    expect(find.textContaining('n’a pas répondu en 5 minutes'), findsOneWidget);
++    expect(find.text('Réessayer'), findsNothing);
++    expect(tester.takeException(), isNull);
++  });
++}
