@@ -154,7 +154,10 @@ jobs:
         run: |
           set -euo pipefail
           PROV="$(scripts/build_provenance_dart_defines.sh)"
+          # 2026-10-21 : un numéro de build par compilation (AAMMJJHHMM, heure UTC) : avec toujours 1.0.543 (992),
+          # SideStore / iOS pouvaient garder l'app déjà installée, et rien ne montrait laquelle tournait
           flutter build ios --release --no-codesign --flavor dev \
+            --build-number="$(date -u +%y%m%d%H%M)" \
             --dart-define=OMI_APP_PROFILE=local_dev \
             --dart-define=OMI_API_BASE_URL=http://${OMI_DEV_HOST}:8000/ \
             --dart-define=OMI_FIREBASE_AUTH_EMULATOR_HOST=${OMI_DEV_HOST} \
@@ -173,6 +176,7 @@ jobs:
           rm -rf Payload && mkdir Payload && cp -R "$APP" Payload/
           zip -qry "$GITHUB_WORKSPACE/Omi-sidestore.ipa" Payload
           /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP/Info.plist"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$APP/Info.plist"
           ls -la "$GITHUB_WORKSPACE/Omi-sidestore.ipa"
 
       - name: Publication de l'IPA
