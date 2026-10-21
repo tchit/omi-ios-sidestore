@@ -1,0 +1,1935 @@
+diff --git a/app/lib/backend/http/api/relecture.dart b/app/lib/backend/http/api/relecture.dart
+index 73f121bbfd..73f0f4cc84 100644
+--- a/app/lib/backend/http/api/relecture.dart
++++ b/app/lib/backend/http/api/relecture.dart
+@@ -70,9 +70,17 @@ class RelectureApi {
+   Future<RelectureOutcome<RelectureChangement?>> undo(String changementId) =>
+       _post('$_root/changements/${Uri.encodeComponent(changementId)}/annuler', RelectureChangement.tryParseEnvelope);
+ 
++  /// Valide d'un seul geste les tâches qu'Omi pense faites : [accept] sont cochées, [ignore] restent à faire (Omi
++  /// ne les reproposera pas pour les mêmes raisons). Rend UN changement groupé, annulable d'un coup.
++  Future<RelectureOutcome<RelectureValidation>> validateTachesFaites({
++    required List<String> accept,
++    required List<String> ignore,
++  }) =>
++      _post('$_root/taches-faites/valider', RelectureValidation.parse, body: {'accepter': accept, 'ignorer': ignore});
++
+   /// Un POST dont le refus (409) garde le message du serveur : [executeApi] ne rend que le code, la réponse est
+   /// donc lue au passage. Le chemin de production reste celui d'[executeApi] (même envoi, même 401).
+-  Future<RelectureOutcome<T>> _post<T>(String path, T Function(Object? json) read) async {
++  Future<RelectureOutcome<T>> _post<T>(String path, T Function(Object? json) read, {Object body = const {}}) async {
+     http.Response? answer;
+     AuthTokenResult? refresh;
+     final result = await executeApi<T>(
+@@ -80,7 +88,7 @@ class RelectureApi {
+         url: _url(path),
+         method: 'POST',
+         headers: const {'Content-Type': 'application/json'},
+-        body: '{}',
++        body: jsonEncode(body),
+       ),
+       send: (request) async {
+         final custom = send;
+diff --git a/app/lib/backend/schema/relecture.dart b/app/lib/backend/schema/relecture.dart
+index cab93fac9a..20c36f82c6 100644
+--- a/app/lib/backend/schema/relecture.dart
++++ b/app/lib/backend/schema/relecture.dart
+@@ -13,6 +13,15 @@ import 'package:omi/backend/schema/insight_dossier.dart' show uniqueById;
+ /// Les types de proposition connus ; un autre reste affiché, avec une étiquette neutre.
+ const relectureTypes = ['orthographe', 'tache_doublon', 'tache_terminee', 'souvenir_doublon', 'personne_doublon'];
+ 
++/// Une tâche qu'Omi pense faite : elle reste dans les tâches, « cochée sans être cachée », et se valide avec les
++/// autres d'un seul geste.
++const relectureTacheTerminee = 'tache_terminee';
++
++/// Pour une tâche pensée faite : `faite` (une citation le montre, `extraits[0]`), `passee` (son moment est passé,
++/// voir l'explication). Une autre valeur, ou rien, reste lisible (« Semble faite »).
++const relectureNatureFaite = 'faite';
++const relectureNaturePassee = 'passee';
++
+ /// Ce qu'une proposition ou un changement touche : une conversation, une tâche, un souvenir, une personne.
+ class RelectureCible {
+   const RelectureCible({required this.type, required this.id, this.titre});
+@@ -60,6 +69,7 @@ class RelectureProposition {
+     this.extraits = const [],
+     this.cibles = const [],
+     this.cree,
++    this.nature,
+   });
+ 
+   final String id;
+@@ -67,6 +77,9 @@ class RelectureProposition {
+   final String? titre;
+   final String? explication;
+ 
++  /// Facultatif ; pour [relectureTacheTerminee] : [relectureNatureFaite] ou [relectureNaturePassee].
++  final String? nature;
++
+   /// Le texte tel qu'il est, et tel qu'il serait une fois la proposition acceptée (l'un ou l'autre peut manquer).
+   final String? avant;
+   final String? apres;
+@@ -74,6 +87,11 @@ class RelectureProposition {
+   final List<RelectureCible> cibles;
+   final DateTime? cree;
+ 
++  bool get tacheTerminee => type == relectureTacheTerminee;
++
++  /// La tâche visée (première cible de type `tache`), s'il y en a une.
++  RelectureCible? get tache => cibles.where((cible) => cible.type == 'tache').firstOrNull;
++
+   factory RelectureProposition.fromJson(Map<String, dynamic> json) {
+     final id = _string(json['id']);
+     if (id == null) throw const FormatException('Proposition sans id');
+@@ -87,6 +105,45 @@ class RelectureProposition {
+       extraits: _list(json['extraits'], RelectureExtrait.tryParse),
+       cibles: uniqueById(_list(json['cibles'], RelectureCible.tryParse), (cible) => '${cible.type}/${cible.id}'),
+       cree: _date(json['cree']),
++      nature: _string(json['nature']),
++    );
++  }
++}
++
++/// Une proposition que le serveur n'a pas pu appliquer lors d'une validation groupée, et pourquoi.
++class RelectureRefus {
++  const RelectureRefus({required this.id, this.raison});
++
++  final String id;
++  final String? raison;
++
++  static RelectureRefus? tryParse(Object? json) {
++    if (json is! Map) return null;
++    final id = _string(json['id']);
++    if (id == null) return null;
++    return RelectureRefus(id: id, raison: _string(json['raison']));
++  }
++}
++
++/// La réponse de `POST …/taches-faites/valider` : UN changement groupé (annulable d'un coup), combien de
++/// propositions ont été acceptées et ignorées, et celles que le serveur a refusées. Un 200 illisible se lit quand
++/// même (compteurs inconnus : null) : c'est le code HTTP qui dit que c'est fait.
++class RelectureValidation {
++  const RelectureValidation({this.changement, this.acceptees, this.ignorees, this.refusees = const []});
++
++  final RelectureChangement? changement;
++  final int? acceptees;
++  final int? ignorees;
++  final List<RelectureRefus> refusees;
++
++  static RelectureValidation parse(Object? json) {
++    if (json is! Map) return const RelectureValidation();
++    int? count(Object? value) => value is num && value >= 0 ? value.toInt() : null;
++    return RelectureValidation(
++      changement: RelectureChangement.tryParseEnvelope(json),
++      acceptees: count(json['acceptees']),
++      ignorees: count(json['ignorees']),
++      refusees: uniqueById(_list(json['refusees'], RelectureRefus.tryParse), (refus) => refus.id),
+     );
+   }
+ }
+diff --git a/app/lib/l10n/app_en.arb b/app/lib/l10n/app_en.arb
+index 238f9fb607..903bf21f79 100644
+--- a/app/lib/l10n/app_en.arb
++++ b/app/lib/l10n/app_en.arb
+@@ -3549,6 +3549,103 @@
+     "@relectureNoChangesMessage": {
+         "description": "Overnight review: empty recent changes"
+     },
++    "tachesFaitesBar": "{count, plural, =1{Omi thinks one task is done} other{Omi thinks {count} tasks are done}}",
++    "@tachesFaitesBar": {
++        "description": "Tasks tab: bar at the top when Omi's overnight review thinks some open tasks are done",
++        "placeholders": {
++            "count": {
++                "type": "int"
++            }
++        }
++    },
++    "tachesFaitesReview": "Review",
++    "@tachesFaitesReview": {
++        "description": "Open the sheet to confirm the tasks Omi thinks are done"
++    },
++    "tachesFaitesMentionDone": "Omi: done?",
++    "@tachesFaitesMentionDone": {
++        "description": "Tasks tab: small note under a task Omi thinks is done (a quote shows it)"
++    },
++    "tachesFaitesMentionPast": "Omi: time passed?",
++    "@tachesFaitesMentionPast": {
++        "description": "Tasks tab: small note under a task whose time has passed"
++    },
++    "tachesFaitesMarkSemantics": "Omi thinks this task is done. Review",
++    "@tachesFaitesMarkSemantics": {
++        "description": "Screen reader label of the mark on a task Omi thinks is done"
++    },
++    "tachesFaitesSheetTitle": "Done tasks?",
++    "@tachesFaitesSheetTitle": {
++        "description": "Title of the sheet confirming the tasks Omi thinks are done"
++    },
++    "tachesFaitesSheetIntro": "Omi thinks these tasks are done. They are checked in advance: uncheck the ones still to do, then confirm.",
++    "@tachesFaitesSheetIntro": {
++        "description": "Sheet: explanation above the pre-checked tasks"
++    },
++    "tachesFaitesCheckAll": "Check All",
++    "@tachesFaitesCheckAll": {
++        "description": "Sheet: check every task"
++    },
++    "tachesFaitesUncheckAll": "Uncheck All",
++    "@tachesFaitesUncheckAll": {
++        "description": "Sheet: uncheck every task"
++    },
++    "tachesFaitesUncheckedNote": "Unchecked tasks stay to do; Omi won’t suggest them again for the same reasons.",
++    "@tachesFaitesUncheckedNote": {
++        "description": "Sheet: what happens to unchecked tasks"
++    },
++    "tachesFaitesValidate": "Confirm ({count})",
++    "@tachesFaitesValidate": {
++        "description": "Sheet: main button; count = checked tasks",
++        "placeholders": {
++            "count": {
++                "type": "int"
++            }
++        }
++    },
++    "tachesFaitesNatureDone": "Done",
++    "@tachesFaitesNatureDone": {
++        "description": "Why Omi thinks a task is done: a quote shows it"
++    },
++    "tachesFaitesNaturePast": "Time has passed",
++    "@tachesFaitesNaturePast": {
++        "description": "Why Omi thinks a task is done: its time has passed"
++    },
++    "tachesFaitesNatureOther": "Seems done",
++    "@tachesFaitesNatureOther": {
++        "description": "Why Omi thinks a task is done: another reason"
++    },
++    "tachesFaitesChecked": "{count, plural, =0{No task checked} =1{1 task checked} other{{count} tasks checked}}",
++    "@tachesFaitesChecked": {
++        "description": "Toast after confirming (with Undo)",
++        "placeholders": {
++            "count": {
++                "type": "int"
++            }
++        }
++    },
++    "tachesFaitesRefused": "{count, plural, =1{1 couldn’t be checked} other{{count} couldn’t be checked}}",
++    "@tachesFaitesRefused": {
++        "description": "Toast after confirming: tasks the server refused",
++        "placeholders": {
++            "count": {
++                "type": "int"
++            }
++        }
++    },
++    "tachesFaitesGroupTitle": "{count, plural, =1{1 task seems done} other{{count} tasks seem done}}",
++    "@tachesFaitesGroupTitle": {
++        "description": "To review: one card for all the tasks Omi thinks are done",
++        "placeholders": {
++            "count": {
++                "type": "int"
++            }
++        }
++    },
++    "tachesFaitesGroupMessage": "They stay in your tasks, checked by Omi until you agree: review them and confirm in one go.",
++    "@tachesFaitesGroupMessage": {
++        "description": "To review: what the done-tasks card is about"
++    },
+     "swipeTasksToIndent": "Swipe tasks to indent, drag between categories",
+     "@swipeTasksToIndent": {
+         "description": "Instructions for task management gestures"
+diff --git a/app/lib/l10n/app_fr.arb b/app/lib/l10n/app_fr.arb
+index 9fc475b0c8..46512e2bfe 100644
+--- a/app/lib/l10n/app_fr.arb
++++ b/app/lib/l10n/app_fr.arb
+@@ -915,6 +915,24 @@
+     "relectureNotUndoable": "Ne peut plus être annulé",
+     "relectureNoChangesTitle": "Aucun changement récent",
+     "relectureNoChangesMessage": "Ce que vous acceptez dans « À vérifier » apparaît ici, avec de quoi l’annuler.",
++    "tachesFaitesBar": "{count, plural, =1{Omi pense qu’une tâche est faite} other{Omi pense que {count} tâches sont faites}}",
++    "tachesFaitesReview": "Vérifier",
++    "tachesFaitesMentionDone": "Omi : faite ?",
++    "tachesFaitesMentionPast": "Omi : moment passé ?",
++    "tachesFaitesMarkSemantics": "Omi pense que cette tâche est faite. Vérifier",
++    "tachesFaitesSheetTitle": "Tâches faites ?",
++    "tachesFaitesSheetIntro": "Omi pense que ces tâches sont faites. Elles sont cochées d’avance : décochez celles qui restent à faire, puis validez.",
++    "tachesFaitesCheckAll": "Tout cocher",
++    "tachesFaitesUncheckAll": "Tout décocher",
++    "tachesFaitesUncheckedNote": "Les tâches décochées restent à faire ; Omi ne les reproposera pas pour les mêmes raisons.",
++    "tachesFaitesValidate": "Valider ({count})",
++    "tachesFaitesNatureDone": "Faite",
++    "tachesFaitesNaturePast": "Moment passé",
++    "tachesFaitesNatureOther": "Semble faite",
++    "tachesFaitesChecked": "{count, plural, =0{Aucune tâche cochée} =1{1 tâche cochée} other{{count} tâches cochées}}",
++    "tachesFaitesRefused": "{count, plural, =1{1 n’a pas pu être cochée} other{{count} n’ont pas pu être cochées}}",
++    "tachesFaitesGroupTitle": "{count, plural, =1{1 tâche semble faite} other{{count} tâches semblent faites}}",
++    "tachesFaitesGroupMessage": "Elles restent dans vos tâches, cochées par Omi en attendant votre accord : vérifiez-les et validez d’un seul geste.",
+     "swipeTasksToIndent": "Balayez les tâches pour indenter, faites glisser entre les catégories",
+     "create": "Créer",
+     "noTasksYet": "Aucune tâche pour l'instant",
+diff --git a/app/lib/main.dart b/app/lib/main.dart
+index e5ed1d81b2..274c7ccbac 100644
+--- a/app/lib/main.dart
++++ b/app/lib/main.dart
+@@ -83,6 +83,8 @@ import 'package:omi/providers/usage_provider.dart';
+ import 'package:omi/providers/user_provider.dart';
+ import 'package:omi/providers/voice_recorder_provider.dart';
+ import 'package:omi/providers/phone_call_provider.dart';
++import 'package:omi/backend/http/api/relecture.dart';
++import 'package:omi/pages/insights/relecture_controller.dart';
+ import 'package:omi/services/auth_service.dart';
+ import 'package:omi/ui/omi_theme.dart';
+ import 'package:omi/ui/omi_tokens.dart';
+@@ -681,6 +683,8 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
+         ChangeNotifierProvider(create: (context) => AppearanceProvider()),
+         ChangeNotifierProvider(create: (context) => AnnouncementProvider()),
+         ChangeNotifierProvider(lazy: true, create: (context) => PhoneCallProvider()),
++        // Clone local : la relecture de nuit, partagée par l'onglet Insights et l'onglet Tâches (0015).
++        ChangeNotifierProvider(lazy: true, create: (context) => RelectureController(api: RelectureApi())),
+       ],
+       builder: (context, child) {
+         final mode = context.watch<AppearanceProvider>().mode;
+diff --git a/app/lib/pages/action_items/action_items_page.dart b/app/lib/pages/action_items/action_items_page.dart
+index d8b9670169..d64fcfe14e 100644
+--- a/app/lib/pages/action_items/action_items_page.dart
++++ b/app/lib/pages/action_items/action_items_page.dart
+@@ -7,7 +7,10 @@ import 'package:pull_down_button/pull_down_button.dart';
+ import 'package:omi/backend/http/action_items_api_contract.dart';
+ import 'package:omi/backend/http/api_presentation.dart';
+ import 'package:omi/backend/preferences.dart';
++import 'package:omi/backend/schema/relecture.dart';
+ import 'package:omi/backend/schema/schema.dart';
++import 'package:omi/pages/insights/relecture_controller.dart';
++import 'package:omi/pages/insights/taches_faites.dart';
+ import 'package:omi/providers/action_items_provider.dart';
+ import 'package:omi/providers/goals_provider.dart';
+ import 'package:omi/providers/task_integration_provider.dart';
+@@ -57,6 +60,10 @@ class _ActionItemsPageState extends State<ActionItemsPage> with AutomaticKeepAli
+ 
+   bool _noDeadlineExpanded = true;
+ 
++  /// Clone local (0015) : tâche → proposition « tache_terminee » en attente. La tâche reste à sa place, cochée par
++  /// Omi sans être cachée, jusqu'à la validation groupée. Vide sans relecture (tests, serveur sans la route).
++  Map<String, RelectureProposition> _omiDone = const {};
++
+   // Search header lifecycle objects.
+   final TextEditingController _searchController = TextEditingController();
+   final FocusNode _searchFocusNode = FocusNode();
+@@ -93,9 +100,20 @@ class _ActionItemsPageState extends State<ActionItemsPage> with AutomaticKeepAli
+       if (!taskIntegrationProvider.hasLoaded && !taskIntegrationProvider.isLoading) {
+         taskIntegrationProvider.loadFromBackend();
+       }
++      // Clone local (0015) : les tâches qu'Omi pense faites.
++      Provider.of<RelectureController?>(context, listen: false)?.load();
+     });
+   }
+ 
++  /// Clone local (0015) : ouvre la validation groupée des tâches pensées faites, centrée sur [focusId] s'il est
++  /// donné.
++  void _openOmiDone({String? focusId}) {
++    final relecture = Provider.of<RelectureController?>(context, listen: false);
++    if (relecture == null) return;
++    _searchFocusNode.unfocus();
++    showTachesFaitesSheet(context, relecture, focusId: focusId);
++  }
++
+   void _loadTaskGoalLinks() {
+     final savedLinks = SharedPreferencesUtil().taskGoalLinks;
+     setState(() {
+@@ -432,6 +450,8 @@ class _ActionItemsPageState extends State<ActionItemsPage> with AutomaticKeepAli
+   @override
+   Widget build(BuildContext context) {
+     super.build(context);
++    final relecture = Provider.of<RelectureController?>(context);
++    _omiDone = relecture?.tachesFaitesParTache ?? const {};
+ 
+     return Consumer<ActionItemsProvider>(
+       builder: (context, provider, child) {
+@@ -453,7 +473,7 @@ class _ActionItemsPageState extends State<ActionItemsPage> with AutomaticKeepAli
+                 child: RefreshIndicator(
+                   onRefresh: () async {
+                     OmiHaptics.medium();
+-                    return provider.forceRefreshActionItems();
++                    await Future.wait([provider.forceRefreshActionItems(), if (relecture != null) relecture.load()]);
+                   },
+                   child: provider.isLoading && provider.actionItems.isEmpty
+                       ? _buildLoadingState()
+@@ -533,6 +553,12 @@ class _ActionItemsPageState extends State<ActionItemsPage> with AutomaticKeepAli
+       slivers: [
+         const SliverPadding(padding: EdgeInsets.only(top: 8)),
+         SliverToBoxAdapter(child: _buildPageHeader(provider)),
++        // Clone local (0015) : « Omi pense que 14 tâches sont faites · Vérifier » ; cachée s'il n'y en a pas.
++        if (!isSearching && _omiDoneCount > 0)
++          SliverPadding(
++            padding: const EdgeInsets.fromLTRB(16, 6, 16, 2),
++            sliver: SliverToBoxAdapter(child: TachesFaitesBar(count: _omiDoneCount, onReview: () => _openOmiDone())),
++          ),
+ 
+         if (isSearching) ...[
+           if (filteredItems.isEmpty)
+@@ -1110,6 +1136,8 @@ class _ActionItemsPageState extends State<ActionItemsPage> with AutomaticKeepAli
+     );
+   }
+ 
++  int get _omiDoneCount => Provider.of<RelectureController?>(context, listen: false)?.tachesFaites.length ?? 0;
++
+   TaskCategory _getCategoryForItem(ActionItemWithMetadata item) =>
+       categoryForItem(item, Provider.of<ActionItemsProvider>(context, listen: false).showCompletedView);
+ 
+@@ -1122,6 +1150,9 @@ class _ActionItemsPageState extends State<ActionItemsPage> with AutomaticKeepAli
+     final indentLevel = _getIndentLevel(item);
+     final goalTitle = _getGoalTitleForTask(item);
+     final isSelected = provider.isSelectionMode && provider.isItemSelected(item.id);
++    // Clone local (0015) : Omi la pense faite — marque distincte (coche dans le cercle pointillé) et mention ; les
++    // toucher ouvre la feuille de validation, centrée sur elle.
++    final omiDone = item.completed || provider.isSelectionMode ? null : _omiDone[item.id];
+ 
+     return GestureDetector(
+       behavior: HitTestBehavior.opaque,
+@@ -1157,20 +1188,32 @@ class _ActionItemsPageState extends State<ActionItemsPage> with AutomaticKeepAli
+                 ),
+               // Completion circle — always shown. Read-only in selection mode
+               // (the row tap drives selection there); tappable otherwise.
+-              Semantics(
+-                button: !provider.isSelectionMode,
+-                checked: item.completed,
+-                label: item.completed ? context.l10n.markIncomplete : context.l10n.markComplete,
+-                child: GestureDetector(
+-                  behavior: HitTestBehavior.opaque,
+-                  onTap: provider.isSelectionMode ? null : () => _toggleCompleted(provider, item),
+-                  child: SizedBox(
+-                    width: 44,
+-                    height: 44,
+-                    child: Center(child: TaskCompletionMark(completed: item.completed)),
++              if (omiDone != null)
++                Semantics(
++                  button: true,
++                  label: context.l10n.tachesFaitesMarkSemantics,
++                  child: GestureDetector(
++                    key: ValueKey('omi_done_mark_${item.id}'),
++                    behavior: HitTestBehavior.opaque,
++                    onTap: () => _openOmiDone(focusId: omiDone.id),
++                    child: const SizedBox(width: 44, height: 44, child: Center(child: TaskOmiDoneMark())),
++                  ),
++                )
++              else
++                Semantics(
++                  button: !provider.isSelectionMode,
++                  checked: item.completed,
++                  label: item.completed ? context.l10n.markIncomplete : context.l10n.markComplete,
++                  child: GestureDetector(
++                    behavior: HitTestBehavior.opaque,
++                    onTap: provider.isSelectionMode ? null : () => _toggleCompleted(provider, item),
++                    child: SizedBox(
++                      width: 44,
++                      height: 44,
++                      child: Center(child: TaskCompletionMark(completed: item.completed)),
++                    ),
+                   ),
+                 ),
+-              ),
+               // Task text
+               Expanded(
+                 child: Padding(
+@@ -1189,6 +1232,19 @@ class _ActionItemsPageState extends State<ActionItemsPage> with AutomaticKeepAli
+                           decorationColor: OmiColors.textTertiary,
+                         ),
+                       ),
++                      if (omiDone != null) ...[
++                        const SizedBox(height: 2),
++                        GestureDetector(
++                          key: ValueKey('omi_done_mention_${item.id}'),
++                          behavior: HitTestBehavior.opaque,
++                          onTap: () => _openOmiDone(focusId: omiDone.id),
++                          child: Text(
++                            tacheFaiteMention(context.l10n, omiDone.nature),
++                            style:
++                                OmiType.footnote.copyWith(color: OmiColors.textTertiary, fontWeight: FontWeight.w600),
++                          ),
++                        ),
++                      ],
+                       if (goalTitle != null) ...[
+                         const SizedBox(height: 4),
+                         Text(goalTitle, style: OmiType.footnote.copyWith(color: OmiColors.textTertiary)),
+diff --git a/app/lib/pages/action_items/widgets/task_row_parts.dart b/app/lib/pages/action_items/widgets/task_row_parts.dart
+index 715ec3adc4..9a6ca8f85f 100644
+--- a/app/lib/pages/action_items/widgets/task_row_parts.dart
++++ b/app/lib/pages/action_items/widgets/task_row_parts.dart
+@@ -34,6 +34,27 @@ class TaskCompletionMark extends StatelessWidget {
+   }
+ }
+ 
++/// Clone local : la marque d'une tâche qu'Omi pense faite, en attendant l'accord de Mike — « cochée sans être
++/// cachée ». Une coche DANS le cercle pointillé des tâches ouvertes : la forme la distingue d'une tâche ouverte
++/// (cercle vide) et d'une tâche faite (disque plein), jamais la couleur seule (encres neutres).
++class TaskOmiDoneMark extends StatelessWidget {
++  const TaskOmiDoneMark({super.key, this.size = 22});
++
++  final double size;
++
++  @override
++  Widget build(BuildContext context) {
++    return SizedBox(
++      width: size,
++      height: size,
++      child: CustomPaint(
++        painter: _DashedCirclePainter(color: OmiColors.textTertiary, strokeWidth: 1.5, dashLength: 3, gapLength: 3),
++        child: Center(child: Icon(Icons.check_rounded, size: size * 0.68, color: OmiColors.textPrimary)),
++      ),
++    );
++  }
++}
++
+ /// Trailing selection box shown only in selection mode: a rounded **square**, a different shape
+ /// from the leading completion circle so "selected for a bulk action" never reads as "done".
+ class TaskSelectionSquare extends StatelessWidget {
+diff --git a/app/lib/pages/insights/insights_page.dart b/app/lib/pages/insights/insights_page.dart
+index a687ed087e..2e01bf27e8 100644
+--- a/app/lib/pages/insights/insights_page.dart
++++ b/app/lib/pages/insights/insights_page.dart
+@@ -2,6 +2,8 @@ import 'dart:async';
+ 
+ import 'package:flutter/material.dart';
+ 
++import 'package:provider/provider.dart';
++
+ import 'package:omi/backend/http/api/insights.dart';
+ import 'package:omi/backend/http/api/relecture.dart';
+ import 'package:omi/backend/http/api_result.dart';
+@@ -32,7 +34,8 @@ class InsightsPage extends StatefulWidget {
+ 
+   final InsightsApi? api;
+ 
+-  /// La relecture de nuit ; par défaut, le même serveur (et le même envoi) que [api].
++  /// La relecture de nuit ; par défaut, celle partagée par l'app (aussi lue par l'onglet Tâches), ou, si [api] est
++  /// donné (tests), le même serveur et le même envoi que [api].
+   final RelectureApi? relecture;
+   final InsightSourceOpener sources;
+ 
+@@ -42,8 +45,8 @@ class InsightsPage extends StatefulWidget {
+ 
+ class InsightsPageState extends State<InsightsPage> with AutomaticKeepAliveClientMixin {
+   late final InsightsApi _api = widget.api ?? InsightsApi();
+-  late final RelectureController _relecture =
+-      RelectureController(api: widget.relecture ?? RelectureApi(send: _api.send, baseUrl: _api.baseUrl));
++  late final RelectureController _relecture = _resolveRelecture();
++  bool _ownsRelecture = false;
+   final ScrollController _scrollController = ScrollController();
+ 
+   /// Null tant que rien n'a été lu.
+@@ -67,10 +70,21 @@ class InsightsPageState extends State<InsightsPage> with AutomaticKeepAliveClien
+     unawaited(refresh());
+   }
+ 
++  /// L'app fournit un [RelectureController] partagé (l'onglet Tâches montre les mêmes propositions) ; un serveur
++  /// donné ([InsightsPage.api] ou [InsightsPage.relecture], tests) en crée un propre à la page.
++  RelectureController _resolveRelecture() {
++    if (widget.api == null && widget.relecture == null) {
++      final shared = Provider.of<RelectureController?>(context, listen: false);
++      if (shared != null) return shared;
++    }
++    _ownsRelecture = true;
++    return RelectureController(api: widget.relecture ?? RelectureApi(send: _api.send, baseUrl: _api.baseUrl));
++  }
++
+   @override
+   void dispose() {
+     _scrollController.dispose();
+-    _relecture.dispose();
++    if (_ownsRelecture) _relecture.dispose();
+     super.dispose();
+   }
+ 
+diff --git a/app/lib/pages/insights/relecture_controller.dart b/app/lib/pages/insights/relecture_controller.dart
+index 7d18150cdd..292858fdbf 100644
+--- a/app/lib/pages/insights/relecture_controller.dart
++++ b/app/lib/pages/insights/relecture_controller.dart
+@@ -21,6 +21,7 @@ class RelectureController extends ChangeNotifier {
+   ApiProblem? _problem;
+   Future<void>? _loading;
+   final Map<String, RelectureGesture> _busy = {};
++  bool _validating = false;
+ 
+   /// Compte les gestes terminés : une lecture partie avant le dernier est relue.
+   int _gestures = 0;
+@@ -31,6 +32,21 @@ class RelectureController extends ChangeNotifier {
+   List<RelectureProposition> get propositions => _data?.propositions ?? const [];
+   List<RelectureChangement> get changements => _data?.changements ?? const [];
+ 
++  /// Les tâches qu'Omi pense faites, dans l'ordre du serveur.
++  List<RelectureProposition> get tachesFaites => [
++        for (final p in propositions)
++          if (p.tacheTerminee) p
++      ];
++
++  /// Tâche visée → sa proposition (onglet Tâches : la tâche reste à sa place, « cochée sans être cachée »).
++  Map<String, RelectureProposition> get tachesFaitesParTache => {
++        for (final p in tachesFaites.reversed)
++          if (p.tache case final tache?) tache.id: p
++      };
++
++  /// Une validation groupée est en cours.
++  bool get validating => _validating;
++
+   /// La dernière lecture a échoué (ce qui était affiché reste).
+   ApiProblem? get problem => _problem;
+ 
+@@ -118,6 +134,38 @@ class RelectureController extends ChangeNotifier {
+     return outcome;
+   }
+ 
++  /// Valide d'un seul geste les tâches pensées faites : [accept] cochées, [ignore] laissées à faire. Faites, elles
++  /// quittent la liste (sauf celles que le serveur a refusées) et le changement groupé arrive en tête ; la liste
++  /// est relue dans tous les cas. Null : une validation est déjà en cours (rien n'est envoyé).
++  Future<RelectureOutcome<RelectureValidation>?> validateTachesFaites({
++    required List<String> accept,
++    required List<String> ignore,
++  }) async {
++    if (_validating) return null;
++    _validating = true;
++    _notify();
++    final outcome = await _guard(() => api.validateTachesFaites(accept: accept, ignore: ignore));
++    if (_disposed) return outcome;
++    _validating = false;
++    _gestures++;
++    if (outcome case RelectureDone(:final data)) {
++      final refused = {for (final refus in data.refusees) refus.id};
++      final handled = {...accept, ...ignore}.difference(refused);
++      final changement = data.changement;
++      _update(
++        propositions: [
++          for (final p in propositions)
++            if (!handled.contains(p.id)) p
++        ],
++        changements: changement == null
++            ? null
++            : sortChangements([changement, ...changements.where((c) => c.id != changement.id)]),
++      );
++    }
++    _reload();
++    return outcome;
++  }
++
+   bool _start(String id, RelectureGesture gesture) {
+     if (_busy.containsKey(id)) return false;
+     _busy[id] = gesture;
+diff --git a/app/lib/pages/insights/relecture_page.dart b/app/lib/pages/insights/relecture_page.dart
+index 7013918f1d..57f6e5d9a6 100644
+--- a/app/lib/pages/insights/relecture_page.dart
++++ b/app/lib/pages/insights/relecture_page.dart
+@@ -8,6 +8,7 @@ import 'package:omi/pages/insights/insight_sources.dart';
+ import 'package:omi/pages/insights/relecture_changements_page.dart';
+ import 'package:omi/pages/insights/relecture_controller.dart';
+ import 'package:omi/pages/insights/relecture_widgets.dart';
++import 'package:omi/pages/insights/taches_faites.dart';
+ import 'package:omi/ui/ui.dart';
+ import 'package:omi/utils/l10n_extensions.dart';
+ import 'package:omi/utils/other/temp.dart';
+@@ -155,6 +156,7 @@ class _RelecturePageState extends State<RelecturePage> {
+             );
+           }
+           final lastRun = data.derniereRelecture;
++          final tachesFaites = _controller.tachesFaites.length;
+           return RefreshIndicator(
+             onRefresh: _controller.load,
+             child: ListView(
+@@ -183,19 +185,29 @@ class _RelecturePageState extends State<RelecturePage> {
+                     ],
+                   ),
+                 ),
+-                for (final proposition in propositions)
++                // Les tâches pensées faites : UNE carte, qui ouvre la feuille de validation groupée (0015).
++                if (tachesFaites > 0)
+                   Padding(
+                     padding: const EdgeInsets.only(bottom: OmiSpacing.sm),
+-                    child: RelecturePropositionCard(
+-                      key: ValueKey('relecture_proposition_${proposition.id}'),
+-                      proposition: proposition,
+-                      gesture: _controller.gestureOn(proposition.id),
+-                      onAccept: () => unawaited(_accept(proposition)),
+-                      onIgnore: () => unawaited(_ignore(proposition)),
+-                      onOpenConversation: _openConversation,
+-                      onOpenTasks: _openTasks,
++                    child: RelectureTachesFaitesCard(
++                      count: tachesFaites,
++                      onReview: () => unawaited(showTachesFaitesSheet(context, _controller)),
+                     ),
+                   ),
++                for (final proposition in propositions)
++                  if (!proposition.tacheTerminee)
++                    Padding(
++                      padding: const EdgeInsets.only(bottom: OmiSpacing.sm),
++                      child: RelecturePropositionCard(
++                        key: ValueKey('relecture_proposition_${proposition.id}'),
++                        proposition: proposition,
++                        gesture: _controller.gestureOn(proposition.id),
++                        onAccept: () => unawaited(_accept(proposition)),
++                        onIgnore: () => unawaited(_ignore(proposition)),
++                        onOpenConversation: _openConversation,
++                        onOpenTasks: _openTasks,
++                      ),
++                    ),
+                 if (changesLink != null) Center(child: changesLink),
+               ],
+             ),
+diff --git a/app/lib/pages/insights/taches_faites.dart b/app/lib/pages/insights/taches_faites.dart
+new file mode 100644
+index 0000000000..0708fbfb7f
+--- /dev/null
++++ b/app/lib/pages/insights/taches_faites.dart
+@@ -0,0 +1,459 @@
++import 'dart:async';
++
++import 'package:flutter/material.dart';
++
++import 'package:provider/provider.dart';
++
++import 'package:omi/backend/http/api/relecture.dart';
++import 'package:omi/backend/http/api_result.dart';
++import 'package:omi/backend/schema/relecture.dart';
++import 'package:omi/l10n/app_localizations.dart';
++import 'package:omi/pages/action_items/widgets/task_row_parts.dart';
++import 'package:omi/pages/insights/relecture_controller.dart';
++import 'package:omi/pages/insights/relecture_widgets.dart';
++import 'package:omi/providers/action_items_provider.dart';
++import 'package:omi/ui/ui.dart';
++import 'package:omi/utils/l10n_extensions.dart';
++
++/// Clone local (0015) : les tâches qu'Omi pense faites (relecture de nuit, `tache_terminee`). Elles restent dans
++/// l'onglet Tâches, à leur place, « cochées sans être cachées » ; Mike les valide d'un seul geste dans une feuille où
++/// elles sont toutes pré-cochées : les cochées sont marquées faites, les décochées restent à faire (Omi ne les
++/// reproposera pas pour les mêmes raisons). Le tout fait UN changement, annulable d'un coup.
++
++/// Ce qu'on lit d'une tâche pensée faite : sa description (le titre de la tâche visée, sinon celui de la
++/// proposition).
++String tacheFaiteDescription(RelectureProposition proposition) =>
++    proposition.tache?.titre ?? proposition.titre ?? proposition.explication ?? '';
++
++/// La nature, en un mot : « Faite », « Moment passé », sinon « Semble faite ».
++String tacheFaiteNatureLabel(AppLocalizations l10n, String? nature) => switch (nature) {
++      relectureNatureFaite => l10n.tachesFaitesNatureDone,
++      relectureNaturePassee => l10n.tachesFaitesNaturePast,
++      _ => l10n.tachesFaitesNatureOther,
++    };
++
++/// La petite mention sous une tâche de l'onglet Tâches : « Omi : faite ? », « Omi : moment passé ? ».
++String tacheFaiteMention(AppLocalizations l10n, String? nature) =>
++    nature == relectureNaturePassee ? l10n.tachesFaitesMentionPast : l10n.tachesFaitesMentionDone;
++
++IconData tacheFaiteNatureIcon(String? nature) =>
++    nature == relectureNaturePassee ? Icons.schedule_rounded : Icons.format_quote_rounded;
++
++/// Ouvre la feuille de validation, centrée sur [focusId] s'il est donné. Validée : barre « 12 tâches cochées » avec
++/// « Annuler » (le changement groupé), la liste des tâches et la relecture relues.
++Future<void> showTachesFaitesSheet(BuildContext context, RelectureController controller, {String? focusId}) async {
++  OmiHaptics.selection();
++  final appContext = Navigator.of(context, rootNavigator: true).context;
++  final tasks = Provider.of<ActionItemsProvider?>(context, listen: false);
++  final result = await showOmiSheet<RelectureValidation>(
++    context: context,
++    title: context.l10n.tachesFaitesSheetTitle,
++    padding: EdgeInsets.zero,
++    builder: (_) => TachesFaitesSheet(controller: controller, focusId: focusId),
++  );
++  if (result == null) return;
++  unawaited(tasks?.forceRefreshActionItems());
++  final feedback = context.mounted ? context : appContext;
++  if (!feedback.mounted) return;
++  final l10n = feedback.l10n;
++  final checked = result.acceptees;
++  final message = [
++    checked == null ? l10n.relectureDone : l10n.tachesFaitesChecked(checked),
++    if (result.refusees.isNotEmpty) l10n.tachesFaitesRefused(result.refusees.length),
++  ].join(' · ');
++  final changement = result.changement;
++  OmiHaptics.success();
++  if (changement != null && changement.peutAnnuler) {
++    unawaited(OmiFeedback.undo(
++      feedback,
++      message,
++      icon: Icons.check_rounded,
++      onUndo: () => unawaited(_undo(appContext, controller, changement, tasks)),
++    ));
++  } else {
++    relectureConfirm(feedback, message);
++  }
++}
++
++/// « Annuler » de la barre : remet les tâches comme avant (le changement groupé), puis relit les tâches.
++Future<void> _undo(
++  BuildContext appContext,
++  RelectureController controller,
++  RelectureChangement changement,
++  ActionItemsProvider? tasks,
++) async {
++  final outcome = await controller.undo(changement);
++  if (outcome == null) return;
++  unawaited(tasks?.forceRefreshActionItems());
++  if (appContext.mounted) showRelectureUndoOutcome(appContext, outcome);
++}
++
++/// La feuille : toutes les tâches pensées faites, CHACUNE PRÉ-COCHÉE, avec leur nature (« Faite » et la citation
++/// qui le montre, ou « Moment passé » et l'explication) ; « Tout cocher / Tout décocher » ; « Valider (n) ».
++/// Validée, elle se ferme en rendant la réponse du serveur ; un refus ou une panne se dit dans la feuille (la liste
++/// est relue, les choix restent).
++class TachesFaitesSheet extends StatefulWidget {
++  const TachesFaitesSheet({super.key, required this.controller, this.focusId});
++
++  final RelectureController controller;
++  final String? focusId;
++
++  @override
++  State<TachesFaitesSheet> createState() => _TachesFaitesSheetState();
++}
++
++class _TachesFaitesSheetState extends State<TachesFaitesSheet> {
++  /// Les propositions décochées (toutes sont cochées d'avance).
++  final Set<String> _unchecked = {};
++  final GlobalKey _focusKey = GlobalKey();
++  String? _error;
++
++  RelectureController get _controller => widget.controller;
++
++  @override
++  void initState() {
++    super.initState();
++    if (widget.focusId != null) {
++      WidgetsBinding.instance.addPostFrameCallback((_) {
++        final target = _focusKey.currentContext;
++        if (target != null && target.mounted) {
++          unawaited(Scrollable.ensureVisible(target, alignment: 0.5, duration: Duration.zero));
++        }
++      });
++    }
++  }
++
++  void _toggle(String id) {
++    if (_controller.validating) return;
++    OmiHaptics.selection();
++    setState(() => _unchecked.contains(id) ? _unchecked.remove(id) : _unchecked.add(id));
++  }
++
++  void _setAll(List<RelectureProposition> items, {required bool checked}) {
++    if (_controller.validating) return;
++    OmiHaptics.selection();
++    setState(() => checked ? _unchecked.clear() : _unchecked.addAll(items.map((p) => p.id)));
++  }
++
++  Future<void> _validate(List<RelectureProposition> items) async {
++    final accept = [
++      for (final p in items)
++        if (!_unchecked.contains(p.id)) p.id
++    ];
++    final ignore = [
++      for (final p in items)
++        if (_unchecked.contains(p.id)) p.id
++    ];
++    setState(() => _error = null);
++    final outcome = await _controller.validateTachesFaites(accept: accept, ignore: ignore);
++    if (outcome == null || !mounted) return;
++    final l10n = context.l10n;
++    switch (outcome) {
++      case RelectureDone(:final data):
++        Navigator.of(context).pop(data);
++      case RelectureConflict(:final detail):
++        setState(() => _error = detail ?? l10n.relectureConflict);
++      case RelectureFailed(:final problem) when problem.kind == ApiProblemKind.notFound:
++        setState(() => _error = l10n.relecturePropositionGone);
++      case RelectureFailed():
++        setState(() => _error = l10n.relectureActionFailed);
++    }
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    return ListenableBuilder(
++      listenable: _controller,
++      builder: (context, _) {
++        final l10n = context.l10n;
++        final items = _controller.tachesFaites;
++        final busy = _controller.validating;
++        final checkedCount = items.where((p) => !_unchecked.contains(p.id)).length;
++        final allChecked = checkedCount == items.length;
++        final error = _error;
++        return Column(
++          mainAxisSize: MainAxisSize.min,
++          crossAxisAlignment: CrossAxisAlignment.stretch,
++          children: [
++            Padding(
++              padding: const EdgeInsets.fromLTRB(OmiSpacing.md, OmiSpacing.xxs, OmiSpacing.md, OmiSpacing.xs),
++              child: Text(
++                items.isEmpty ? l10n.relectureAllDoneMessage : l10n.tachesFaitesSheetIntro,
++                style: OmiType.subhead.copyWith(color: OmiColors.textTertiary),
++              ),
++            ),
++            if (items.isNotEmpty) ...[
++              Padding(
++                padding: const EdgeInsets.symmetric(horizontal: OmiSpacing.xxs),
++                child: Align(
++                  alignment: Alignment.centerLeft,
++                  child: OmiButton.tertiary(
++                    key: const ValueKey('taches_faites_all'),
++                    label: allChecked ? l10n.tachesFaitesUncheckAll : l10n.tachesFaitesCheckAll,
++                    icon: allChecked ? Icons.remove_done_rounded : Icons.done_all_rounded,
++                    size: OmiButtonSize.compact,
++                    onPressed: busy ? null : () => _setAll(items, checked: !allChecked),
++                  ),
++                ),
++              ),
++              Flexible(
++                child: SingleChildScrollView(
++                  key: const ValueKey('taches_faites_list'),
++                  padding: const EdgeInsets.symmetric(horizontal: OmiSpacing.xs),
++                  child: Column(
++                    crossAxisAlignment: CrossAxisAlignment.stretch,
++                    children: [
++                      for (final p in items)
++                        KeyedSubtree(
++                          key: p.id == widget.focusId ? _focusKey : null,
++                          child: TacheFaiteRow(
++                            key: ValueKey('taches_faites_row_${p.id}'),
++                            proposition: p,
++                            checked: !_unchecked.contains(p.id),
++                            focused: p.id == widget.focusId,
++                            onToggle: () => _toggle(p.id),
++                          ),
++                        ),
++                    ],
++                  ),
++                ),
++              ),
++            ],
++            Padding(
++              padding: const EdgeInsets.fromLTRB(OmiSpacing.md, OmiSpacing.sm, OmiSpacing.md, OmiSpacing.md),
++              child: Column(
++                crossAxisAlignment: CrossAxisAlignment.stretch,
++                children: [
++                  if (error != null) ...[
++                    Row(
++                      key: const ValueKey('taches_faites_error'),
++                      crossAxisAlignment: CrossAxisAlignment.start,
++                      children: [
++                        ExcludeSemantics(
++                          child: Icon(Icons.info_outline_rounded, size: 18, color: OmiColors.textTertiary),
++                        ),
++                        const SizedBox(width: OmiSpacing.xs),
++                        Expanded(child: Semantics(liveRegion: true, child: Text(error, style: OmiType.subhead))),
++                      ],
++                    ),
++                    const SizedBox(height: OmiSpacing.sm),
++                  ],
++                  if (items.isNotEmpty) ...[
++                    Text(l10n.tachesFaitesUncheckedNote,
++                        style: OmiType.footnote.copyWith(color: OmiColors.textTertiary)),
++                    const SizedBox(height: OmiSpacing.sm),
++                    OmiButton(
++                      key: const ValueKey('taches_faites_validate'),
++                      label: l10n.tachesFaitesValidate(checkedCount),
++                      expand: true,
++                      isLoading: busy,
++                      onPressed: () => _validate(items),
++                    ),
++                  ],
++                ],
++              ),
++            ),
++          ],
++        );
++      },
++    );
++  }
++}
++
++/// Une tâche de la feuille : sa case (carrée, pleine et cochée / vide : la forme dit l'état, jamais la couleur),
++/// sa description, sa nature et ce qui la justifie. Toucher la ligne coche ou décoche.
++class TacheFaiteRow extends StatelessWidget {
++  const TacheFaiteRow({
++    super.key,
++    required this.proposition,
++    required this.checked,
++    required this.onToggle,
++    this.focused = false,
++  });
++
++  final RelectureProposition proposition;
++  final bool checked;
++  final bool focused;
++  final VoidCallback onToggle;
++
++  @override
++  Widget build(BuildContext context) {
++    final l10n = context.l10n;
++    final p = proposition;
++    final quote = p.nature == relectureNaturePassee ? null : p.extraits.firstOrNull;
++    final explanation = p.nature == relectureNatureFaite && quote != null ? null : p.explication;
++    final source = quote?.source;
++    return MergeSemantics(
++      child: Semantics(
++        checked: checked,
++        child: Material(
++          color: focused ? OmiColors.surface2 : Colors.transparent,
++          borderRadius: OmiRadius.mdAll,
++          child: InkWell(
++            borderRadius: OmiRadius.mdAll,
++            onTap: onToggle,
++            child: Padding(
++              padding: const EdgeInsets.fromLTRB(OmiSpacing.xs, OmiSpacing.sm, OmiSpacing.sm, OmiSpacing.sm),
++              child: Row(
++                crossAxisAlignment: CrossAxisAlignment.start,
++                children: [
++                  SizedBox(
++                    width: 36,
++                    child: Padding(
++                      padding: const EdgeInsets.only(top: 1),
++                      // Centrée : la colonne de 36 pt ne doit pas étirer la case (carrée, 24 pt).
++                      child: Align(
++                        alignment: Alignment.topCenter,
++                        child: TacheFaiteCheckbox(key: ValueKey('taches_faites_check_${p.id}'), checked: checked),
++                      ),
++                    ),
++                  ),
++                  const SizedBox(width: OmiSpacing.xs),
++                  Expanded(
++                    child: Column(
++                      crossAxisAlignment: CrossAxisAlignment.start,
++                      children: [
++                        Text(tacheFaiteDescription(p), style: OmiType.callout.copyWith(fontWeight: FontWeight.w500)),
++                        const SizedBox(height: 2),
++                        Row(
++                          children: [
++                            ExcludeSemantics(
++                              child: Icon(tacheFaiteNatureIcon(p.nature), size: 14, color: OmiColors.textTertiary),
++                            ),
++                            const SizedBox(width: 4),
++                            Text(
++                              tacheFaiteNatureLabel(l10n, p.nature),
++                              key: ValueKey('taches_faites_nature_${p.id}'),
++                              style:
++                                  OmiType.footnote.copyWith(color: OmiColors.textTertiary, fontWeight: FontWeight.w600),
++                            ),
++                          ],
++                        ),
++                        if (quote != null) ...[
++                          const SizedBox(height: 2),
++                          Text(quote.texte, style: OmiType.footnote.copyWith(fontStyle: FontStyle.italic)),
++                          if (source != null)
++                            Text('— $source', style: OmiType.footnote.copyWith(color: OmiColors.textTertiary)),
++                        ],
++                        if (explanation != null) ...[
++                          const SizedBox(height: 2),
++                          Text(explanation, style: OmiType.footnote.copyWith(color: OmiColors.textTertiary)),
++                        ],
++                      ],
++                    ),
++                  ),
++                ],
++              ),
++            ),
++          ),
++        ),
++      ),
++    );
++  }
++}
++
++/// La case d'une tâche de la feuille : carré plein avec une coche (cochée) ou carré vide (décochée).
++class TacheFaiteCheckbox extends StatelessWidget {
++  const TacheFaiteCheckbox({super.key, required this.checked});
++
++  final bool checked;
++
++  @override
++  Widget build(BuildContext context) {
++    return AnimatedContainer(
++      duration: OmiMotion.of(context).quick,
++      width: 24,
++      height: 24,
++      decoration: BoxDecoration(
++        borderRadius: const BorderRadius.all(Radius.circular(6)),
++        border: Border.all(color: checked ? OmiColors.accent : OmiColors.textTertiary, width: 2),
++        color: checked ? OmiColors.accent : Colors.transparent,
++      ),
++      child: checked ? Icon(Icons.check_rounded, size: 16, color: OmiColors.onAccent) : null,
++    );
++  }
++}
++
++/// En haut de l'onglet Tâches : « Omi pense que 14 tâches sont faites · Vérifier » ; cachée s'il n'y en a pas.
++class TachesFaitesBar extends StatelessWidget {
++  const TachesFaitesBar({super.key, required this.count, required this.onReview});
++
++  final int count;
++  final VoidCallback onReview;
++
++  @override
++  Widget build(BuildContext context) {
++    if (count == 0) return const SizedBox.shrink();
++    final l10n = context.l10n;
++    return Semantics(
++      button: true,
++      child: Material(
++        key: const ValueKey('taches_faites_bar'),
++        color: OmiColors.surface1,
++        borderRadius: OmiRadius.mdAll,
++        clipBehavior: Clip.antiAlias,
++        child: InkWell(
++          onTap: onReview,
++          child: ConstrainedBox(
++            constraints: const BoxConstraints(minHeight: 52),
++            child: Padding(
++              padding: const EdgeInsets.symmetric(horizontal: OmiSpacing.md, vertical: OmiSpacing.xs),
++              child: Row(
++                children: [
++                  const ExcludeSemantics(child: TaskOmiDoneMark(size: 20)),
++                  const SizedBox(width: OmiSpacing.sm),
++                  Expanded(child: Text(l10n.tachesFaitesBar(count), style: OmiType.subhead)),
++                  const SizedBox(width: OmiSpacing.xs),
++                  Text(l10n.tachesFaitesReview, style: OmiType.subhead.copyWith(fontWeight: FontWeight.w600)),
++                  ExcludeSemantics(child: Icon(Icons.chevron_right_rounded, size: 20, color: OmiColors.textTertiary)),
++                ],
++              ),
++            ),
++          ),
++        ),
++      ),
++    );
++  }
++}
++
++/// « À vérifier » (Insights) : les tâches pensées faites ne sont plus des cartes une à une mais UNE carte
++/// « 14 tâches semblent faites » qui ouvre la même feuille.
++class RelectureTachesFaitesCard extends StatelessWidget {
++  const RelectureTachesFaitesCard({super.key, required this.count, required this.onReview});
++
++  final int count;
++  final VoidCallback onReview;
++
++  @override
++  Widget build(BuildContext context) {
++    final l10n = context.l10n;
++    return Material(
++      key: const ValueKey('relecture_taches_faites'),
++      color: OmiColors.surface1,
++      borderRadius: OmiRadius.mdAll,
++      child: Padding(
++        padding: const EdgeInsets.fromLTRB(OmiSpacing.md, OmiSpacing.md, OmiSpacing.md, OmiSpacing.sm),
++        child: Column(
++          crossAxisAlignment: CrossAxisAlignment.stretch,
++          children: [
++            const RelectureKindLine(type: relectureTacheTerminee),
++            const SizedBox(height: OmiSpacing.xs),
++            Semantics(header: true, child: Text(l10n.tachesFaitesGroupTitle(count), style: OmiType.headline)),
++            const SizedBox(height: OmiSpacing.xxs),
++            Text(l10n.tachesFaitesGroupMessage, style: OmiType.subhead),
++            const SizedBox(height: OmiSpacing.sm),
++            Align(
++              alignment: Alignment.centerRight,
++              child: OmiButton(
++                key: const ValueKey('relecture_taches_faites_review'),
++                label: l10n.tachesFaitesReview,
++                size: OmiButtonSize.compact,
++                onPressed: onReview,
++              ),
++            ),
++          ],
++        ),
++      ),
++    );
++  }
++}
+diff --git a/app/test/unit/taches_faites_test.dart b/app/test/unit/taches_faites_test.dart
+new file mode 100644
+index 0000000000..535cce749c
+--- /dev/null
++++ b/app/test/unit/taches_faites_test.dart
+@@ -0,0 +1,245 @@
++// Clone local : tâches pensées faites, validées d'un seul geste (0015) — lecture de la nature (« faite » /
++// « passee ») et de la tâche visée, de la réponse de POST /v1/clone/relecture/taches-faites/valider (changement
++// groupé, compteurs, refusées ; tolérante), l'appel (adresse, corps exact accepter / ignorer, 400, 409, panne) et
++// l'état partagé (jamais deux envois, les traitées quittent la liste sauf les refusées, relue ensuite).
++import 'dart:async';
++import 'dart:convert';
++
++import 'package:flutter_test/flutter_test.dart';
++import 'package:http/http.dart' as http;
++
++import 'package:omi/backend/http/api/relecture.dart';
++import 'package:omi/backend/http/api_result.dart';
++import 'package:omi/backend/schema/relecture.dart';
++import 'package:omi/pages/insights/relecture_controller.dart';
++
++Map<String, dynamic> _faite(String id, String tache, {String nature = 'faite'}) => {
++      'id': id,
++      'type': 'tache_terminee',
++      'nature': nature,
++      'titre': 'Tâche faite',
++      'explication': nature == 'passee' ? 'Le rendez-vous était hier.' : null,
++      'extraits': [
++        if (nature == 'faite') {'texte': 'c’est envoyé', 'source': 'Réunion du 20 oct.', 'conversation_id': 'c-1'},
++      ],
++      'cibles': [
++        {'type': 'conversation', 'id': 'c-1', 'titre': 'Réunion'},
++        {'type': 'tache', 'id': tache, 'titre': 'Tâche $tache'},
++      ],
++    };
++
++Map<String, dynamic> _groupe(String id) => {
++      'id': id,
++      'proposition_id': null,
++      'type': 'tache_terminee',
++      'titre': '2 tâches cochées d’un coup',
++      'details': [],
++      'fait_le': '2026-10-21T08:00:00+00:00',
++      'annulable': true,
++      'annule_le': null,
++    };
++
++http.Response _json(Object body, [int status = 200]) =>
++    http.Response(jsonEncode(body), status, headers: {'content-type': 'application/json; charset=utf-8'});
++
++void main() {
++  group('lecture', () {
++    test('une tâche pensée faite : sa nature et la tâche visée ; les autres types n’en ont pas', () {
++      final relecture = Relecture.fromJson({
++        'propositions': [
++          _faite('p-1', 't-1'),
++          _faite('p-2', 't-2', nature: 'passee'),
++          {'id': 'p-3', 'type': 'orthographe'},
++          {
++            'id': 'p-4',
++            'type': 'tache_terminee',
++            'cibles': [
++              {'type': 'conversation', 'id': 'c-9'}
++            ]
++          },
++        ],
++      });
++      final [p1, p2, p3, p4] = relecture.propositions;
++      expect(p1.tacheTerminee, isTrue);
++      expect(p1.nature, relectureNatureFaite);
++      expect(p1.tache?.id, 't-1');
++      expect(p1.tache?.titre, 'Tâche t-1');
++      expect(p1.extraits.first.texte, 'c’est envoyé');
++      expect(p2.nature, relectureNaturePassee);
++      expect(p3.tacheTerminee, isFalse);
++      expect(p3.nature, isNull);
++      expect(p3.tache, isNull);
++      expect(p4.tacheTerminee, isTrue);
++      expect(p4.tache, isNull, reason: 'sans cible tâche : rien à marquer dans l’onglet Tâches');
++    });
++
++    test('réponse de validation : changement groupé, compteurs, refusées ; tolérante', () {
++      final full = RelectureValidation.parse({
++        'changement': _groupe('g-1'),
++        'acceptees': 12,
++        'ignorees': 2,
++        'refusees': [
++          {'id': 'p-9', 'raison': 'La tâche a été supprimée.'},
++          {'raison': 'sans id'},
++          {'id': 'p-9', 'raison': 'en double'},
++        ],
++        'inconnu': true,
++      });
++      expect(full.changement?.id, 'g-1');
++      expect(full.changement?.peutAnnuler, isTrue);
++      expect(full.acceptees, 12);
++      expect(full.ignorees, 2);
++      expect(full.refusees.map((r) => (r.id, r.raison)), [('p-9', 'La tâche a été supprimée.')]);
++
++      final sansChangement = RelectureValidation.parse({'changement': null, 'acceptees': 0, 'ignorees': 3});
++      expect(sansChangement.changement, isNull);
++      expect(sansChangement.acceptees, 0);
++      expect(sansChangement.refusees, isEmpty);
++
++      final illisible = RelectureValidation.parse('pas un objet');
++      expect(illisible.changement, isNull);
++      expect(illisible.acceptees, isNull);
++      expect(RelectureValidation.parse({'acceptees': '12', 'refusees': 'non'}).acceptees, isNull);
++    });
++  });
++
++  group('API', () {
++    late List<http.Request> requests;
++    late http.Response Function(http.Request) answer;
++
++    RelectureApi api() => RelectureApi(
++          baseUrl: 'https://example.invalid/',
++          send: (request) async {
++            final sent = http.Request(request.method, Uri.parse(request.url))..body = request.body;
++            requests.add(sent);
++            return answer(sent);
++          },
++        );
++
++    setUp(() {
++      requests = [];
++      answer = (_) => _json({'changement': _groupe('g-1'), 'acceptees': 1, 'ignorees': 1, 'refusees': []});
++    });
++
++    test('valider : POST …/taches-faites/valider, corps exact {accepter, ignorer}', () async {
++      final outcome = await api().validateTachesFaites(accept: ['p-1', 'p-3'], ignore: ['p-2']);
++      final request = requests.single;
++      expect(request.method, 'POST');
++      expect(request.url.toString(), 'https://example.invalid/v1/clone/relecture/taches-faites/valider');
++      expect(jsonDecode(request.body), {
++        'accepter': ['p-1', 'p-3'],
++        'ignorer': ['p-2'],
++      });
++      final data = (outcome as RelectureDone<RelectureValidation>).data;
++      expect(data.changement?.id, 'g-1');
++      expect(data.acceptees, 1);
++
++      // Les autres gestes envoient toujours {}.
++      answer = (_) => _json({'ok': true});
++      await api().ignore('p-5');
++      expect(requests.last.body, '{}');
++    });
++
++    test('valider : 400 (trop d’ids), 409 (message du serveur), panne et 200 illisible restent distincts', () async {
++      answer = (_) => _json({'detail': 'Trop de propositions d’un coup (300 au plus).'}, 400);
++      final tooMany = await api().validateTachesFaites(accept: ['p-1'], ignore: []);
++      final problem = (tooMany as RelectureFailed).problem;
++      expect(problem.kind, ApiProblemKind.rejected);
++      expect(problem.statusCode, 400);
++
++      answer = (_) => _json({'detail': 'Déjà validées.'}, 409);
++      expect((await api().validateTachesFaites(accept: ['p-1'], ignore: []) as RelectureConflict).detail,
++          'Déjà validées.');
++
++      answer = (_) => _json({'detail': 'boom'}, 502);
++      expect((await api().validateTachesFaites(accept: ['p-1'], ignore: []) as RelectureFailed).problem.kind,
++          ApiProblemKind.server);
++
++      answer = (_) => http.Response('ok', 200);
++      final done = await api().validateTachesFaites(accept: ['p-1'], ignore: []);
++      expect((done as RelectureDone<RelectureValidation>).data.acceptees, isNull);
++    });
++  });
++
++  group('état partagé', () {
++    test(
++        'tâche → proposition ; valider retire les traitées (pas les refusées), ajoute le groupe, relit ; un seul envoi',
++        () async {
++      final hold = Completer<void>();
++      var posts = 0;
++      var reads = 0;
++      final controller = RelectureController(
++        api: RelectureApi(
++          baseUrl: 'https://example.invalid/',
++          send: (request) async {
++            if (request.method == 'GET') {
++              reads++;
++              return _json({
++                'propositions': [
++                  if (posts == 0) ...[_faite('p-1', 't-1'), _faite('p-2', 't-2', nature: 'passee')],
++                  _faite('p-3', 't-3'),
++                  {'id': 'p-4', 'type': 'orthographe'},
++                ],
++              });
++            }
++            posts++;
++            await hold.future;
++            return _json({
++              'changement': _groupe('g-1'),
++              'acceptees': 1,
++              'ignorees': 1,
++              'refusees': [
++                {'id': 'p-3', 'raison': 'La tâche a été supprimée.'}
++              ],
++            });
++          },
++        ),
++      );
++      addTearDown(controller.dispose);
++      await controller.load();
++      expect(controller.tachesFaites.map((p) => p.id), ['p-1', 'p-2', 'p-3']);
++      expect(controller.tachesFaitesParTache.keys, unorderedEquals(['t-1', 't-2', 't-3']));
++      expect(controller.tachesFaitesParTache['t-2']?.id, 'p-2');
++
++      final first = controller.validateTachesFaites(accept: ['p-1', 'p-3'], ignore: ['p-2']);
++      expect(controller.validating, isTrue);
++      expect(await controller.validateTachesFaites(accept: ['p-1'], ignore: []), isNull);
++      hold.complete();
++      final outcome = await first;
++      expect(outcome, isA<RelectureDone<RelectureValidation>>());
++      expect(posts, 1);
++      expect(controller.validating, isFalse);
++      // p-3 refusée : elle reste ; la relecture relue le confirme.
++      expect(controller.tachesFaites.map((p) => p.id), ['p-3']);
++      expect(controller.changements.first.id, 'g-1');
++      await controller.load();
++      expect(reads, 2);
++      expect(controller.propositions.map((p) => p.id), ['p-3', 'p-4']);
++    });
++
++    test('panne : rien n’est retiré, la liste est relue', () async {
++      var reads = 0;
++      final controller = RelectureController(
++        api: RelectureApi(
++          baseUrl: 'https://example.invalid/',
++          send: (request) async {
++            if (request.method == 'GET') {
++              reads++;
++              return _json({
++                'propositions': [_faite('p-1', 't-1')],
++              });
++            }
++            return _json({'detail': 'boom'}, 500);
++          },
++        ),
++      );
++      addTearDown(controller.dispose);
++      await controller.load();
++      final outcome = await controller.validateTachesFaites(accept: ['p-1'], ignore: []);
++      expect((outcome as RelectureFailed).problem.kind, ApiProblemKind.server);
++      expect(controller.tachesFaites.single.id, 'p-1');
++      await controller.load();
++      expect(reads, 2, reason: 'relue après la panne');
++    });
++  });
++}
+diff --git a/app/test/widgets/relecture_test.dart b/app/test/widgets/relecture_test.dart
+index 75a2708c4e..76e8bd58b5 100644
+--- a/app/test/widgets/relecture_test.dart
++++ b/app/test/widgets/relecture_test.dart
+@@ -2,7 +2,8 @@
+ // proposition, une panne ne casse pas l'onglet), la page « À vérifier » (avant → après sans rouge ni vert, extraits
+ // et cibles qui s'ouvrent, Accepter → la carte part + « Fait » avec « Annuler », Ignorer, 409 → message du
+ // serveur, jamais de double envoi), la page « Changements récents » (annulable, annulé, confirmation légère) et
+-// l'anglais.
++// l'anglais. 0015 : les tâches pensées faites (`tache_terminee`) sont groupées en une carte (voir
++// taches_faites_test.dart).
+ import 'dart:async';
+ import 'dart:convert';
+ 
+@@ -53,6 +54,18 @@ Map<String, dynamic> _tacheFaite() => {
+       ],
+     };
+ 
++/// 0015 : une proposition à une carte qui vise une tâche (les tâches pensées faites, elles, sont groupées).
++Map<String, dynamic> _tachesEnDouble() => {
++      'id': 'p-4',
++      'type': 'tache_doublon',
++      'titre': 'Deux fois la même tâche',
++      'avant': 'Rappeler Arnaud (deux fois)',
++      'apres': 'Rappeler Arnaud',
++      'cibles': [
++        {'type': 'tache', 'id': 't-4', 'titre': 'Rappeler Arnaud'},
++      ],
++    };
++
+ Map<String, dynamic> _souvenirs() => {
+       'id': 'p-3',
+       'type': 'souvenir_doublon',
+@@ -295,9 +308,9 @@ void main() {
+       expect(_inCard('p-1', find.text('Arnaud D.')), findsOneWidget);
+       expect(_inCard('p-1', find.text('Accepter')), findsOneWidget);
+       expect(_inCard('p-1', find.text('Ignorer')), findsOneWidget);
+-      expect(_inCard('p-2', find.text('Tâche faite')), findsOneWidget);
+-      // Sans avant ni après : pas de bloc vide.
+-      expect(_inCard('p-2', find.byKey(const ValueKey('relecture_before'))), findsNothing);
++      // 0015 : une tâche pensée faite n'a plus sa carte ; UNE carte groupe les tâches pensées faites.
++      expect(find.byKey(const ValueKey('relecture_proposition_p-2')), findsNothing);
++      expect(find.text('1 tâche semble faite'), findsOneWidget);
+       // Longs (plusieurs lignes) : l'un sous l'autre, flèche vers le bas.
+       expect(_inCard('p-3', find.byIcon(Icons.arrow_downward_rounded)), findsOneWidget);
+       // Le titre est en gras.
+@@ -334,7 +347,7 @@ void main() {
+     testWidgets('un extrait ou une conversation touchés ouvrent la conversation ; une tâche, l’onglet Tâches',
+         (tester) async {
+       final opened = _Opened();
+-      await _pump(tester, _Server(), opened: opened);
++      await _pump(tester, _Server()..propositions = [_orthographe(), _tachesEnDouble()], opened: opened);
+       await _openReview(tester);
+ 
+       await tester.tap(find.byKey(const ValueKey('relecture_extrait_p-1_0')));
+@@ -348,7 +361,7 @@ void main() {
+       await tester.pumpAndSettle();
+       expect(opened.conversations, hasLength(2));
+ 
+-      await tester.tap(find.byKey(const ValueKey('relecture_cible_tache_t-1')));
++      await tester.tap(find.byKey(const ValueKey('relecture_cible_tache_t-4')));
+       await tester.pumpAndSettle();
+       expect(opened.tasks, 1);
+     });
+@@ -363,7 +376,7 @@ void main() {
+       await tester.pumpAndSettle();
+       expect(server.count('POST', '/v1/clone/relecture/propositions/p-1/accepter'), 1);
+       expect(find.byKey(const ValueKey('relecture_proposition_p-1')), findsNothing);
+-      expect(find.byKey(const ValueKey('relecture_proposition_p-2')), findsOneWidget);
++      expect(find.byKey(const ValueKey('relecture_proposition_p-3')), findsOneWidget);
+       expect(find.text('Fait'), findsOneWidget);
+       _expectNeutralToast(tester, Icons.check_rounded);
+       // Le changement se voit déjà dans l'entrée « Changements récents ».
+@@ -425,16 +438,16 @@ void main() {
+     });
+ 
+     testWidgets('Ignorer : la carte part sans confirmation ; plus rien : « Tout est vérifié »', (tester) async {
+-      final server = _Server()..propositions = [_tacheFaite()];
++      final server = _Server()..propositions = [_tachesEnDouble()];
+       await _pump(tester, server);
+       await _openReview(tester);
+ 
+-      await tester.tap(_inCard('p-2', find.text('Ignorer')));
++      await tester.tap(_inCard('p-4', find.text('Ignorer')));
+       await tester.pumpAndSettle();
+-      expect(server.count('POST', '/v1/clone/relecture/propositions/p-2/ignorer'), 1);
++      expect(server.count('POST', '/v1/clone/relecture/propositions/p-4/ignorer'), 1);
+       expect(find.byType(AlertDialog), findsNothing);
+       expect(find.text('Proposition ignorée'), findsOneWidget);
+-      expect(find.byKey(const ValueKey('relecture_proposition_p-2')), findsNothing);
++      expect(find.byKey(const ValueKey('relecture_proposition_p-4')), findsNothing);
+       expect(find.text('Tout est vérifié'), findsOneWidget);
+ 
+       await tester.tap(find.byType(OmiBackButton));
+diff --git a/app/test/widgets/taches_faites_test.dart b/app/test/widgets/taches_faites_test.dart
+new file mode 100644
+index 0000000000..2bca129358
+--- /dev/null
++++ b/app/test/widgets/taches_faites_test.dart
+@@ -0,0 +1,449 @@
++// Clone local : tâches pensées faites, validées d'un seul geste (0015). Onglet Tâches : la tâche reste à sa place,
++// cochée par Omi sans être cachée (marque distincte par la forme + « Omi : faite ? »), la barre « Omi pense que
++// … · Vérifier » (cachée sans proposition), cocher soi-même reste immédiat. Feuille : tout pré-coché, décocher,
++// tout cocher / décocher, Valider (n) → corps exact, « n tâches cochées » + Annuler (le changement groupé), refusées,
++// panne, jamais deux envois. « À vérifier » : une seule carte pour les tâches pensées faites. Anglais.
++import 'dart:async';
++import 'dart:convert';
++
++import 'package:flutter/material.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:http/http.dart' as http;
++import 'package:provider/provider.dart';
++import 'package:shared_preferences/shared_preferences.dart';
++
++import 'package:omi/backend/http/api/insights.dart';
++import 'package:omi/backend/http/api/relecture.dart';
++import 'package:omi/backend/http/api_result.dart';
++import 'package:omi/backend/preferences.dart';
++import 'package:omi/backend/schema/schema.dart';
++import 'package:omi/env/env.dart';
++import 'package:omi/l10n/app_localizations.dart';
++import 'package:omi/pages/action_items/action_items_page.dart';
++import 'package:omi/pages/action_items/widgets/task_row_parts.dart';
++import 'package:omi/pages/insights/insights_page.dart';
++import 'package:omi/pages/insights/relecture_controller.dart';
++import 'package:omi/pages/insights/taches_faites.dart';
++import 'package:omi/providers/action_items_provider.dart';
++import 'package:omi/providers/goals_provider.dart';
++import 'package:omi/providers/task_integration_provider.dart';
++import 'package:omi/ui/ui.dart';
++import 'package:omi/utils/platform/platform_manager.dart';
++
++Map<String, dynamic> _faite(String id, String tache, String titre) => {
++      'id': id,
++      'type': 'tache_terminee',
++      'nature': 'faite',
++      'titre': 'Tâche faite',
++      'extraits': [
++        {'texte': 'le devis est parti ce matin', 'source': 'Réunion du 20 oct.', 'conversation_id': 'c-1'},
++      ],
++      'cibles': [
++        {'type': 'tache', 'id': tache, 'titre': titre},
++      ],
++    };
++
++Map<String, dynamic> _passee(String id, String tache, String titre) => {
++      'id': id,
++      'type': 'tache_terminee',
++      'nature': 'passee',
++      'titre': 'Moment passé',
++      'explication': 'Le rendez-vous était hier à 10 h.',
++      'cibles': [
++        {'type': 'tache', 'id': tache, 'titre': titre},
++      ],
++    };
++
++Map<String, dynamic> _orthographe() => {
++      'id': 'p-o',
++      'type': 'orthographe',
++      'titre': 'Arnaud, pas Arnault',
++      'avant': 'Arnault',
++      'apres': 'Arnaud',
++    };
++
++/// Un faux serveur du clone : la relecture (lecture, validation groupée, annulation) et Insights (vide).
++class _Server {
++  final requests = <ApiRequest>[];
++  List<Map<String, dynamic>> propositions = [
++    _faite('p-1', 't-1', 'Envoyer le devis'),
++    _passee('p-2', 't-2', 'Rendez-vous chez le dentiste'),
++  ];
++  List<Map<String, dynamic>> changements = [];
++  int validateStatus = 200;
++  List<Map<String, dynamic>> refusees = [];
++  Completer<void>? hold;
++
++  static http.Response _json(Object body, [int status = 200]) =>
++      http.Response(jsonEncode(body), status, headers: {'content-type': 'application/json; charset=utf-8'});
++
++  int count(String method, String path) =>
++      requests.where((r) => r.method == method && Uri.parse(r.url).path == path).length;
++
++  Map<String, dynamic> lastBody(String path) =>
++      jsonDecode(requests.lastWhere((r) => Uri.parse(r.url).path == path).body) as Map<String, dynamic>;
++
++  Future<http.Response> send(ApiRequest request) async {
++    requests.add(request);
++    final segments = Uri.parse(request.url).pathSegments;
++    if (segments[1] == 'insights') {
++      return switch (segments[2]) {
++        'maintenant' => _json({'lignes': [], 'resume': null, 'maj': null, 'version': 0}),
++        'bilans' => _json({'bilans': []}),
++        _ => _json({'dossiers': []}),
++      };
++    }
++    if (segments.length == 3) {
++      return _json({'propositions': propositions, 'changements': changements, 'derniere_relecture': null});
++    }
++    final hold = this.hold;
++    if (hold != null) await hold.future;
++    if (segments[3] == 'taches-faites') {
++      if (validateStatus != 200) return _json({'detail': 'boom'}, validateStatus);
++      final body = jsonDecode(request.body) as Map<String, dynamic>;
++      final accept = (body['accepter'] as List).cast<String>();
++      final ignore = (body['ignorer'] as List).cast<String>();
++      final refused = {for (final r in refusees) r['id']};
++      propositions =
++          propositions.where((p) => refused.contains(p['id']) || !{...accept, ...ignore}.contains(p['id'])).toList();
++      final accepted = accept.where((id) => !refused.contains(id)).length;
++      final changement = accepted == 0
++          ? null
++          : {
++              'id': 'g-1',
++              'type': 'tache_terminee',
++              'titre': '$accepted tâches cochées d’un coup',
++              'details': [],
++              'fait_le': '2026-10-21T08:00:00+00:00',
++              'annulable': true,
++              'annule_le': null,
++            };
++      if (changement != null) changements = [changement, ...changements];
++      return _json({'changement': changement, 'acceptees': accepted, 'ignorees': ignore.length, 'refusees': refusees});
++    }
++    // …/changements/{id}/annuler
++    final index = changements.indexWhere((c) => c['id'] == segments[4]);
++    changements[index] = {...changements[index], 'annulable': false, 'annule_le': '2026-10-21T08:05:00+00:00'};
++    return _json({'changement': changements[index]});
++  }
++}
++
++class _LoadedTaskIntegrationProvider extends TaskIntegrationProvider {
++  @override
++  bool get hasLoaded => true;
++}
++
++class _Tasks {
++  var fetches = 0;
++  final completions = <String, bool>{};
++  final items = const [
++    ActionItemWithMetadata(id: 't-1', description: 'Envoyer le devis', completed: false, sortOrder: 1000),
++    ActionItemWithMetadata(id: 't-2', description: 'Rendez-vous chez le dentiste', completed: false, sortOrder: 2000),
++    ActionItemWithMetadata(id: 't-3', description: 'Acheter du pain', completed: false, sortOrder: 3000),
++  ];
++
++  Future<ActionItemsResponse?> fetch({
++    int limit = 100,
++    int offset = 0,
++    bool? completed,
++    String? conversationId,
++    DateTime? startDate,
++    DateTime? endDate,
++    DateTime? dueStartDate,
++    DateTime? dueEndDate,
++  }) async {
++    fetches++;
++    return ActionItemsResponse(actionItems: items);
++  }
++}
++
++Future<(ActionItemsProvider, RelectureController, _Tasks)> _pumpTasks(
++  WidgetTester tester,
++  _Server server, {
++  Locale locale = const Locale('fr'),
++}) async {
++  SharedPreferences.setMockInitialValues({});
++  await SharedPreferencesUtil.init();
++  tester.view.physicalSize = const Size(390, 1400);
++  tester.view.devicePixelRatio = 1;
++  addTearDown(tester.view.reset);
++  final tasks = _Tasks();
++  final provider = ActionItemsProvider(
++    getActionItems: tasks.fetch,
++    updateActionItemRequest: (id, {description, completed, dueAt}) async {
++      if (completed != null) tasks.completions[id] = completed;
++      return ActionItemWithMetadata(id: id, description: id, completed: completed ?? false);
++    },
++  );
++  addTearDown(provider.dispose);
++  final relecture = RelectureController(api: RelectureApi(baseUrl: 'https://example.invalid/', send: server.send));
++  addTearDown(relecture.dispose);
++  await tester.pumpWidget(MaterialApp(
++    localizationsDelegates: AppLocalizations.localizationsDelegates,
++    supportedLocales: AppLocalizations.supportedLocales,
++    locale: locale,
++    home: MultiProvider(
++      providers: [
++        ChangeNotifierProvider<ActionItemsProvider>.value(value: provider),
++        ChangeNotifierProvider<GoalsProvider>.value(value: GoalsProvider()),
++        ChangeNotifierProvider<TaskIntegrationProvider>.value(value: _LoadedTaskIntegrationProvider()),
++        ChangeNotifierProvider<RelectureController>.value(value: relecture),
++      ],
++      child: const Scaffold(body: ActionItemsPage()),
++    ),
++  ));
++  await provider.ensureLoaded();
++  await tester.pumpAndSettle();
++  return (provider, relecture, tasks);
++}
++
++Future<void> _openSheet(WidgetTester tester) async {
++  await tester.tap(find.byKey(const ValueKey('taches_faites_bar')));
++  await tester.pumpAndSettle();
++}
++
++Finder _inRow(String id, Finder matching) =>
++    find.descendant(of: find.byKey(ValueKey('taches_faites_row_$id')), matching: matching);
++
++TacheFaiteCheckbox _box(WidgetTester tester, String id) =>
++    tester.widget<TacheFaiteCheckbox>(find.byKey(ValueKey('taches_faites_check_$id')));
++
++void main() {
++  setUp(() {
++    OmiColors.active = OmiPalette.light;
++    PlatformManager.initializeForLocalHarness();
++    // Persistance de l'ordre / du retrait (non injectable) : un port local mort, comme les tests de l'onglet.
++    Env.overrideApiBaseUrl('http://127.0.0.1:9/');
++  });
++  tearDown(Env.clearApiBaseUrlOverrideForTesting);
++
++  group('onglet Tâches', () {
++    testWidgets('les tâches pensées faites restent à leur place, cochées par Omi sans être cachées', (tester) async {
++      await _pumpTasks(tester, _Server());
++
++      // Toujours dans la liste des tâches ouvertes, dans leur ordre.
++      double top(String text) => tester.getTopLeft(find.text(text)).dy;
++      expect(top('Envoyer le devis'), lessThan(top('Rendez-vous chez le dentiste')));
++      expect(top('Rendez-vous chez le dentiste'), lessThan(top('Acheter du pain')));
++      // Marque distincte (une coche dans le cercle pointillé), mention selon la nature.
++      expect(find.byKey(const ValueKey('omi_done_mark_t-1')), findsOneWidget);
++      expect(find.byKey(const ValueKey('omi_done_mark_t-2')), findsOneWidget);
++      expect(find.byKey(const ValueKey('omi_done_mark_t-3')), findsNothing);
++      expect(find.byType(TaskOmiDoneMark), findsNWidgets(3), reason: 'deux tâches + la barre');
++      expect(find.text('Omi : faite ?'), findsOneWidget);
++      expect(find.text('Omi : moment passé ?'), findsOneWidget);
++      // Pas barrées : elles ne sont pas faites tant que Mike n'a pas validé.
++      final title = tester.widget<Text>(find.text('Envoyer le devis'));
++      expect(title.style?.decoration, isNot(TextDecoration.lineThrough));
++      // Daltonisme : encres neutres (ni l'ambre des tâches faites, ni rouge, ni vert).
++      final check = tester.widget<Icon>(
++          find.descendant(of: find.byKey(const ValueKey('omi_done_mark_t-1')), matching: find.byType(Icon)));
++      expect(check.color, OmiPalette.light.textPrimary);
++      expect(find.text('Omi pense que 2 tâches sont faites'), findsOneWidget);
++      expect(find.text('Vérifier'), findsOneWidget);
++    });
++
++    testWidgets('sans proposition : ni barre ni marque ; cocher soi-même reste immédiat', (tester) async {
++      final server = _Server()..propositions = [];
++      final (_, _, tasks) = await _pumpTasks(tester, server);
++
++      expect(find.byKey(const ValueKey('taches_faites_bar')), findsNothing);
++      expect(find.byType(TaskOmiDoneMark), findsNothing);
++      expect(find.byType(TaskCompletionMark), findsNWidgets(3));
++      await tester.tap(find.byType(TaskCompletionMark).last);
++      await tester.pumpAndSettle();
++      expect(tasks.completions, {'t-3': true});
++    });
++
++    testWidgets('une tâche sans proposition se coche toujours d’un toucher, à côté de celles d’Omi', (tester) async {
++      final (_, _, tasks) = await _pumpTasks(tester, _Server());
++      expect(find.byType(TaskCompletionMark), findsOneWidget);
++      await tester.tap(find.byType(TaskCompletionMark));
++      await tester.pumpAndSettle();
++      expect(tasks.completions, {'t-3': true});
++      expect(find.byType(BottomSheet), findsNothing);
++    });
++
++    testWidgets('toucher la marque ou la mention ouvre la feuille, centrée sur cette tâche', (tester) async {
++      await _pumpTasks(tester, _Server());
++
++      await tester.tap(find.byKey(const ValueKey('omi_done_mark_t-2')));
++      await tester.pumpAndSettle();
++      expect(find.text('Tâches faites ?'), findsOneWidget);
++      expect(tester.widget<TacheFaiteRow>(find.byKey(const ValueKey('taches_faites_row_p-2'))).focused, isTrue);
++      expect(tester.widget<TacheFaiteRow>(find.byKey(const ValueKey('taches_faites_row_p-1'))).focused, isFalse);
++      Navigator.of(tester.element(find.byType(TachesFaitesSheet))).pop();
++      await tester.pumpAndSettle();
++
++      await tester.tap(find.byKey(const ValueKey('omi_done_mention_t-1')));
++      await tester.pumpAndSettle();
++      expect(tester.widget<TacheFaiteRow>(find.byKey(const ValueKey('taches_faites_row_p-1'))).focused, isTrue);
++    });
++  });
++
++  group('feuille de validation', () {
++    testWidgets('chacune pré-cochée, avec sa nature ; décocher ; tout cocher / tout décocher', (tester) async {
++      await _pumpTasks(tester, _Server());
++      await _openSheet(tester);
++
++      expect(_box(tester, 'p-1').checked, isTrue);
++      expect(_box(tester, 'p-2').checked, isTrue);
++      expect(_inRow('p-1', find.text('Envoyer le devis')), findsOneWidget);
++      expect(_inRow('p-1', find.text('Faite')), findsOneWidget);
++      expect(_inRow('p-1', find.text('le devis est parti ce matin')), findsOneWidget);
++      expect(_inRow('p-1', find.text('— Réunion du 20 oct.')), findsOneWidget);
++      expect(_inRow('p-2', find.text('Moment passé')), findsOneWidget);
++      expect(_inRow('p-2', find.text('Le rendez-vous était hier à 10 h.')), findsOneWidget);
++      expect(find.text('Les tâches décochées restent à faire ; Omi ne les reproposera pas pour les mêmes raisons.'),
++          findsOneWidget);
++      expect(find.text('Valider (2)'), findsOneWidget);
++
++      await tester.tap(find.byKey(const ValueKey('taches_faites_row_p-1')));
++      await tester.pump();
++      expect(_box(tester, 'p-1').checked, isFalse);
++      expect(find.text('Valider (1)'), findsOneWidget);
++      expect(find.text('Tout cocher'), findsOneWidget);
++
++      await tester.tap(find.text('Tout cocher'));
++      await tester.pump();
++      expect(find.text('Valider (2)'), findsOneWidget);
++      await tester.tap(find.text('Tout décocher'));
++      await tester.pump();
++      expect(_box(tester, 'p-1').checked, isFalse);
++      expect(_box(tester, 'p-2').checked, isFalse);
++      expect(find.text('Valider (0)'), findsOneWidget);
++      // La case dit l'état par sa forme (pleine / vide), jamais par le rouge ou le vert.
++      const light = OmiPalette.light;
++      for (final color in [light.accent, light.onAccent, light.textTertiary]) {
++        expect([light.success, light.danger], isNot(contains(color)));
++      }
++    });
++
++    testWidgets('Valider : accepter = cochées, ignorer = décochées ; « 1 tâche cochée » + Annuler ; tout relu',
++        (tester) async {
++      final server = _Server();
++      final (_, relecture, tasks) = await _pumpTasks(tester, server);
++      await _openSheet(tester);
++      final fetchesBefore = tasks.fetches;
++      final readsBefore = server.count('GET', '/v1/clone/relecture');
++
++      await tester.tap(find.byKey(const ValueKey('taches_faites_row_p-2')));
++      await tester.pump();
++      await tester.tap(find.text('Valider (1)'));
++      await tester.pumpAndSettle();
++
++      expect(server.lastBody('/v1/clone/relecture/taches-faites/valider'), {
++        'accepter': ['p-1'],
++        'ignorer': ['p-2'],
++      });
++      expect(find.byType(TachesFaitesSheet), findsNothing);
++      expect(find.text('1 tâche cochée'), findsOneWidget);
++      final toastIcon =
++          tester.widget<Icon>(find.descendant(of: find.byType(SnackBar), matching: find.byIcon(Icons.check_rounded)));
++      expect([OmiPalette.light.success, OmiPalette.light.danger], isNot(contains(toastIcon.color)));
++      expect(tasks.fetches, greaterThan(fetchesBefore), reason: 'la liste des tâches est relue');
++      expect(server.count('GET', '/v1/clone/relecture'), greaterThan(readsBefore), reason: 'la relecture est relue');
++      expect(find.byKey(const ValueKey('taches_faites_bar')), findsNothing);
++      expect(find.byType(TaskOmiDoneMark), findsNothing);
++      expect(relecture.changements.first.id, 'g-1');
++
++      final fetchesAfter = tasks.fetches;
++      await tester.tap(find.text('Annuler'));
++      await tester.pumpAndSettle();
++      expect(server.count('POST', '/v1/clone/relecture/changements/g-1/annuler'), 1);
++      expect(find.text('Changement annulé'), findsOneWidget);
++      expect(tasks.fetches, greaterThan(fetchesAfter), reason: 'les tâches décochées reviennent');
++    });
++
++    testWidgets('refusées : un message discret avec le compte', (tester) async {
++      final server = _Server()
++        ..refusees = [
++          {'id': 'p-2', 'raison': 'La tâche a été supprimée.'}
++        ];
++      await _pumpTasks(tester, server);
++      await _openSheet(tester);
++      await tester.tap(find.text('Valider (2)'));
++      await tester.pumpAndSettle();
++      expect(find.text('1 tâche cochée · 1 n’a pas pu être cochée'), findsOneWidget);
++      // La refusée reste proposée.
++      expect(find.text('Omi pense qu’une tâche est faite'), findsOneWidget);
++    });
++
++    testWidgets('panne : le message dans la feuille, les choix restent, la liste est relue ; jamais deux envois',
++        (tester) async {
++      final server = _Server()..validateStatus = 500;
++      await _pumpTasks(tester, server);
++      await _openSheet(tester);
++      await tester.tap(find.byKey(const ValueKey('taches_faites_row_p-2')));
++      await tester.pump();
++      final reads = server.count('GET', '/v1/clone/relecture');
++
++      await tester.tap(find.text('Valider (1)'));
++      await tester.pumpAndSettle();
++      expect(find.byType(TachesFaitesSheet), findsOneWidget);
++      expect(find.text('Impossible pour l’instant. Réessayez.'), findsOneWidget);
++      expect(_box(tester, 'p-2').checked, isFalse);
++      expect(server.count('GET', '/v1/clone/relecture'), reads + 1);
++
++      server
++        ..validateStatus = 200
++        ..hold = Completer<void>();
++      await tester.tap(find.text('Valider (1)'));
++      await tester.pump();
++      await tester.tap(find.byKey(const ValueKey('taches_faites_validate')), warnIfMissed: false);
++      await tester.pump();
++      server.hold!.complete();
++      server.hold = null;
++      await tester.pumpAndSettle();
++      expect(server.count('POST', '/v1/clone/relecture/taches-faites/valider'), 2, reason: 'une panne + un envoi');
++      expect(find.byType(TachesFaitesSheet), findsNothing);
++    });
++  });
++
++  group('« À vérifier »', () {
++    testWidgets(
++        'UNE carte pour les tâches pensées faites, qui ouvre la même feuille ; la carte de l’onglet compte tout',
++        (tester) async {
++      final server = _Server()..propositions = [..._Server().propositions, _orthographe()];
++      tester.view.physicalSize = const Size(390, 2400);
++      tester.view.devicePixelRatio = 1;
++      addTearDown(tester.view.reset);
++      await tester.pumpWidget(MaterialApp(
++        localizationsDelegates: AppLocalizations.localizationsDelegates,
++        supportedLocales: AppLocalizations.supportedLocales,
++        locale: const Locale('fr'),
++        home: Scaffold(body: InsightsPage(api: InsightsApi(baseUrl: 'https://example.invalid/', send: server.send))),
++      ));
++      await tester.pumpAndSettle();
++      expect(find.text('3 propositions d’Omi à vérifier'), findsOneWidget);
++
++      await tester.tap(find.byKey(const ValueKey('relecture_card')));
++      await tester.pumpAndSettle();
++      expect(find.text('2 tâches semblent faites'), findsOneWidget);
++      expect(find.byKey(const ValueKey('relecture_proposition_p-1')), findsNothing);
++      expect(find.byKey(const ValueKey('relecture_proposition_p-2')), findsNothing);
++      expect(find.byKey(const ValueKey('relecture_proposition_p-o')), findsOneWidget);
++
++      await tester.tap(find.byKey(const ValueKey('relecture_taches_faites_review')));
++      await tester.pumpAndSettle();
++      expect(find.text('Valider (2)'), findsOneWidget);
++      await tester.tap(find.text('Valider (2)'));
++      await tester.pumpAndSettle();
++      expect(find.text('2 tâches cochées'), findsOneWidget);
++      expect(find.byKey(const ValueKey('relecture_taches_faites')), findsNothing);
++      expect(find.byKey(const ValueKey('relecture_proposition_p-o')), findsOneWidget);
++    });
++  });
++
++  testWidgets('en anglais aussi', (tester) async {
++    await _pumpTasks(tester, _Server(), locale: const Locale('en'));
++    expect(find.text('Omi thinks 2 tasks are done'), findsOneWidget);
++    expect(find.text('Omi: done?'), findsOneWidget);
++    expect(find.text('Omi: time passed?'), findsOneWidget);
++    await _openSheet(tester);
++    expect(find.text('Done tasks?'), findsOneWidget);
++    expect(find.text('Confirm (2)'), findsOneWidget);
++    expect(find.text('Uncheck All'), findsOneWidget);
++    expect(_inRow('p-2', find.text('Time has passed')), findsOneWidget);
++  });
++}
