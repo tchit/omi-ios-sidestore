@@ -134,6 +134,7 @@ jobs:
           test/unit/reprocess_reliability_test.dart test/widgets/reprocess_failure_message_test.dart
           test/unit/env_test.dart test/unit/relecture_test.dart test/widgets/relecture_test.dart
           test/unit/taches_faites_test.dart test/widgets/taches_faites_test.dart
+          test/unit/cochees_auto_test.dart test/widgets/cochees_auto_test.dart
 
       - name: Test de connexion vers le serveur personnel
         working-directory: omi/app
