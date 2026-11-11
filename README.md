@@ -28,6 +28,11 @@ s'appliquent plus (nouvel `OMI_COMMIT`), la compilation s'arrête : les refaire 
 - `0003` : message « lié à l'app Plaud » au choix d'un NotePin S, carte correspondante sur la page de l'appareil,
   modèle « Plaud NotePin S » et firmware inconnu au lieu de « PLAUD NotePin » / « 1.0.0 ».
 - `0004` : tests `test/plaud/` (transport simulé), lancés par le flux avant la compilation.
+- `0017` (2026-11-11, repris d'Omi officiel) : les listes sauvegardées par l'app (appareils, vocabulaire, mémoires
+  en attente, recherches récentes) ne sont plus vidées à chaque lancement sur iOS (amont #23548, lecture seulement :
+  ce qui a déjà été mis de côté sous `<clé>.corrupt-…` n'est ni restauré ni effacé) ; l'ouverture d'une longue
+  conversation ne compare plus chaque ligne à toutes les autres (amont #23431, cette seule fonction) ; filtre des
+  mémoires : rien d'enregistré = « Tout » (amont #22792).
 
 Après installation, un NotePin S resté appairé n'est plus connecté ; « Oublier l'appareil » dans Omi le retire.
 Le bouton d'enregistrement utilise alors le micro de l'iPhone. Un Plaud non identifié n'est pas connecté non plus :

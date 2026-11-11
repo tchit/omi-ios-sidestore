@@ -118,6 +118,8 @@ jobs:
         # suivants viennent de 0006-0009 (discussions séparées, résumés gardés, Insights, Corriger) ou sont ceux
         # d'Omi sur l'accueil à trois onglets ; 2026-10-20 : 0011-0014 (sources des sections, nommer plusieurs
         # locuteurs, régénération fiable + MagicDNS, relecture de nuit)
+        # 2026-11-11 : 0017 (listes sauvegardées gardées d'un lancement à l'autre, secondes de la transcription en
+        # un passage)
         run: >-
           flutter test test/plaud/ test/unit/firmware_update_build_policy_test.dart
           test/unit/native_bluetooth_discoverer_plaud_test.dart
@@ -135,6 +137,7 @@ jobs:
           test/unit/env_test.dart test/unit/relecture_test.dart test/widgets/relecture_test.dart
           test/unit/taches_faites_test.dart test/widgets/taches_faites_test.dart
           test/unit/cochees_auto_test.dart test/widgets/cochees_auto_test.dart
+          test/unit/preferences_string_list_restart_test.dart test/perf/detail_can_display_seconds_test.dart
 
       - name: Test de connexion vers le serveur personnel
         working-directory: omi/app

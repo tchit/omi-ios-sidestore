@@ -1,0 +1,236 @@
+diff --git a/app/lib/backend/preferences.dart b/app/lib/backend/preferences.dart
+index c87e0d03d1..bd1377f8d7 100644
+--- a/app/lib/backend/preferences.dart
++++ b/app/lib/backend/preferences.dart
+@@ -156,6 +156,11 @@ class SharedPreferencesUtil {
+     }
+   }
+ 
++  /// Une liste de chaînes relue du disque. Pas `value is List<String>` : sur iOS, une liste sauvegardée revient
++  /// en `List<Object?>`, que `SharedPreferences.get` ne convertit pas ; ce test rejetait toute liste valide
++  /// (amont #23548).
++  static bool _isStoredStringList(Object value) => value is List && value.every((item) => item is String);
++
+   static Future<void> _quarantineBootSettings() async {
+     final prefs = _preferences!;
+     final expected = <String, bool Function(Object)>{
+@@ -167,7 +172,7 @@ class SharedPreferencesUtil {
+       'uid': (value) => value is String,
+       'fullName': (value) => value is String,
+       'batchModeEnabled': (value) => value is bool,
+-      'flash_page_pending_uploads': (value) => value is List<String>,
++      'flash_page_pending_uploads': _isStoredStringList,
+       'limitless_wal_migration_v1': (value) => value is bool,
+     };
+     for (final entry in expected.entries) {
+@@ -1533,9 +1538,13 @@ class SharedPreferencesUtil {
+   double getDouble(String key, {double defaultValue = 0.0}) =>
+       PhysicalQualification.enabled ? _preferences?.getDouble(key) ?? defaultValue : _readOrDefault(key, defaultValue);
+ 
+-  List<String> getStringList(String key, {List<String> defaultValue = const []}) => PhysicalQualification.enabled
+-      ? _preferences?.getStringList(key) ?? defaultValue
+-      : _readOrDefault(key, defaultValue);
++  List<String> getStringList(String key, {List<String> defaultValue = const []}) {
++    if (PhysicalQualification.enabled) return _preferences?.getStringList(key) ?? defaultValue;
++    final value = _preferences?.get(key);
++    // relue du disque, une liste est List<Object?>, pas List<String> : voir _isStoredStringList
++    if (value is List && value is! List<String> && _isStoredStringList(value)) return List<String>.from(value);
++    return _readOrDefault(key, defaultValue);
++  }
+ 
+   Future<bool> saveString(String key, String value) async => await _preferences?.setString(key, value) ?? false;
+ 
+diff --git a/app/lib/backend/schema/transcript_segment.dart b/app/lib/backend/schema/transcript_segment.dart
+index 86fbf17750..c5ab21e247 100644
+--- a/app/lib/backend/schema/transcript_segment.dart
++++ b/app/lib/backend/schema/transcript_segment.dart
+@@ -208,13 +208,17 @@ class TranscriptSegment {
+     return buffer.toString().trim();
+   }
+ 
++  /// Whether no segment starts or ends after a later one: the pairwise check
++  /// `a.start > b.end || a.end > b.start` for every earlier `a`, in one pass
++  /// against the largest earlier start and end (opening a 1,200-line
++  /// conversation used to cost 720k pair comparisons on the UI isolate).
+   static bool canDisplaySeconds(List<TranscriptSegment> segments) {
+-    for (var i = 0; i < segments.length; i++) {
+-      for (var j = i + 1; j < segments.length; j++) {
+-        if (segments[i].start > segments[j].end || segments[i].end > segments[j].start) {
+-          return false;
+-        }
+-      }
++    var maxStart = double.negativeInfinity;
++    var maxEnd = double.negativeInfinity;
++    for (final segment in segments) {
++      if (maxStart > segment.end || maxEnd > segment.start) return false;
++      if (segment.start > maxStart) maxStart = segment.start;
++      if (segment.end > maxEnd) maxEnd = segment.end;
+     }
+     return true;
+   }
+diff --git a/app/lib/providers/memories_provider.dart b/app/lib/providers/memories_provider.dart
+index 93e223b09d..228fd5445c 100644
+--- a/app/lib/providers/memories_provider.dart
++++ b/app/lib/providers/memories_provider.dart
+@@ -370,17 +370,33 @@ class MemoriesProvider extends ChangeNotifier {
+     notifyListeners();
+   }
+ 
+-  void toggleCategoryFilter(MemoryCategory category) async {
++  Future<void> toggleCategoryFilter(MemoryCategory category) async {
+     if (_selectedCategories.contains(category)) {
+       _selectedCategories.remove(category);
+     } else {
+       _selectedCategories.add(category);
+     }
+     _showOnlyManual = false; // Reset manual-only filter when setting a category filter
++    _selectedCategories = normalizeCategorySelection(_selectedCategories);
+     notifyListeners();
+ 
+     final prefs = await SharedPreferences.getInstance();
+-    await prefs.setStringList('memories_filter_categories', _selectedCategories.map((e) => e.name).toList());
++    if (_selectedCategories.isEmpty) {
++      // Selecting every category is All; persist that as no filter so the
++      // sheet keeps showing All checked on the next open.
++      await prefs.remove('memories_filter_categories');
++    } else {
++      await prefs.setStringList('memories_filter_categories', _selectedCategories.map((e) => e.name).toList());
++    }
++  }
++
++  /// An empty set means All. Selecting every category is the same "show
++  /// everything" state, so it collapses to empty instead of leaving All
++  /// unchecked with a category row ticked.
++  @visibleForTesting
++  static Set<MemoryCategory> normalizeCategorySelection(Iterable<MemoryCategory> selection) {
++    final normalized = selection.toSet();
++    return normalized.length == MemoryCategory.values.length ? <MemoryCategory>{} : normalized;
+   }
+ 
+   void clearCategoryFilter() async {
+@@ -579,16 +595,15 @@ class MemoriesProvider extends ChangeNotifier {
+     final filterList = prefs.getStringList('memories_filter_categories');
+ 
+     if (filterList == null) {
+-      _selectedCategories = {
+-        MemoryCategory.system,
+-        MemoryCategory.interesting,
+-        MemoryCategory.manual,
+-        MemoryCategory.workflow,
+-      };
++      // Nothing saved is the All view. Seeding every category here left All
++      // unchecked and every category row ticked, so tapping a category removed
++      // it from the view instead of filtering to it.
++      _selectedCategories = {};
+     } else {
+-      _selectedCategories = filterList
+-          .map((e) => MemoryCategory.values.firstWhere((c) => c.name == e, orElse: () => MemoryCategory.system))
+-          .toSet();
++      // Drop names this build no longer knows instead of silently checking System.
++      _selectedCategories = normalizeCategorySelection(
++        filterList.map((e) => MemoryCategory.values.where((c) => c.name == e).firstOrNull).whereType<MemoryCategory>(),
++      );
+     }
+     notifyListeners();
+   }
+diff --git a/app/test/perf/detail_can_display_seconds_test.dart b/app/test/perf/detail_can_display_seconds_test.dart
+new file mode 100644
+index 0000000000..0e53066324
+--- /dev/null
++++ b/app/test/perf/detail_can_display_seconds_test.dart
+@@ -0,0 +1,46 @@
++import 'dart:math';
++
++import 'package:flutter_test/flutter_test.dart';
++import 'package:omi/backend/schema/transcript_segment.dart';
++
++// The pairwise definition canDisplaySeconds replaced (O(n²) on detail open).
++bool _pairwise(List<TranscriptSegment> s) {
++  for (var i = 0; i < s.length; i++) {
++    for (var j = i + 1; j < s.length; j++) {
++      if (s[i].start > s[j].end || s[i].end > s[j].start) return false;
++    }
++  }
++  return true;
++}
++
++TranscriptSegment _segment(int i, double start, double end) => TranscriptSegment(
++      id: 's$i',
++      text: 'line $i',
++      speaker: 'SPEAKER_00',
++      isUser: false,
++      personId: null,
++      start: start,
++      end: end,
++      translations: const [],
++    );
++
++void main() {
++  test('one-pass canDisplaySeconds matches the pairwise definition', () {
++    final random = Random(23);
++    const specials = [double.nan, double.infinity, double.negativeInfinity, 0.0];
++    double value(double base) => random.nextInt(20) == 0 ? specials[random.nextInt(specials.length)] : base;
++    for (var trial = 0; trial < 3000; trial++) {
++      final n = random.nextInt(12);
++      var t = 0.0;
++      final segments = <TranscriptSegment>[];
++      for (var i = 0; i < n; i++) {
++        // Mostly ordered, sometimes overlapping or out of order.
++        t += random.nextDouble() * 4 - (random.nextInt(6) == 0 ? 5 : 0);
++        segments.add(_segment(i, value(t), value(t + random.nextDouble() * 3)));
++      }
++      expect(TranscriptSegment.canDisplaySeconds(segments), _pairwise(segments), reason: 'trial $trial: $segments');
++    }
++    final ordered = [for (var i = 0; i < 1200; i++) _segment(i, i * 2.0, i * 2.0 + 1.5)];
++    expect(TranscriptSegment.canDisplaySeconds(ordered), isTrue);
++  });
++}
+diff --git a/app/test/unit/preferences_string_list_restart_test.dart b/app/test/unit/preferences_string_list_restart_test.dart
+new file mode 100644
+index 0000000000..f34d49e51f
+--- /dev/null
++++ b/app/test/unit/preferences_string_list_restart_test.dart
+@@ -0,0 +1,43 @@
++import 'package:flutter_test/flutter_test.dart';
++import 'package:shared_preferences/shared_preferences.dart';
++
++import 'package:omi/backend/preferences.dart';
++
++/// After a restart, the platform channel hands every stored string list back as `List<Object?>`
++/// (StandardMessageCodec has no typed lists), and `SharedPreferences.get` returns it unconverted.
++/// `setMockInitialValues` with an `<Object?>` list reproduces exactly what a real device loads.
++void main() {
++  TestWidgetsFlutterBinding.ensureInitialized();
++
++  Iterable<String> archives(SharedPreferences prefs) => prefs.getKeys().where((k) => k.contains('.corrupt-'));
++
++  test('a string list saved before a restart is read back, not quarantined as a type mismatch', () async {
++    SharedPreferences.setMockInitialValues({
++      'cachedTranscriptionVocabulary': <Object?>['Omi', 'Tailscale'],
++    });
++    await SharedPreferencesUtil.init();
++
++    expect(SharedPreferencesUtil().getStringList('cachedTranscriptionVocabulary'), ['Omi', 'Tailscale']);
++
++    // The quarantine runs unawaited; give it the chance to have run.
++    await Future<void>.delayed(Duration.zero);
++    final prefs = await SharedPreferences.getInstance();
++    expect(prefs.getStringList('cachedTranscriptionVocabulary'), ['Omi', 'Tailscale'],
++        reason: 'the saved list was deleted on read');
++    expect(archives(prefs), isEmpty, reason: 'a valid list was archived as corrupt');
++  });
++
++  test('legacy pending uploads loaded at startup survive the boot schema check', () async {
++    // flash_page_pending_uploads is the pre-WAL Limitless upload queue that
++    // WalFileManager.migrateLegacyLimitlessFiles reads after init. Archived at boot, those
++    // recordings would never be migrated.
++    SharedPreferences.setMockInitialValues({
++      'flash_page_pending_uploads': <Object?>['/docs/audio_limitless_1.bin'],
++    });
++    await SharedPreferencesUtil.init();
++
++    final prefs = await SharedPreferences.getInstance();
++    expect(archives(prefs), isEmpty);
++    expect(SharedPreferencesUtil().getStringList('flash_page_pending_uploads'), ['/docs/audio_limitless_1.bin']);
++  });
++}
