@@ -1142,7 +1142,7 @@ index 0000000000..a822126155
 +ServerConversation _conversation({String overview = 'Les notes d’Omi actuelles.'}) => ServerConversation(
 +      id: 'conv-1',
 +      createdAt: DateTime(2026, 10, 9, 9).toUtc(),
-+      structured: Structured('Point avec Arnaud', overview),
++      structured: Structured('Point avec Armand', overview),
 +      summaryHistory: [
 +        SummaryVersion(
 +          id: 'v1',

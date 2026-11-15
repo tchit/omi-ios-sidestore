@@ -1193,7 +1193,7 @@ index 0000000000..1f839cc0fe
 +      'changement_id': changement,
 +      'tache_id': tache,
 +      'description': 'Tâche $tache',
-+      'raison': 'La radio a été faite mardi.',
++      'raison': 'Le vélo a été réparé mardi.',
 +      'nature': 'faite',
 +      'extrait': extrait,
 +      'fait_le': '2026-10-21T04:00:00+00:00',
@@ -1218,7 +1218,7 @@ index 0000000000..1f839cc0fe
 +  final failing = <String>{};
 +  List<Map<String, dynamic>> autos = [
 +    _auto('ch-1', 't-a',
-+        extrait: {'texte': 'on a fait la radio', 'source': 'Appel du 20 oct.', 'conversation_id': 'c-1'}),
++        extrait: {'texte': 'on a réparé le vélo', 'source': 'Appel du 20 oct.', 'conversation_id': 'c-1'}),
 +    _auto('ch-2', 't-b'),
 +  ];
 +  List<Map<String, dynamic>> propositions = [_faite('p-1', 't-1'), _faite('p-2', 't-2')];
@@ -1256,7 +1256,7 @@ index 0000000000..1f839cc0fe
 +    test('"cochees_auto" : tâche, raison, nature, preuve ; lecture indulgente ; "auto" sur les changements', () {
 +      final relecture = Relecture.fromJson({
 +        'cochees_auto': [
-+          _auto('ch-1', 't-a', extrait: {'texte': 'on a fait la radio', 'source': 'Appel', 'conversation_id': 'c-1'}),
++          _auto('ch-1', 't-a', extrait: {'texte': 'on a réparé le vélo', 'source': 'Appel', 'conversation_id': 'c-1'}),
 +          _auto('ch-2', 't-b'),
 +          {'changement_id': 'ch-3'},
 +          {'tache_id': 't-x'},
@@ -1271,9 +1271,9 @@ index 0000000000..1f839cc0fe
 +      expect(relecture.cocheesAuto.map((c) => c.key), ['ch-1/t-a', 'ch-2/t-b']);
 +      final a = relecture.cocheesAuto.first;
 +      expect(a.description, 'Tâche t-a');
-+      expect(a.raison, 'La radio a été faite mardi.');
++      expect(a.raison, 'Le vélo a été réparé mardi.');
 +      expect(a.nature, relectureNatureFaite);
-+      expect(a.extrait?.texte, 'on a fait la radio');
++      expect(a.extrait?.texte, 'on a réparé le vélo');
 +      expect(a.extrait?.conversationId, 'c-1');
 +      expect(a.faitLe, DateTime.utc(2026, 10, 21, 4));
 +      expect(relecture.cocheesAuto.last.extrait, isNull);
@@ -1545,9 +1545,9 @@ index 0000000000..badf3cf61f
 +    };
 +
 +List<Map<String, dynamic>> _defaultAutos() => [
-+      _auto('ch-1', 't-a', 'Faire examiner le doigt d’Hadrien', 'La radio a été faite mardi.',
-+          extrait: {'texte': 'on a fait la radio du doigt', 'source': 'Appel du 20 oct.', 'conversation_id': 'c-1'}),
-+      _auto('ch-2', 't-b', 'Ravito de Pascal', 'Fait vendredi.'),
++      _auto('ch-1', 't-a', 'Réparer le vélo d’Olivier', 'Le vélo a été réparé mardi.',
++          extrait: {'texte': 'on a réparé son vélo', 'source': 'Appel du 20 oct.', 'conversation_id': 'c-1'}),
++      _auto('ch-2', 't-b', 'Ravito de Bernard', 'Fait vendredi.'),
 +    ];
 +
 +Map<String, dynamic> _faite(String id, String tache, String titre) => {
@@ -1646,7 +1646,7 @@ index 0000000000..badf3cf61f
 +
 +const _openTask = ActionItemWithMetadata(id: 't-3', description: 'Acheter du pain', completed: false, sortOrder: 1000);
 +const _doneByOmi = ActionItemWithMetadata(
-+    id: 't-a', description: 'Faire examiner le doigt d’Hadrien', completed: true, sortOrder: 2000);
++    id: 't-a', description: 'Réparer le vélo d’Olivier', completed: true, sortOrder: 2000);
 +const _doneByMike =
 +    ActionItemWithMetadata(id: 't-m', description: 'Payer la cantine', completed: true, sortOrder: 3000);
 +
@@ -1754,9 +1754,9 @@ index 0000000000..badf3cf61f
 +      expect(find.text('À confirmer'), findsNothing);
 +      expect(_autoBox(tester, 'ch-1/t-a').checked, isTrue);
 +      expect(_autoBox(tester, 'ch-2/t-b').checked, isTrue);
-+      expect(_inAuto('ch-1/t-a', find.text('Faire examiner le doigt d’Hadrien')), findsOneWidget);
-+      expect(_inAuto('ch-1/t-a', find.text('La radio a été faite mardi.')), findsOneWidget);
-+      expect(_inAuto('ch-1/t-a', find.text('on a fait la radio du doigt')), findsOneWidget);
++      expect(_inAuto('ch-1/t-a', find.text('Réparer le vélo d’Olivier')), findsOneWidget);
++      expect(_inAuto('ch-1/t-a', find.text('Le vélo a été réparé mardi.')), findsOneWidget);
++      expect(_inAuto('ch-1/t-a', find.text('on a réparé son vélo')), findsOneWidget);
 +      expect(_inAuto('ch-1/t-a', find.text('— Appel du 20 oct.')), findsOneWidget);
 +      expect(_inAuto('ch-2/t-b', find.text('Fait vendredi.')), findsOneWidget);
 +      expect(find.text('OK'), findsOneWidget);

@@ -1407,10 +1407,10 @@ index 75a2708c4e..76e8bd58b5 100644
 +      'id': 'p-4',
 +      'type': 'tache_doublon',
 +      'titre': 'Deux fois la même tâche',
-+      'avant': 'Rappeler Arnaud (deux fois)',
-+      'apres': 'Rappeler Arnaud',
++      'avant': 'Rappeler Armand (deux fois)',
++      'apres': 'Rappeler Armand',
 +      'cibles': [
-+        {'type': 'tache', 'id': 't-4', 'titre': 'Rappeler Arnaud'},
++        {'type': 'tache', 'id': 't-4', 'titre': 'Rappeler Armand'},
 +      ],
 +    };
 +
@@ -1418,7 +1418,7 @@ index 75a2708c4e..76e8bd58b5 100644
        'id': 'p-3',
        'type': 'souvenir_doublon',
 @@ -295,9 +308,9 @@ void main() {
-       expect(_inCard('p-1', find.text('Arnaud D.')), findsOneWidget);
+       expect(_inCard('p-1', find.text('Armand D.')), findsOneWidget);
        expect(_inCard('p-1', find.text('Accepter')), findsOneWidget);
        expect(_inCard('p-1', find.text('Ignorer')), findsOneWidget);
 -      expect(_inCard('p-2', find.text('Tâche faite')), findsOneWidget);
@@ -1543,9 +1543,9 @@ index 0000000000..2bca129358
 +Map<String, dynamic> _orthographe() => {
 +      'id': 'p-o',
 +      'type': 'orthographe',
-+      'titre': 'Arnaud, pas Arnault',
-+      'avant': 'Arnault',
-+      'apres': 'Arnaud',
++      'titre': 'Armand, pas Armant',
++      'avant': 'Armant',
++      'apres': 'Armand',
 +    };
 +
 +/// Un faux serveur du clone : la relecture (lecture, validation groupée, annulation) et Insights (vide).
