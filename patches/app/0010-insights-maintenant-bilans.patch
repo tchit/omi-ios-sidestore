@@ -2433,7 +2433,7 @@ index 0000000000..baa46fff3f
 + "lignes": [
 +  {
 +   "id": "56a52cfd-1649-4d5f-b6f7-1e292b5d4ea3",
-+   "texte": "Demain, jeudi 8 oct., le tournage prend toute ta journée, et la proposition à Arnaud est attendue avant 16 h. Ne la lance pas maintenant : bloque un créneau court tôt demain, avant le tournage. Vise une version simple : deux ateliers courts, de trente minutes maximum, chiffrés séparément, qui aboutissent au comité du 20 octobre. Ça répond à sa peur du coût et à son besoin de résultat visible.",
++   "texte": "Demain, jeudi 8 oct., le tournage prend toute ta journée, et la proposition à Armand est attendue avant 16 h. Ne la lance pas maintenant : bloque un créneau court tôt demain, avant le tournage. Vise une version simple : deux ateliers courts, de trente minutes maximum, chiffrés séparément, qui aboutissent au comité du 20 octobre. Ça répond à sa peur du coût et à son besoin de résultat visible.",
 +   "nature": "agir",
 +   "domaine": "pro",
 +   "citation": "Côté budget, je suis serré jusqu'à fin novembre, je ne peux pas signer un programme complet maintenant.",
@@ -2452,12 +2452,12 @@ index 0000000000..baa46fff3f
 +    ],
 +    "sessions": [
 +     {
-+      "id": "banc-arnaud",
-+      "titre": "Proposition pour Arnaud",
++      "id": "banc-armand",
++      "titre": "Proposition pour Armand",
 +      "disponible": true
 +     },
 +     {
-+      "id": "banc-arnaud-2",
++      "id": "banc-armand-2",
 +      "titre": null,
 +      "disponible": false
 +     }
@@ -2465,13 +2465,13 @@ index 0000000000..baa46fff3f
 +    "conversations": [
 +     {
 +      "id": "banc-conv-reunion",
-+      "titre": "Réunion avec Arnaud et son équipe commerciale sur le programme de formation",
++      "titre": "Réunion avec Armand et son équipe commerciale sur le programme de formation",
 +      "date": "2026-10-07T06:00:00+00:00",
 +      "disponible": true
 +     },
 +     {
 +      "id": "banc-conv-reunion",
-+      "titre": "Réunion avec Arnaud et son équipe commerciale sur le programme de formation",
++      "titre": "Réunion avec Armand et son équipe commerciale sur le programme de formation",
 +      "date": "2026-10-07T06:00:00+00:00",
 +      "disponible": true
 +     }
@@ -2482,7 +2482,7 @@ index 0000000000..baa46fff3f
 +  },
 +  {
 +   "id": "ea954ce4-3401-436b-b7d4-d6b21dfcf272",
-+   "texte": "Pour que ta proposition parle à l'équipe d'Arnaud, appuie-toi sur leurs vrais clients. Le premier atelier pourrait par exemple porter sur un rendez-vous de Julien : s'il est convaincu, les autres suivront, et les deux ateliers permettent en plus de comparer les équipes.",
++   "texte": "Pour que ta proposition parle à l'équipe d'Armand, appuie-toi sur leurs vrais clients. Le premier atelier pourrait par exemple porter sur un rendez-vous de Justin : s'il est convaincu, les autres suivront, et les deux ateliers permettent en plus de comparer les équipes.",
 +   "nature": "conseil",
 +   "domaine": "pro",
 +   "citation": "Et surtout des exemples sur nos vrais clients, sinon ils décrochent au bout de cinq minutes.",
@@ -2494,7 +2494,7 @@ index 0000000000..baa46fff3f
 +    ],
 +    "sessions": [
 +     {
-+      "id": "banc-arnaud-2",
++      "id": "banc-armand-2",
 +      "titre": null,
 +      "disponible": false
 +     }
@@ -2502,7 +2502,7 @@ index 0000000000..baa46fff3f
 +    "conversations": [
 +     {
 +      "id": "banc-conv-reunion",
-+      "titre": "Réunion avec Arnaud et son équipe commerciale sur le programme de formation",
++      "titre": "Réunion avec Armand et son équipe commerciale sur le programme de formation",
 +      "date": "2026-10-07T06:00:00+00:00",
 +      "disponible": true
 +     }
@@ -2537,7 +2537,7 @@ index 0000000000..baa46fff3f
 +   }
 +  }
 + ],
-+ "resume": "Fin de journée dense : la proposition à Arnaud est à caser avant le tournage de demain, la date ferme pour le Client Bleu arrive vendredi, et ce soir le dialogue avec Hadrien s'est rouvert.",
++ "resume": "Fin de journée dense : la proposition à Armand est à caser avant le tournage de demain, la date ferme pour le Client Bleu arrive vendredi, et ce soir le dialogue avec Olivier s'est rouvert.",
 + "maj": "2026-10-07T18:31:13.071429+00:00",
 + "version": 1
 +}
@@ -2579,16 +2579,16 @@ index 0000000000..c9eca1eafe
 +      'lignes': [
 +        {
 +          'id': 'l1',
-+          'texte': 'Rappeler Arnaud avant midi',
++          'texte': 'Rappeler Armand avant midi',
 +          'nature': 'agir',
 +          'domaine': 'pro',
-+          'citation': 'je dois rappeler Arnaud',
++          'citation': 'je dois rappeler Armand',
 +          'sources': _sources(
 +            sessions: [
 +              {'id': 's-1', 'titre': 'Point du matin', 'disponible': true}
 +            ],
 +            conversations: [
-+              {'id': 'c-1', 'titre': 'Réunion Arnaud', 'date': '2026-10-10T09:00:00+00:00', 'disponible': true},
++              {'id': 'c-1', 'titre': 'Réunion Armand', 'date': '2026-10-10T09:00:00+00:00', 'disponible': true},
 +              {'id': 'c-2', 'titre': null, 'date': null, 'disponible': false},
 +            ],
 +          ),
@@ -2632,7 +2632,7 @@ index 0000000000..c9eca1eafe
 +          'statut': 'propose',
 +          'constat': null,
 +          'sources': _sources(conversations: [
-+            {'id': 'c-1', 'titre': 'Réunion Arnaud', 'date': null, 'disponible': true}
++            {'id': 'c-1', 'titre': 'Réunion Armand', 'date': null, 'disponible': true}
 +          ]),
 +        },
 +        {'id': 'y2', 'texte': 'Statut inconnu', 'statut': 'abandonné'},
@@ -2665,7 +2665,7 @@ index 0000000000..c9eca1eafe
 +      expect(now.updatedAt, DateTime.utc(2026, 10, 11, 4, 12));
 +      expect(now.version, 7);
 +      final l1 = now.lines.first;
-+      expect((l1.nature, l1.domain, l1.quote), ('agir', 'pro', 'je dois rappeler Arnaud'));
++      expect((l1.nature, l1.domain, l1.quote), ('agir', 'pro', 'je dois rappeler Armand'));
 +      expect(l1.sources.sessions.single.title, 'Point du matin');
 +      expect(l1.sources.conversations.map((c) => c.available), [true, false]);
 +      expect(l1.sources.openableCount, 2);
@@ -2725,7 +2725,7 @@ index 0000000000..c9eca1eafe
 +        (null, 'Sans titre'),
 +      ]);
 +      expect(bilan.trials.map((t) => (t.id, t.status)), [('y1', 'propose'), ('y2', 'abandonné')]);
-+      expect(bilan.trials.first.sources.conversations.single.title, 'Réunion Arnaud');
++      expect(bilan.trials.first.sources.conversations.single.title, 'Réunion Armand');
 +      expect(bilan.followUps.length, 2);
 +      final tried = bilan.followUps.first;
 +      expect((
@@ -2789,7 +2789,7 @@ index 0000000000..c9eca1eafe
 +      expect(bilan.trials.map((trial) => trial.text), ['Premier']);
 +      final dossier = InsightDossier.fromJson({
 +        'id': 'd',
-+        'titre': 'Arnaud',
++        'titre': 'Armand',
 +        'sections': [
 +          {
 +            'cle': 'besoins',
@@ -2970,13 +2970,13 @@ index 0000000000..f73e8802e4
 +      },
 +    };
 +
-+const _reunion = {'id': 'c-1', 'titre': 'Réunion Arnaud', 'date': '2026-10-10T09:00:00+00:00', 'disponible': true};
++const _reunion = {'id': 'c-1', 'titre': 'Réunion Armand', 'date': '2026-10-10T09:00:00+00:00', 'disponible': true};
 +const _point = {'id': 's-1', 'titre': 'Point du matin', 'disponible': true};
 +const _supprime = {'id': 'c-2', 'titre': 'Appel supprimé', 'date': null, 'disponible': false};
 +
 +List<Map<String, dynamic>> _defaultLines() => [
-+      _line('l1', 'Rappeler Arnaud avant midi',
-+          nature: 'agir', domain: 'pro', quote: 'je dois rappeler Arnaud', conversations: [_reunion]),
++      _line('l1', 'Rappeler Armand avant midi',
++          nature: 'agir', domain: 'pro', quote: 'je dois rappeler Armand', conversations: [_reunion]),
 +      _line('l2', 'Le sommeil remonte depuis trois jours',
 +          nature: 'encourager',
 +          domain: 'santé',
@@ -3087,8 +3087,8 @@ index 0000000000..f73e8802e4
 +        return _json({
 +          'dossiers': [
 +            {
-+              'id': 'arnaud',
-+              'titre': 'Arnaud',
++              'id': 'armand',
++              'titre': 'Armand',
 +              'gabarit': 'pro',
 +              'alias': [],
 +              'statut': 'actif',
@@ -3203,7 +3203,7 @@ index 0000000000..f73e8802e4
 +      expect(find.text('Maintenant'), findsOneWidget);
 +      expect(top(find.text('Maintenant')), lessThan(top(find.byKey(const ValueKey('insight_bilan_card')))));
 +      expect(top(find.byKey(const ValueKey('insight_bilan_card'))), lessThan(top(find.text('Dossiers'))));
-+      expect(top(find.text('Dossiers')), lessThan(top(find.text('Arnaud'))));
++      expect(top(find.text('Dossiers')), lessThan(top(find.text('Armand'))));
 +      expect(find.text('Une journée chargée côté pro, le reste va mieux.'), findsOneWidget);
 +      expect(find.textContaining('Mis à jour : '), findsOneWidget);
 +      // L'ordre d'Omi est gardé.
@@ -3223,7 +3223,7 @@ index 0000000000..f73e8802e4
 +
 +      expect(_inLine('l1', find.text('Agir · pro')), findsOneWidget);
 +      expect(_inLine('l1', find.byIcon(Icons.bolt_rounded)), findsOneWidget);
-+      expect(_inLine('l1', find.text('je dois rappeler Arnaud')), findsOneWidget);
++      expect(_inLine('l1', find.text('je dois rappeler Armand')), findsOneWidget);
 +      expect(_inLine('l2', find.text('Bon signe · santé')), findsOneWidget);
 +      expect(_inLine('l2', find.byIcon(Icons.thumb_up_alt_outlined)), findsOneWidget);
 +      expect(_inLine('l3', find.text('À surveiller')), findsOneWidget);
@@ -3258,7 +3258,7 @@ index 0000000000..f73e8802e4
 +        if (ink == null) continue;
 +        expect(_contrast(ink, surface), greaterThanOrEqualTo(4.5), reason: text.text.toPlainText());
 +      }
-+      final lineText = tester.widget<Text>(find.text('Rappeler Arnaud avant midi'));
++      final lineText = tester.widget<Text>(find.text('Rappeler Armand avant midi'));
 +      expect(_contrast(lineText.style!.color!, surface), greaterThan(15));
 +    });
 +
@@ -3323,7 +3323,7 @@ index 0000000000..f73e8802e4
 +    testWidgets('une seule source à ouvrir : toucher la ligne l’ouvre tout de suite', (tester) async {
 +      final opened = _Opened();
 +      await _pump(tester, _Server(), opened: opened);
-+      await tester.tap(find.text('Rappeler Arnaud avant midi'));
++      await tester.tap(find.text('Rappeler Armand avant midi'));
 +      await tester.pumpAndSettle();
 +      expect(opened.conversations, ['c-1']);
 +      expect(opened.chats, isEmpty);
@@ -3338,7 +3338,7 @@ index 0000000000..f73e8802e4
 +
 +      expect(find.text('Sources'), findsOneWidget);
 +      expect(find.text('Point du matin'), findsOneWidget);
-+      expect(find.text('Réunion Arnaud'), findsOneWidget);
++      expect(find.text('Réunion Armand'), findsOneWidget);
 +      final lost = find.byKey(const ValueKey('insight_source_conversation_c-2'));
 +      expect(find.descendant(of: lost, matching: find.text('Appel supprimé')), findsOneWidget);
 +      expect(find.descendant(of: lost, matching: find.text('N’est plus disponible')), findsOneWidget);
@@ -3412,7 +3412,7 @@ index 0000000000..f73e8802e4
 +      final server = _Server()..failNow = true;
 +      await _pump(tester, server);
 +      expect(find.text('Impossible de charger « Maintenant ».'), findsOneWidget);
-+      expect(find.text('Arnaud'), findsOneWidget);
++      expect(find.text('Armand'), findsOneWidget);
 +      expect(find.byKey(const ValueKey('insight_bilan_card')), findsOneWidget);
 +
 +      server.failNow = false;
@@ -3433,7 +3433,7 @@ index 0000000000..f73e8802e4
 +      server.lines = [_defaultLines().first];
 +      await key.currentState!.refresh();
 +      await tester.pumpAndSettle();
-+      expect(find.text('Rappeler Arnaud avant midi'), findsOneWidget);
++      expect(find.text('Rappeler Armand avant midi'), findsOneWidget);
 +      expect(server.count('GET', '/v1/insights/maintenant'), 2);
 +
 +      server.lines = _defaultLines();
@@ -3469,7 +3469,7 @@ index 0000000000..f73e8802e4
 +      expect(find.text('Impossible de charger les bilans.'), findsOneWidget);
 +      expect(find.byKey(const ValueKey('insight_bilan_card')), findsNothing);
 +      expect(find.byType(InsightNowLineTile), findsNWidgets(6));
-+      expect(find.text('Arnaud'), findsOneWidget);
++      expect(find.text('Armand'), findsOneWidget);
 +
 +      failing.failBilans = false;
 +      await tester.tap(find.text('Réessayer'));
@@ -3519,7 +3519,7 @@ index 0000000000..f73e8802e4
 +      final odd = find.byKey(const ValueKey('insight_trial_y2'));
 +      expect(find.descendant(of: odd, matching: find.text('Abandonné')), findsOneWidget);
 +      expect(find.descendant(of: odd, matching: find.byIcon(Icons.label_outline_rounded)), findsOneWidget);
-+      await tester.tap(find.descendant(of: trial, matching: find.text('Réunion Arnaud')));
++      await tester.tap(find.descendant(of: trial, matching: find.text('Réunion Armand')));
 +      await tester.pumpAndSettle();
 +      expect(opened.conversations, ['c-1']);
 +
@@ -3649,17 +3649,17 @@ index fc9afca00c..29db8d6b88 100644
 @@ -193,7 +197,8 @@ void main() {
      expect(find.textContaining('Proche · 1 note · Mis à jour le'), findsOneWidget);
      // L'ordre du serveur (le plus récemment mis à jour d'abord) est gardé.
-     expect(tester.getTopLeft(find.text('Arnaud')).dy, lessThan(tester.getTopLeft(find.text('Mon fils')).dy));
+     expect(tester.getTopLeft(find.text('Armand')).dy, lessThan(tester.getTopLeft(find.text('Mon fils')).dy));
 -    expect(Uri.parse(server.requests.single.url).queryParameters['statut'], 'actif');
 +    final list = server.requests.singleWhere((r) => Uri.parse(r.url).path == '/v1/insights/dossiers');
 +    expect(Uri.parse(list.url).queryParameters['statut'], 'actif');
      // Thème clair : texte noir sur carte blanche, jamais blanc sur blanc.
-     final title = tester.widget<Text>(find.text('Arnaud'));
+     final title = tester.widget<Text>(find.text('Armand'));
      expect(title.style?.color, OmiPalette.light.textPrimary);
 @@ -257,7 +262,10 @@ void main() {
      expect(opened.conversations, ['c-1']);
-     expect(find.text('Point Arnaud'), findsOneWidget);
-     expect(find.text('Réunion avec Arnaud'), findsOneWidget);
+     expect(find.text('Point Armand'), findsOneWidget);
+     expect(find.text('Réunion avec Armand'), findsOneWidget);
 -    expect(find.text('Appel supprimé · N’est plus disponible'), findsOneWidget);
 +    // 0010 : « N'est plus disponible » sur sa propre ligne, jamais mangé par un long titre.
 +    final lost = find.byKey(const ValueKey('insight_source_conversation_c-2'));
@@ -3669,7 +3669,7 @@ index fc9afca00c..29db8d6b88 100644
  
    testWidgets('appui long sur un élément → Retirer, confirmé, retiré sur le serveur', (tester) async {
 @@ -366,7 +374,13 @@ void main() {
-       ..archived.addAll(['arnaud', 'fils']);
+       ..archived.addAll(['armand', 'fils']);
      await tester.tap(find.text('Réessayer'));
      await tester.pumpAndSettle();
 -    expect(find.text('Pas encore d’insights'), findsOneWidget);
@@ -3723,7 +3723,7 @@ index 0000000000..2acf571a6b
 +    jsonDecode(File('test/fixtures/insights_maintenant_banc_2026-10-11.json').readAsStringSync())
 +        as Map<String, dynamic>;
 +
-+const _longTitle = 'Réunion avec Arnaud et son équipe commerciale sur le programme de formation';
++const _longTitle = 'Réunion avec Armand et son équipe commerciale sur le programme de formation';
 +
 +Map<String, dynamic> _sources({
 +  List<Map<String, dynamic>> conversations = const [],
@@ -3742,8 +3742,8 @@ index 0000000000..2acf571a6b
 +      http.Response(jsonEncode(body), status, headers: {'content-type': 'application/json; charset=utf-8'});
 +
 +  static const _resume = {
-+    'id': 'arnaud',
-+    'titre': 'Arnaud',
++    'id': 'armand',
++    'titre': 'Armand',
 +    'gabarit': 'pro',
 +    'alias': [],
 +    'statut': 'actif',
@@ -3785,7 +3785,7 @@ index 0000000000..2acf571a6b
 +                'Appuyer les ateliers sur leurs vrais clients.',
 +                'mike',
 +                _sources(
-+                  session: {'id': 'banc-arnaud-2', 'titre': null, 'disponible': false},
++                  session: {'id': 'banc-armand-2', 'titre': null, 'disponible': false},
 +                  conversations: [
 +                    {'id': 'c-perdue', 'titre': _longTitle, 'date': null, 'disponible': false},
 +                    {'id': 'c-sans-titre', 'titre': null, 'date': null, 'disponible': false},
@@ -3976,11 +3976,11 @@ index 0000000000..2acf571a6b
 +        expect(tester.getRect(find.text('Planning')).bottom, lessThanOrEqualTo(size.height));
 +        // La conversation reçue deux fois ne fait qu'une puce.
 +        expect(find.byKey(const ValueKey('insight_source_conversation_banc-conv-reunion')), findsOneWidget);
-+        await tester.ensureVisible(find.text('Proposition pour Arnaud'));
++        await tester.ensureVisible(find.text('Proposition pour Armand'));
 +        await tester.pumpAndSettle();
-+        await tester.tap(find.text('Proposition pour Arnaud'));
++        await tester.tap(find.text('Proposition pour Armand'));
 +        await tester.pumpAndSettle();
-+        expect(opened.chats, ['banc-arnaud']);
++        expect(opened.chats, ['banc-armand']);
 +      });
 +    }
 +  });
@@ -3993,9 +3993,9 @@ index 0000000000..2acf571a6b
 +    expect(tester.takeException(), isNull);
 +    expect(_line(_lineId(0)), findsOneWidget);
 +    expect(find.byType(InsightNowLineTile), findsNWidgets(3));
-+    expect(find.text('Arnaud'), findsOneWidget, reason: 'le dossier reçu deux fois est montré une fois');
++    expect(find.text('Armand'), findsOneWidget, reason: 'le dossier reçu deux fois est montré une fois');
 +
-+    await _scrollAndTap(tester, find.text('Arnaud'));
++    await _scrollAndTap(tester, find.text('Armand'));
 +    expect(tester.takeException(), isNull);
 +    expect(find.byKey(const ValueKey('insight_source_conversation_banc-conv-reunion')), findsOneWidget);
 +    await tester.tap(find.byType(OmiBackButton));
@@ -4016,7 +4016,7 @@ index 0000000000..2acf571a6b
 +
 +  testWidgets('3. le dossier et le bilan aussi', (tester) async {
 +    await _pump(tester, _Server());
-+    await _scrollAndTap(tester, find.text('Arnaud'));
++    await _scrollAndTap(tester, find.text('Armand'));
 +    _expectReadable(tester, atLeast: 10);
 +    await tester.tap(find.byType(OmiBackButton));
 +    await tester.pumpAndSettle();
@@ -4054,7 +4054,7 @@ index 0000000000..2acf571a6b
 +      (tester) async {
 +    final opened = _Opened();
 +    await _pump(tester, _Server(), opened: opened, size: const Size(390, 2400), scale: 1.3);
-+    await _scrollAndTap(tester, find.text('Arnaud'));
++    await _scrollAndTap(tester, find.text('Armand'));
 +    expect(tester.takeException(), isNull);
 +
 +    final lost = find.byKey(const ValueKey('insight_source_conversation_c-perdue'));
@@ -4064,7 +4064,7 @@ index 0000000000..2acf571a6b
 +    expect(find.descendant(of: lost, matching: find.byIcon(Icons.link_off_rounded)), findsOneWidget);
 +
 +    // Supprimée et sans titre : elle le dit, sans redire « n'est plus disponible ».
-+    final chat = find.byKey(const ValueKey('insight_source_chat_banc-arnaud-2'));
++    final chat = find.byKey(const ValueKey('insight_source_chat_banc-armand-2'));
 +    expect(find.descendant(of: chat, matching: find.text('Discussion supprimée')), findsOneWidget);
 +    expect(find.descendant(of: chat, matching: find.text('N’est plus disponible')), findsNothing);
 +    final untitled = find.byKey(const ValueKey('insight_source_conversation_c-sans-titre'));
@@ -4089,7 +4089,7 @@ index 0000000000..2acf571a6b
 +    expect(find.descendant(of: _line(_lineId(1)), matching: find.byIcon(Icons.hearing_outlined)), findsOneWidget);
 +    expect(find.descendant(of: _line(_lineId(0)), matching: find.text('Entendu dans une conversation')), findsNothing);
 +
-+    await _scrollAndTap(tester, find.text('Arnaud'));
++    await _scrollAndTap(tester, find.text('Armand'));
 +    final heard = find.byKey(const ValueKey('insight_element_e1'));
 +    expect(find.descendant(of: heard, matching: find.text('Entendu dans une conversation')), findsOneWidget);
 +    expect(find.descendant(of: heard, matching: find.byIcon(Icons.hearing_outlined)), findsOneWidget);

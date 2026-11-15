@@ -116,8 +116,9 @@ jobs:
         working-directory: omi/app
         # test/plaud/ vient de patches/app ; firmware et bluetooth sont ceux d'Omi sur les fichiers touchés ; les
         # suivants viennent de 0006-0009 (discussions séparées, résumés gardés, Insights, Corriger) ou sont ceux
-        # d'Omi sur l'accueil à trois onglets ; 2026-10-20 : 0011-0014 (sources des sections, nommer plusieurs
-        # locuteurs, régénération fiable + MagicDNS, relecture de nuit)
+        # d'Omi sur l'accueil à trois onglets ; 2026-10-11 : 0010 (Maintenant, bilans) ; 2026-10-20 : 0011-0014
+        # (sources des sections, nommer plusieurs locuteurs, régénération fiable + MagicDNS, relecture de nuit)
+        # 2026-10-21 : 0015-0016 (tâches pensées faites, cochées par Omi)
         # 2026-11-11 : 0017 (listes sauvegardées gardées d'un lancement à l'autre, secondes de la transcription en
         # un passage)
         run: >-

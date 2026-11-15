@@ -1633,10 +1633,10 @@ index 0000000000..b48fdcdb4c
 +
 +/// Un dossier tel que `dossier_detail` le rend : sections du gabarit dans l'ordre, même vides.
 +Map<String, dynamic> _detail() => {
-+      'id': 'arnaud',
-+      'titre': 'Arnaud',
++      'id': 'armand',
++      'titre': 'Armand',
 +      'gabarit': 'pro',
-+      'alias': ['Arnaud D.'],
++      'alias': ['Armand D.'],
 +      'statut': 'actif',
 +      'version': 4,
 +      'maj': '2026-10-09T18:30:00+00:00',
@@ -1658,11 +1658,11 @@ index 0000000000..b48fdcdb4c
 +              'revise': null,
 +              'sources': {
 +                'messages': ['m-1'],
-+                'session': {'id': 's-1', 'titre': 'Point Arnaud', 'disponible': true},
++                'session': {'id': 's-1', 'titre': 'Point Armand', 'disponible': true},
 +                'conversations': [
 +                  {
 +                    'id': 'c-1',
-+                    'titre': 'Réunion avec Arnaud',
++                    'titre': 'Réunion avec Armand',
 +                    'date': '2026-10-07T09:00:00+00:00',
 +                    'disponible': true
 +                  },
@@ -1707,10 +1707,10 @@ index 0000000000..b48fdcdb4c
 +  group('lecture d’un dossier', () {
 +    test('sections du gabarit dans l’ordre, éléments, citation, piste d’Omi et sources', () {
 +      final dossier = InsightDossier.fromJson(_detail());
-+      expect(dossier.id, 'arnaud');
-+      expect(dossier.summary.title, 'Arnaud');
++      expect(dossier.id, 'armand');
++      expect(dossier.summary.title, 'Armand');
 +      expect(dossier.summary.template, 'pro');
-+      expect(dossier.summary.aliases, ['Arnaud D.']);
++      expect(dossier.summary.aliases, ['Armand D.']);
 +      expect(dossier.summary.version, 4);
 +      expect(dossier.summary.updatedAt, DateTime.utc(2026, 10, 9, 18, 30));
 +      expect(dossier.summary.elementCount, 2);
@@ -1724,7 +1724,7 @@ index 0000000000..b48fdcdb4c
 +      expect(angle.revisedAt, isNull);
 +      expect(angle.sources.messages, ['m-1']);
 +      expect(angle.sources.session?.id, 's-1');
-+      expect(angle.sources.session?.title, 'Point Arnaud');
++      expect(angle.sources.session?.title, 'Point Armand');
 +      expect(angle.sources.session?.available, isTrue);
 +      expect(angle.sources.conversations.map((c) => (c.id, c.available)), [('c-1', true), ('c-2', false)]);
 +      expect(angle.sources.conversations.first.date, DateTime.utc(2026, 10, 7, 9));
@@ -1749,8 +1749,8 @@ index 0000000000..b48fdcdb4c
 +
 +    test('une ligne de liste sans id ni titre est refusée', () {
 +      expect(() => InsightDossierSummary.fromJson({'id': 'a', 'titre': ''}), throwsFormatException);
-+      expect(() => InsightDossierSummary.fromJson({'titre': 'Arnaud'}), throwsFormatException);
-+      final minimal = InsightDossierSummary.fromJson({'id': 'a', 'titre': 'Arnaud'});
++      expect(() => InsightDossierSummary.fromJson({'titre': 'Armand'}), throwsFormatException);
++      final minimal = InsightDossierSummary.fromJson({'id': 'a', 'titre': 'Armand'});
 +      expect(minimal.template, 'theme');
 +      expect(minimal.isActive, isTrue);
 +      expect(minimal.updatedAt, isNull);
@@ -1766,14 +1766,14 @@ index 0000000000..b48fdcdb4c
 +          requests.add(request);
 +          return _json({
 +            'dossiers': [
-+              {'id': 'arnaud', 'titre': 'Arnaud', 'gabarit': 'pro', 'statut': 'actif', 'version': 1, 'nb_elements': 3},
++              {'id': 'armand', 'titre': 'Armand', 'gabarit': 'pro', 'statut': 'actif', 'version': 1, 'nb_elements': 3},
 +              {'id': 'sans-titre', 'titre': ''},
 +            ],
 +          });
 +        },
 +      );
 +      final result = await api.list() as ApiSuccess<List<InsightDossierSummary>>;
-+      expect(result.data.single.title, 'Arnaud');
++      expect(result.data.single.title, 'Armand');
 +      expect(result.data.single.elementCount, 3);
 +      expect(result.rejectedRows, 1);
 +      expect(requests.single.method, 'GET');
@@ -1817,11 +1817,11 @@ index 0000000000..b48fdcdb4c
 +          return request.url.contains('disparu') ? _json({'detail': 'Dossier not found'}, 404) : _json(_detail());
 +        },
 +      );
-+      final found = await api.get('arnaud') as ApiSuccess<InsightDossier>;
++      final found = await api.get('armand') as ApiSuccess<InsightDossier>;
 +      expect(found.data.sections, hasLength(4));
 +      final gone = await api.get('disparu') as ApiFailure<InsightDossier>;
 +      expect(gone.problem.kind, ApiProblemKind.notFound);
-+      expect(Uri.parse(requests.first.url).path, '/v1/insights/dossiers/arnaud');
++      expect(Uri.parse(requests.first.url).path, '/v1/insights/dossiers/armand');
 +    });
 +
 +    test('retirer un élément : DELETE sur l’élément, rend le dossier à jour', () async {
@@ -1835,7 +1835,7 @@ index 0000000000..b48fdcdb4c
 +      );
 +      final result = await api.removeElement('dossier/1', 'e 2') as ApiSuccess<InsightRemoval<InsightDossier>>;
 +      expect(result.data.alreadyRemoved, isFalse);
-+      expect(result.data.dossier.id, 'arnaud');
++      expect(result.data.dossier.id, 'armand');
 +      expect(requests.single.method, 'DELETE');
 +      expect(requests.single.url, 'https://example.invalid/v1/insights/dossiers/dossier%2F1/elements/e%202');
 +    });
@@ -1844,7 +1844,7 @@ index 0000000000..b48fdcdb4c
 +      var body = <String, dynamic>{
 +        'status': 'ok',
 +        'deja_retire': true,
-+        'dossier': {'id': 'arnaud', 'titre': 'Arnaud', 'gabarit': 'pro', 'statut': 'archive', 'version': 5},
++        'dossier': {'id': 'armand', 'titre': 'Armand', 'gabarit': 'pro', 'statut': 'archive', 'version': 5},
 +      };
 +      final requests = <ApiRequest>[];
 +      final api = InsightsApi(
@@ -1854,14 +1854,14 @@ index 0000000000..b48fdcdb4c
 +          return _json(body);
 +        },
 +      );
-+      final result = await api.removeDossier('arnaud') as ApiSuccess<InsightRemoval<InsightDossierSummary>>;
++      final result = await api.removeDossier('armand') as ApiSuccess<InsightRemoval<InsightDossierSummary>>;
 +      expect(result.data.alreadyRemoved, isTrue);
 +      expect(result.data.dossier.isActive, isFalse);
 +      expect(requests.single.method, 'DELETE');
-+      expect(Uri.parse(requests.single.url).path, '/v1/insights/dossiers/arnaud');
++      expect(Uri.parse(requests.single.url).path, '/v1/insights/dossiers/armand');
 +
 +      body = {'status': 'ok'};
-+      final broken = await api.removeDossier('arnaud');
++      final broken = await api.removeDossier('armand');
 +      expect((broken as ApiFailure).problem.kind, ApiProblemKind.decode);
 +    });
 +  });
@@ -1947,17 +1947,17 @@ index 0000000000..fc9afca00c
 +      };
 +
 +  Map<String, List<Map<String, dynamic>>> _sections(String id) => switch (id) {
-+        'arnaud' => {
++        'armand' => {
 +            'angles': [
 +              _element(
 +                'e1',
 +                'Lui parler du budget avant la démo.',
 +                quote: 'parler du budget avant la démo',
-+                session: {'id': 's-1', 'titre': 'Point Arnaud', 'disponible': true},
++                session: {'id': 's-1', 'titre': 'Point Armand', 'disponible': true},
 +                conversations: [
 +                  {
 +                    'id': 'c-1',
-+                    'titre': 'Réunion avec Arnaud',
++                    'titre': 'Réunion avec Armand',
 +                    'date': '2026-10-07T09:00:00+00:00',
 +                    'disponible': true
 +                  },
@@ -1992,12 +1992,12 @@ index 0000000000..fc9afca00c
 +    final count = _sections(id).values.expand((e) => e).where((e) => !removedElements.contains(e['id'])).length;
 +    return {
 +      'id': id,
-+      'titre': id == 'arnaud' ? 'Arnaud' : 'Mon fils',
-+      'gabarit': id == 'arnaud' ? 'pro' : 'proche',
++      'titre': id == 'armand' ? 'Armand' : 'Mon fils',
++      'gabarit': id == 'armand' ? 'pro' : 'proche',
 +      'alias': [],
 +      'statut': archived.contains(id) ? 'archive' : 'actif',
 +      'version': 3,
-+      'maj': id == 'arnaud' ? '2026-10-09T18:30:00+00:00' : '2026-10-02T08:00:00+00:00',
++      'maj': id == 'armand' ? '2026-10-09T18:30:00+00:00' : '2026-10-02T08:00:00+00:00',
 +      'nb_elements': count,
 +    };
 +  }
@@ -2024,7 +2024,7 @@ index 0000000000..fc9afca00c
 +      if (failList) return _json({'detail': 'boom'}, 500);
 +      return _json({
 +        'dossiers': [
-+          for (final id in ['arnaud', 'fils'])
++          for (final id in ['armand', 'fils'])
 +            if (!archived.contains(id)) _resume(id)
 +        ],
 +      });
@@ -2080,17 +2080,17 @@ index 0000000000..fc9afca00c
 +    final server = _FakeServer();
 +    await _pump(tester, _page(server, _Opened()));
 +
-+    expect(find.text('Arnaud'), findsOneWidget);
++    expect(find.text('Armand'), findsOneWidget);
 +    expect(find.text('Mon fils'), findsOneWidget);
 +    expect(find.textContaining('Pro · 2 notes · Mis à jour le'), findsOneWidget);
 +    expect(find.textContaining('Proche · 1 note · Mis à jour le'), findsOneWidget);
 +    // L'ordre du serveur (le plus récemment mis à jour d'abord) est gardé.
-+    expect(tester.getTopLeft(find.text('Arnaud')).dy, lessThan(tester.getTopLeft(find.text('Mon fils')).dy));
++    expect(tester.getTopLeft(find.text('Armand')).dy, lessThan(tester.getTopLeft(find.text('Mon fils')).dy));
 +    expect(Uri.parse(server.requests.single.url).queryParameters['statut'], 'actif');
 +    // Thème clair : texte noir sur carte blanche, jamais blanc sur blanc.
-+    final title = tester.widget<Text>(find.text('Arnaud'));
++    final title = tester.widget<Text>(find.text('Armand'));
 +    expect(title.style?.color, OmiPalette.light.textPrimary);
-+    final card = tester.widget<Material>(find.ancestor(of: find.text('Arnaud'), matching: find.byType(Material)).first);
++    final card = tester.widget<Material>(find.ancestor(of: find.text('Armand'), matching: find.byType(Material)).first);
 +    expect(card.color, OmiPalette.light.surface1);
 +    expect(card.color, isNot(title.style?.color));
 +  });
@@ -2099,7 +2099,7 @@ index 0000000000..fc9afca00c
 +      (tester) async {
 +    final server = _FakeServer();
 +    await _pump(tester, _page(server, _Opened()));
-+    await tester.tap(find.text('Arnaud'));
++    await tester.tap(find.text('Armand'));
 +    await tester.pumpAndSettle();
 +
 +    final sections = ['Angles', 'Besoins', 'Propositions possibles', 'À suivre'];
@@ -2138,7 +2138,7 @@ index 0000000000..fc9afca00c
 +    final server = _FakeServer();
 +    final opened = _Opened();
 +    await _pump(tester, _page(server, opened));
-+    await tester.tap(find.text('Arnaud'));
++    await tester.tap(find.text('Armand'));
 +    await tester.pumpAndSettle();
 +
 +    expect(find.text('Sources'), findsOneWidget);
@@ -2148,15 +2148,15 @@ index 0000000000..fc9afca00c
 +    await tester.pumpAndSettle();
 +    expect(opened.chats, ['s-1']);
 +    expect(opened.conversations, ['c-1']);
-+    expect(find.text('Point Arnaud'), findsOneWidget);
-+    expect(find.text('Réunion avec Arnaud'), findsOneWidget);
++    expect(find.text('Point Armand'), findsOneWidget);
++    expect(find.text('Réunion avec Armand'), findsOneWidget);
 +    expect(find.text('Appel supprimé · N’est plus disponible'), findsOneWidget);
 +  });
 +
 +  testWidgets('appui long sur un élément → Retirer, confirmé, retiré sur le serveur', (tester) async {
 +    final server = _FakeServer();
 +    await _pump(tester, _page(server, _Opened()));
-+    await tester.tap(find.text('Arnaud'));
++    await tester.tap(find.text('Armand'));
 +    await tester.pumpAndSettle();
 +
 +    await tester.longPress(find.byKey(const ValueKey('insight_element_e2')));
@@ -2180,7 +2180,7 @@ index 0000000000..fc9afca00c
 +    await tester.pumpAndSettle();
 +
 +    final delete = server.requests.singleWhere((r) => r.method == 'DELETE');
-+    expect(Uri.parse(delete.url).path, '/v1/insights/dossiers/arnaud/elements/e2');
++    expect(Uri.parse(delete.url).path, '/v1/insights/dossiers/armand/elements/e2');
 +    expect(find.text('Proposer un essai de deux semaines.'), findsNothing);
 +    expect(find.text('Rien pour l’instant'), findsNWidgets(3));
 +    expect(find.text('Retiré'), findsOneWidget);
@@ -2195,7 +2195,7 @@ index 0000000000..fc9afca00c
 +      (tester) async {
 +    final server = _FakeServer()..goneElements.add('e2');
 +    await _pump(tester, _page(server, _Opened()));
-+    await tester.tap(find.text('Arnaud'));
++    await tester.tap(find.text('Armand'));
 +    await tester.pumpAndSettle();
 +    final readsBefore = server.requests.where((r) => r.method == 'GET').length;
 +
@@ -2227,13 +2227,13 @@ index 0000000000..fc9afca00c
 +    final delete = server.requests.singleWhere((r) => r.method == 'DELETE');
 +    expect(Uri.parse(delete.url).path, '/v1/insights/dossiers/fils');
 +    expect(find.text('Mon fils'), findsNothing);
-+    expect(find.text('Arnaud'), findsOneWidget);
++    expect(find.text('Armand'), findsOneWidget);
 +  });
 +
 +  testWidgets('appui long sur l’en-tête du dossier → Retirer le dossier, retour à la liste', (tester) async {
 +    final server = _FakeServer();
 +    await _pump(tester, _page(server, _Opened()));
-+    await tester.tap(find.text('Arnaud'));
++    await tester.tap(find.text('Armand'));
 +    await tester.pumpAndSettle();
 +
 +    await tester.longPress(find.byKey(const ValueKey('insight_dossier_header')));
@@ -2243,9 +2243,9 @@ index 0000000000..fc9afca00c
 +    await tester.tap(find.text('Retirer'));
 +    await tester.pumpAndSettle();
 +
-+    expect(server.archived, {'arnaud'});
++    expect(server.archived, {'armand'});
 +    expect(find.byType(InsightDossierPage), findsNothing);
-+    expect(find.text('Arnaud'), findsNothing);
++    expect(find.text('Armand'), findsNothing);
 +    expect(find.text('Mon fils'), findsOneWidget);
 +  });
 +
@@ -2256,7 +2256,7 @@ index 0000000000..fc9afca00c
 +
 +    server
 +      ..failList = false
-+      ..archived.addAll(['arnaud', 'fils']);
++      ..archived.addAll(['armand', 'fils']);
 +    await tester.tap(find.text('Réessayer'));
 +    await tester.pumpAndSettle();
 +    expect(find.text('Pas encore d’insights'), findsOneWidget);
@@ -2266,7 +2266,7 @@ index 0000000000..fc9afca00c
 +    final server = _FakeServer();
 +    await _pump(tester, _page(server, _Opened()), locale: const Locale('en'));
 +    expect(find.textContaining('Work · 2 notes · Updated'), findsOneWidget);
-+    await tester.tap(find.text('Arnaud'));
++    await tester.tap(find.text('Armand'));
 +    await tester.pumpAndSettle();
 +    expect(find.text('Possible proposals'), findsOneWidget);
 +    expect(find.text('Omi’s lead'), findsOneWidget);

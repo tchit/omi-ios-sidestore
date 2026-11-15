@@ -16,8 +16,8 @@ confirmation. Une discussion est créée sur le serveur au premier envoi seuleme
 Après un redémarrage, le chat rouvre la discussion qui était ouverte (lastChatSessionId, rangé par
 compte) et non la dernière créée ; supprimée ailleurs, il revient au fil courant.
 
-« Demander à Omi » depuis une conversation ne continue plus la discussion ouverte (le sujet d'Arnaud
-tombait dans celle de la psy) : il reprend la discussion déjà utilisée pour cette conversation, ou en
+« Demander à Omi » depuis une conversation ne continue plus la discussion ouverte (le sujet d'une
+conversation tombait dans une autre discussion) : il reprend la discussion déjà utilisée pour cette conversation, ou en
 ouvre une nouvelle. Le lien conversation → discussion est noté à chaque envoi avec ce contexte, et
 appris du page_context que le serveur du clone garde sur les messages de Mike (utile après une
 réinstallation). Une nouvelle discussion laissée sans message rend la discussion ouverte à la
@@ -1078,63 +1078,63 @@ index dc65209d85..98859631ff 100644
 +    final api = FakeSessions();
 +    final provider = MessageProvider(sessionsApi: api);
 +    addTearDown(provider.dispose);
-+    await provider.openChatSession(session('psy'));
-+    expect(await provider.openChatForConversation('arnaud-meeting'), isTrue);
++    await provider.openChatSession(session('perso'));
++    expect(await provider.openChatForConversation('armand-meeting'), isTrue);
 +    expect(provider.isFreshChat, isTrue);
 +    expect(provider.chatSessionId, isNull);
 +    expect(provider.messages, isEmpty);
 +    expect(api.gets, isEmpty);
 +    // The first send creates the chat and ties it to the conversation it is about.
 +    await provider.prepareChatSession();
-+    provider.rememberChatContext(const ChatPageContext(type: 'conversation', id: 'arnaud-meeting', title: 'Arnaud'));
-+    expect(SharedPreferencesUtil().chatForConversation('arnaud-meeting'), 'new');
++    provider.rememberChatContext(const ChatPageContext(type: 'conversation', id: 'armand-meeting', title: 'Armand'));
++    expect(SharedPreferencesUtil().chatForConversation('armand-meeting'), 'new');
 +  });
 +
 +  test('Ask Omi about the same conversation resumes its chat', () async {
-+    SharedPreferencesUtil().setChatForConversation('arnaud-meeting', 'arnaud');
++    SharedPreferencesUtil().setChatForConversation('armand-meeting', 'armand');
 +    final api = FakeSessions();
 +    final provider = MessageProvider(sessionsApi: api);
 +    addTearDown(provider.dispose);
-+    await provider.openChatSession(session('psy'));
-+    expect(await provider.openChatForConversation('arnaud-meeting'), isTrue);
-+    expect(api.gets, ['arnaud']);
-+    expect(provider.chatSessionId, 'arnaud');
-+    expect(provider.messages.single.id, 'arnaud');
++    await provider.openChatSession(session('perso'));
++    expect(await provider.openChatForConversation('armand-meeting'), isTrue);
++    expect(api.gets, ['armand']);
++    expect(provider.chatSessionId, 'armand');
++    expect(provider.messages.single.id, 'armand');
 +    // Already open: nothing is read again.
-+    expect(await provider.openChatForConversation('arnaud-meeting'), isTrue);
-+    expect(api.gets, ['arnaud']);
++    expect(await provider.openChatForConversation('armand-meeting'), isTrue);
++    expect(api.gets, ['armand']);
 +  });
 +
 +  test('a conversation chat deleted elsewhere is forgotten and a new chat starts', () async {
-+    final prefs = SharedPreferencesUtil()..setChatForConversation('arnaud-meeting', 'gone');
++    final prefs = SharedPreferencesUtil()..setChatForConversation('armand-meeting', 'gone');
 +    final api = FakeSessions()
 +      ..getResult = (_) async => const ApiFailure(ApiProblem(ApiProblemKind.notFound, statusCode: 404));
 +    final provider = MessageProvider(sessionsApi: api);
 +    addTearDown(provider.dispose);
-+    await provider.openChatSession(session('psy'));
-+    expect(await provider.openChatForConversation('arnaud-meeting'), isTrue);
++    await provider.openChatSession(session('perso'));
++    expect(await provider.openChatForConversation('armand-meeting'), isTrue);
 +    expect(provider.isFreshChat, isTrue);
-+    expect(prefs.chatForConversation('arnaud-meeting'), '');
++    expect(prefs.chatForConversation('armand-meeting'), '');
 +  });
 +
 +  test('a conversation chat that cannot be read keeps the open chat and says so', () async {
-+    SharedPreferencesUtil().setChatForConversation('arnaud-meeting', 'arnaud');
++    SharedPreferencesUtil().setChatForConversation('armand-meeting', 'armand');
 +    final api = FakeSessions()..getResult = (_) async => const ApiFailure(ApiProblem(ApiProblemKind.transport));
 +    final provider = MessageProvider(sessionsApi: api);
 +    addTearDown(provider.dispose);
-+    await provider.openChatSession(session('psy'));
-+    expect(await provider.openChatForConversation('arnaud-meeting'), isFalse);
-+    expect(provider.chatSessionId, 'psy');
-+    expect(SharedPreferencesUtil().chatForConversation('arnaud-meeting'), 'arnaud');
++    await provider.openChatSession(session('perso'));
++    expect(await provider.openChatForConversation('armand-meeting'), isFalse);
++    expect(provider.chatSessionId, 'perso');
++    expect(SharedPreferencesUtil().chatForConversation('armand-meeting'), 'armand');
 +  });
 +
 +  test('switching to a conversation chat is refused while a reply is running', () async {
 +    final provider = MessageProvider(sessionsApi: FakeSessions());
 +    addTearDown(provider.dispose);
-+    await provider.openChatSession(session('psy'));
++    await provider.openChatSession(session('perso'));
 +    provider.setSendingMessage(true);
-+    expect(await provider.openChatForConversation('arnaud-meeting'), isFalse);
-+    expect(provider.chatSessionId, 'psy');
++    expect(await provider.openChatForConversation('armand-meeting'), isFalse);
++    expect(provider.chatSessionId, 'perso');
 +    provider.setSendingMessage(false);
 +  });
 +
@@ -1142,15 +1142,15 @@ index dc65209d85..98859631ff 100644
 +    final prefs = SharedPreferencesUtil()..setChatForConversation('known', 'other');
 +    final api = FakeSessions()
 +      ..readResult = (id, _) async => ApiSuccess([
-+            aboutConversation('q1', 'arnaud-meeting'),
++            aboutConversation('q1', 'armand-meeting'),
 +            aboutConversation('q2', 'known'),
 +            ServerMessage.fromJson({...message('broken').toJson(), 'page_context': 'not a map'}),
 +          ]);
 +    final provider = MessageProvider(sessionsApi: api);
 +    addTearDown(provider.dispose);
-+    await provider.openChatSession(session('arnaud'));
++    await provider.openChatSession(session('armand'));
 +    expect(provider.messages, hasLength(3), reason: 'an unreadable context never hides a message');
-+    expect(prefs.chatForConversation('arnaud-meeting'), 'arnaud');
++    expect(prefs.chatForConversation('armand-meeting'), 'armand');
 +    expect(prefs.chatForConversation('known'), 'other');
 +  });
 +
@@ -1171,14 +1171,14 @@ index dc65209d85..98859631ff 100644
 +  });
 +
 +  test('a new chat left without a message gives the open chat back', () async {
-+    SharedPreferencesUtil().lastChatSessionId = 'psy';
++    SharedPreferencesUtil().lastChatSessionId = 'perso';
 +    final provider = MessageProvider(sessionsApi: FakeSessions());
 +    addTearDown(provider.dispose);
 +    expect(provider.startFreshChat(), isTrue);
 +    provider.leaveUnusedFreshChat();
 +    expect(provider.isFreshChat, isFalse);
 +    await provider.refreshMessages();
-+    expect(provider.chatSessionId, 'psy');
++    expect(provider.chatSessionId, 'perso');
 +  });
 +
 +  test('a new chat with messages is kept when the popup closes', () async {
@@ -1192,14 +1192,14 @@ index dc65209d85..98859631ff 100644
 +
 +  test('deleting a chat forgets it as the remembered chat and as a conversation chat', () async {
 +    final prefs = SharedPreferencesUtil()
-+      ..lastChatSessionId = 'arnaud'
-+      ..setChatForConversation('arnaud-meeting', 'arnaud')
++      ..lastChatSessionId = 'armand'
++      ..setChatForConversation('armand-meeting', 'armand')
 +      ..setChatForConversation('other-meeting', 'other');
 +    final provider = MessageProvider(sessionsApi: FakeSessions());
 +    addTearDown(provider.dispose);
-+    expect(await provider.deleteChatSession('arnaud'), isTrue);
++    expect(await provider.deleteChatSession('armand'), isTrue);
 +    expect(prefs.lastChatSessionId, '');
-+    expect(prefs.chatForConversation('arnaud-meeting'), '');
++    expect(prefs.chatForConversation('armand-meeting'), '');
 +    expect(prefs.chatForConversation('other-meeting'), 'other');
 +  });
 +
@@ -1244,45 +1244,45 @@ index dc65209d85..98859631ff 100644
 +  });
 +
 +  test('a send from another chat never re-ties a conversation already tied to its own chat', () async {
-+    SharedPreferencesUtil().setChatForConversation('meeting', 'arnaud');
++    SharedPreferencesUtil().setChatForConversation('meeting', 'armand');
 +    final provider = MessageProvider(sessionsApi: FakeSessions());
 +    addTearDown(provider.dispose);
-+    await provider.openChatSession(session('psy'));
-+    provider.rememberChatContext(const ChatPageContext(type: 'conversation', id: 'meeting', title: 'Arnaud'));
-+    expect(SharedPreferencesUtil().chatForConversation('meeting'), 'arnaud');
++    await provider.openChatSession(session('perso'));
++    provider.rememberChatContext(const ChatPageContext(type: 'conversation', id: 'meeting', title: 'Armand'));
++    expect(SharedPreferencesUtil().chatForConversation('meeting'), 'armand');
 +    // An untied conversation is tied to the chat it was first asked about.
 +    provider.rememberChatContext(const ChatPageContext(type: 'conversation', id: 'other', title: 'Other'));
-+    expect(SharedPreferencesUtil().chatForConversation('other'), 'psy');
++    expect(SharedPreferencesUtil().chatForConversation('other'), 'perso');
 +  });
 +
 +  test('reading a conversation chat hides the open one; a failed read shows it again', () async {
-+    SharedPreferencesUtil().setChatForConversation('meeting', 'arnaud');
++    SharedPreferencesUtil().setChatForConversation('meeting', 'armand');
 +    final read = Completer<ApiResult<ChatSessionSummary>>();
 +    final api = FakeSessions()..getResult = (_) => read.future;
 +    final provider = MessageProvider(sessionsApi: api);
 +    addTearDown(provider.dispose);
-+    await provider.openChatSession(session('psy'));
++    await provider.openChatSession(session('perso'));
 +    final opening = provider.openChatForConversation('meeting');
 +    await pumpEventQueue();
 +    expect(provider.isLoadingMessages, isTrue);
 +    read.complete(const ApiFailure(ApiProblem(ApiProblemKind.transport)));
 +    expect(await opening, isFalse);
 +    expect(provider.isLoadingMessages, isFalse);
-+    expect(provider.chatSessionId, 'psy');
-+    expect(provider.messages.single.id, 'psy');
++    expect(provider.chatSessionId, 'perso');
++    expect(provider.messages.single.id, 'perso');
 +  });
 +
 +  test('a chat chosen while the conversation chat is still being read stands', () async {
-+    SharedPreferencesUtil().setChatForConversation('meeting', 'arnaud');
++    SharedPreferencesUtil().setChatForConversation('meeting', 'armand');
 +    final read = Completer<ApiResult<ChatSessionSummary>>();
 +    final api = FakeSessions()..getResult = (_) => read.future;
 +    final provider = MessageProvider(sessionsApi: api);
 +    addTearDown(provider.dispose);
-+    await provider.openChatSession(session('psy'));
++    await provider.openChatSession(session('perso'));
 +    final opening = provider.openChatForConversation('meeting');
 +    await pumpEventQueue();
 +    expect(provider.startFreshChat(), isTrue); // the reader taps New chat meanwhile
-+    read.complete(ApiSuccess(session('arnaud')));
++    read.complete(ApiSuccess(session('armand')));
 +    expect(await opening, isTrue);
 +    expect(provider.isFreshChat, isTrue);
 +    expect(provider.isLoadingMessages, isFalse);
@@ -1389,7 +1389,7 @@ index bc0fd0530e..ad851d4b96 100644
 +    SharedPreferencesUtil().setChatForConversation('meeting', 'second');
 +    final server = _HistoryServer();
 +    final provider = await pumpChat(tester, server,
-+        about: const ChatPageContext(type: 'conversation', id: 'meeting', title: 'Meeting with Arnaud'));
++        about: const ChatPageContext(type: 'conversation', id: 'meeting', title: 'Meeting with Armand'));
 +    expect(provider.chatSessionId, 'second');
 +    expect(find.text('Question from second'), findsOneWidget);
 +    expect(find.text('Current conversation'), findsNothing);
@@ -1402,7 +1402,7 @@ index bc0fd0530e..ad851d4b96 100644
 +    SharedPreferencesUtil().lastChatSessionId = 'first';
 +    final server = _HistoryServer();
 +    final provider = await pumpChat(tester, server,
-+        about: const ChatPageContext(type: 'conversation', id: 'new-meeting', title: 'Meeting with Arnaud'));
++        about: const ChatPageContext(type: 'conversation', id: 'new-meeting', title: 'Meeting with Armand'));
 +    expect(provider.isFreshChat, isTrue);
 +    expect(provider.messages, isEmpty);
 +    expect(find.text('Current conversation'), findsNothing);
@@ -1464,7 +1464,7 @@ index 0000000000..8b22c41fb1
 +  final requests = <ApiRequest>[];
 +  Completer<void>? sessionGate;
 +  List<Map<String, Object?>> sessions = [
-+    for (final id in ['psy', 'arnaud'])
++    for (final id in ['perso', 'armand'])
 +      {'id': id, 'title': 'Saved $id', 'message_count': 2, 'updated_at': '2026-09-29T01:01:00Z'},
 +  ];
 +
@@ -1512,7 +1512,7 @@ index 0000000000..8b22c41fb1
 +ChatSessionSummary _session(String id) =>
 +    ChatSessionSummary(id: id, title: 'Saved $id', updatedAt: DateTime.utc(2026), messageCount: 2);
 +
-+const _about = ChatPageContext(type: 'conversation', id: 'meeting', title: 'Meeting with Arnaud');
++const _about = ChatPageContext(type: 'conversation', id: 'meeting', title: 'Meeting with Armand');
 +
 +Future<void> _pump(WidgetTester tester, _Messages provider,
 +    {ChatPageContext? about, Locale locale = const Locale('en')}) async {
@@ -1574,104 +1574,104 @@ index 0000000000..8b22c41fb1
 +  });
 +
 +  testWidgets('Ask Omi during a running reply opens the conversation\'s own chat once the reply ends', (tester) async {
-+    SharedPreferencesUtil().setChatForConversation('meeting', 'arnaud');
++    SharedPreferencesUtil().setChatForConversation('meeting', 'armand');
 +    final provider = _Messages(ChatSessionsApi(baseUrl: 'https://example.invalid/', send: _Server().send));
-+    expect(await provider.openChatSession(_session('psy')), isTrue);
-+    provider.setSendingMessage(true); // a reply of the psy chat is still streaming
++    expect(await provider.openChatSession(_session('perso')), isTrue);
++    provider.setSendingMessage(true); // a reply of the perso chat is still streaming
 +    await _pump(tester, provider, about: _about);
 +    await tester.tap(find.text('Open chat'));
 +    await tester.pumpAndSettle();
-+    expect(provider.chatSessionId, 'psy', reason: 'never switched under a running reply');
++    expect(provider.chatSessionId, 'perso', reason: 'never switched under a running reply');
 +    provider.setSendingMessage(false);
 +    await tester.pumpAndSettle();
-+    expect(provider.chatSessionId, 'arnaud');
-+    expect(find.text('Question from arnaud'), findsOneWidget);
-+    expect(find.text('Question from psy'), findsNothing);
-+    expect(find.text('About: Meeting with Arnaud'), findsOneWidget);
++    expect(provider.chatSessionId, 'armand');
++    expect(find.text('Question from armand'), findsOneWidget);
++    expect(find.text('Question from perso'), findsNothing);
++    expect(find.text('About: Meeting with Armand'), findsOneWidget);
 +    await tester.pump(const Duration(seconds: 5)); // the « wait for the reply » notice leaves
 +    await tester.pumpAndSettle();
 +    final sends = _captureSends(provider);
-+    await _send(tester, 'Que proposer à Arnaud ?');
-+    expect(sends, [('Que proposer à Arnaud ?', 'arnaud', 'meeting')]);
-+    expect(SharedPreferencesUtil().chatForConversation('meeting'), 'arnaud');
++    await _send(tester, 'Que proposer à Armand ?');
++    expect(sends, [('Que proposer à Armand ?', 'armand', 'meeting')]);
++    expect(SharedPreferencesUtil().chatForConversation('meeting'), 'armand');
 +    await tester.pumpWidget(const SizedBox());
 +  });
 +
 +  testWidgets('while the conversation\'s chat is read, the open chat and its follow-up are hidden', (tester) async {
-+    SharedPreferencesUtil().setChatForConversation('meeting', 'arnaud');
++    SharedPreferencesUtil().setChatForConversation('meeting', 'armand');
 +    final server = _Server()..sessionGate = Completer<void>();
 +    final provider = _Messages(ChatSessionsApi(baseUrl: 'https://example.invalid/', send: server.send));
-+    expect(await provider.openChatSession(_session('psy')), isTrue);
++    expect(await provider.openChatSession(_session('perso')), isTrue);
 +    await _pump(tester, provider, about: _about);
 +    await tester.tap(find.text('Open chat'));
 +    for (var i = 0; i < 10; i++) {
 +      await tester.pump(const Duration(milliseconds: 100));
 +    }
-+    // GET /v2/chat-sessions/arnaud has not answered yet.
++    // GET /v2/chat-sessions/armand has not answered yet.
 +    expect(provider.isLoadingMessages, isTrue);
-+    expect(find.text('Question from psy'), findsNothing);
++    expect(find.text('Question from perso'), findsNothing);
 +    expect(find.byKey(const Key('chat_followup_chip')), findsNothing);
 +    server.sessionGate!.complete();
 +    await tester.pumpAndSettle();
-+    expect(provider.chatSessionId, 'arnaud');
++    expect(provider.chatSessionId, 'armand');
 +    expect(provider.isLoadingMessages, isFalse);
-+    expect(find.text('Question from arnaud'), findsOneWidget);
-+    expect(find.text('Follow-up from arnaud?'), findsOneWidget);
++    expect(find.text('Question from armand'), findsOneWidget);
++    expect(find.text('Follow-up from armand?'), findsOneWidget);
 +    await tester.pumpWidget(const SizedBox());
 +  });
 +
 +  testWidgets('a failed read of the conversation\'s chat shows the open chat again', (tester) async {
-+    SharedPreferencesUtil().setChatForConversation('meeting', 'arnaud');
++    SharedPreferencesUtil().setChatForConversation('meeting', 'armand');
 +    final server = _Server();
 +    final provider = _Messages(ChatSessionsApi(
 +        baseUrl: 'https://example.invalid/',
-+        send: (request) => request.url.contains('/v2/chat-sessions/arnaud')
++        send: (request) => request.url.contains('/v2/chat-sessions/armand')
 +            ? Future.value(http.Response('down', 503))
 +            : server.send(request)));
-+    expect(await provider.openChatSession(_session('psy')), isTrue);
++    expect(await provider.openChatSession(_session('perso')), isTrue);
 +    await _pump(tester, provider, about: _about);
 +    await tester.tap(find.text('Open chat'));
 +    await tester.pumpAndSettle();
-+    expect(provider.chatSessionId, 'psy');
++    expect(provider.chatSessionId, 'perso');
 +    expect(provider.isLoadingMessages, isFalse);
-+    expect(find.text('Question from psy'), findsOneWidget);
-+    expect(SharedPreferencesUtil().chatForConversation('meeting'), 'arnaud');
++    expect(find.text('Question from perso'), findsOneWidget);
++    expect(SharedPreferencesUtil().chatForConversation('meeting'), 'armand');
 +    await tester.pump(const Duration(seconds: 5));
 +    await tester.pumpWidget(const SizedBox());
 +  });
 +
 +  testWidgets('choosing another chat drops the « About » chip; the conversation keeps its own chat', (tester) async {
-+    SharedPreferencesUtil().setChatForConversation('meeting', 'arnaud');
++    SharedPreferencesUtil().setChatForConversation('meeting', 'armand');
 +    final provider = _Messages(ChatSessionsApi(baseUrl: 'https://example.invalid/', send: _Server().send));
 +    await _pump(tester, provider, about: _about);
 +    await tester.tap(find.text('Open chat'));
 +    await tester.pumpAndSettle();
-+    expect(provider.chatSessionId, 'arnaud');
-+    expect(find.text('About: Meeting with Arnaud'), findsOneWidget);
++    expect(provider.chatSessionId, 'armand');
++    expect(find.text('About: Meeting with Armand'), findsOneWidget);
 +    await tester.tap(find.byKey(const Key('chat_history')));
 +    await tester.pumpAndSettle();
-+    await tester.tap(find.text('Saved psy'));
++    await tester.tap(find.text('Saved perso'));
 +    await tester.pumpAndSettle();
-+    expect(provider.chatSessionId, 'psy');
-+    expect(find.text('About: Meeting with Arnaud'), findsNothing);
++    expect(provider.chatSessionId, 'perso');
++    expect(find.text('About: Meeting with Armand'), findsNothing);
 +    final sends = _captureSends(provider);
-+    await _send(tester, 'Ce que la psy a dit mardi');
-+    expect(sends, [('Ce que la psy a dit mardi', 'psy', null)]);
-+    expect(SharedPreferencesUtil().chatForConversation('meeting'), 'arnaud');
++    await _send(tester, 'Ce que la perso a dit mardi');
++    expect(sends, [('Ce que la perso a dit mardi', 'perso', null)]);
++    expect(SharedPreferencesUtil().chatForConversation('meeting'), 'armand');
 +    await tester.pumpWidget(const SizedBox());
 +  });
 +
 +  testWidgets('New chat from the header also drops the « About » chip', (tester) async {
-+    SharedPreferencesUtil().setChatForConversation('meeting', 'arnaud');
++    SharedPreferencesUtil().setChatForConversation('meeting', 'armand');
 +    final provider = _Messages(ChatSessionsApi(baseUrl: 'https://example.invalid/', send: _Server().send));
 +    await _pump(tester, provider, about: _about);
 +    await tester.tap(find.text('Open chat'));
 +    await tester.pumpAndSettle();
-+    expect(find.text('About: Meeting with Arnaud'), findsOneWidget);
++    expect(find.text('About: Meeting with Armand'), findsOneWidget);
 +    await tester.tap(find.byKey(const Key('chat_new')));
 +    await tester.pumpAndSettle();
 +    expect(provider.isFreshChat, isTrue);
-+    expect(find.text('About: Meeting with Arnaud'), findsNothing);
++    expect(find.text('About: Meeting with Armand'), findsNothing);
 +    await tester.pumpWidget(const SizedBox());
 +  });
 +
@@ -1681,7 +1681,7 @@ index 0000000000..8b22c41fb1
 +    expect(isOriginChat(byId, uid: 'someone-else'), isFalse);
 +    expect(isOriginChat(ChatSessionSummary(id: 'x', title: "Discussion d'origine", updatedAt: DateTime.utc(2026))),
 +        isTrue);
-+    expect(isOriginChat(_session('psy')), isFalse);
++    expect(isOriginChat(_session('perso')), isFalse);
 +  });
 +
 +  for (final (locale, title, message) in [
@@ -1706,17 +1706,17 @@ index 0000000000..8b22c41fb1
 +            'message_count': 412,
 +            'updated_at': '2026-09-29T01:01:00Z'
 +          },
-+          {'id': 'psy', 'title': 'Saved psy', 'message_count': 2, 'updated_at': '2026-09-28T01:01:00Z'},
++          {'id': 'perso', 'title': 'Saved perso', 'message_count': 2, 'updated_at': '2026-09-28T01:01:00Z'},
 +        ];
 +      final provider = _Messages(ChatSessionsApi(baseUrl: 'https://example.invalid/', send: server.send));
-+      expect(await provider.openChatSession(_session('psy')), isTrue);
++      expect(await provider.openChatSession(_session('perso')), isTrue);
 +      await _pump(tester, provider, locale: locale);
 +      await tester.tap(find.text('Open chat'));
 +      await tester.pumpAndSettle();
 +      await tester.tap(find.byKey(const Key('chat_history')));
 +      await tester.pumpAndSettle();
 +      // An ordinary chat keeps the short confirmation.
-+      await tester.longPress(find.text('Saved psy'));
++      await tester.longPress(find.text('Saved perso'));
 +      await tester.pumpAndSettle();
 +      await tester.tap(find.text(locale.languageCode == 'fr' ? 'Supprimer la discussion' : 'Delete chat').last);
 +      await tester.pumpAndSettle();

@@ -1918,18 +1918,18 @@ index 0000000000..e5d07abe60
 +Map<String, dynamic> _proposition(String id, {String type = 'orthographe'}) => {
 +      'id': id,
 +      'type': type,
-+      'titre': 'Arnaud, pas Arnault',
-+      'explication': 'Le nom est écrit de deux façons ; Arnaud est la plus fréquente.',
-+      'avant': 'Arnault',
-+      'apres': 'Arnaud',
++      'titre': 'Armand, pas Armant',
++      'explication': 'Le nom est écrit de deux façons ; Armand est la plus fréquente.',
++      'avant': 'Armant',
++      'apres': 'Armand',
 +      'extraits': [
-+        {'texte': 'je dois rappeler Arnault', 'source': 'Réunion du 12 oct.', 'conversation_id': 'c-1'},
++        {'texte': 'je dois rappeler Armant', 'source': 'Réunion du 12 oct.', 'conversation_id': 'c-1'},
 +        {'texte': 'sans source'},
 +        {'source': 'sans texte'},
 +        'pas un objet',
 +      ],
 +      'cibles': [
-+        {'type': 'conversation', 'id': 'c-1', 'titre': 'Réunion Arnaud'},
++        {'type': 'conversation', 'id': 'c-1', 'titre': 'Réunion Armand'},
 +        {'type': 'conversation', 'id': 'c-1', 'titre': 'En double'},
 +        {'type': 'tache', 'id': 't-1'},
 +        {'titre': 'sans id'},
@@ -1945,9 +1945,9 @@ index 0000000000..e5d07abe60
 +      'titre': 'Tâches fusionnées',
 +      'details': [
 +        {
-+          'cible': {'type': 'tache', 'id': 't-1', 'titre': 'Rappeler Arnaud'},
-+          'avant': 'Rappeler Arnaud (x2)',
-+          'apres': 'Rappeler Arnaud',
++          'cible': {'type': 'tache', 'id': 't-1', 'titre': 'Rappeler Armand'},
++          'avant': 'Rappeler Armand (x2)',
++          'apres': 'Rappeler Armand',
 +        },
 +        {'cible': null, 'avant': null, 'apres': null},
 +      ],
@@ -1975,12 +1975,12 @@ index 0000000000..e5d07abe60
 +      expect(relecture.propositions.map((p) => p.id), ['p-1', 'p-2']);
 +      final p = relecture.propositions.first;
 +      expect(p.type, 'orthographe');
-+      expect(p.titre, 'Arnaud, pas Arnault');
-+      expect(p.avant, 'Arnault');
-+      expect(p.apres, 'Arnaud');
++      expect(p.titre, 'Armand, pas Armant');
++      expect(p.avant, 'Armant');
++      expect(p.apres, 'Armand');
 +      expect(p.cree, DateTime.utc(2026, 10, 20, 3, 10));
 +      // Extraits : sans texte ou illisibles, écartés ; la source et la conversation sont facultatives.
-+      expect(p.extraits.map((e) => e.texte), ['je dois rappeler Arnault', 'sans source']);
++      expect(p.extraits.map((e) => e.texte), ['je dois rappeler Armant', 'sans source']);
 +      expect(p.extraits.first.conversationId, 'c-1');
 +      expect(p.extraits.last.source, isNull);
 +      // Cibles : sans id écartée, la même deux fois gardée une fois.
@@ -1995,7 +1995,7 @@ index 0000000000..e5d07abe60
 +      expect(relecture.changements[1].peutAnnuler, isFalse, reason: 'non annulable, pas annulé');
 +      // Un détail sans rien à montrer est écarté.
 +      expect(b.details, hasLength(1));
-+      expect(b.details.single.cible?.titre, 'Rappeler Arnaud');
++      expect(b.details.single.cible?.titre, 'Rappeler Armand');
 +      expect(relecture.derniereRelecture, DateTime.utc(2026, 10, 20, 4, 12));
 +      expect(relecture.lignesEcartees, 0);
 +    });
@@ -2337,17 +2337,17 @@ index 0000000000..75a2708c4e
 +Map<String, dynamic> _orthographe() => {
 +      'id': 'p-1',
 +      'type': 'orthographe',
-+      'titre': 'Arnaud, pas Arnault',
-+      'explication': 'Le nom est écrit de deux façons ; Arnaud est la plus fréquente.',
-+      'avant': 'Arnault',
-+      'apres': 'Arnaud',
++      'titre': 'Armand, pas Armant',
++      'explication': 'Le nom est écrit de deux façons ; Armand est la plus fréquente.',
++      'avant': 'Armant',
++      'apres': 'Armand',
 +      'extraits': [
-+        {'texte': 'je dois rappeler Arnault avant midi', 'source': 'Réunion du 12 oct.', 'conversation_id': 'c-1'},
-+        {'texte': 'Arnaud a validé le devis', 'source': 'Note'},
++        {'texte': 'je dois rappeler Armant avant midi', 'source': 'Réunion du 12 oct.', 'conversation_id': 'c-1'},
++        {'texte': 'Armand a validé le devis', 'source': 'Note'},
 +      ],
 +      'cibles': [
-+        {'type': 'conversation', 'id': 'c-1', 'titre': 'Réunion Arnaud'},
-+        {'type': 'personne', 'id': 'pe-1', 'titre': 'Arnaud D.'},
++        {'type': 'conversation', 'id': 'c-1', 'titre': 'Réunion Armand'},
++        {'type': 'personne', 'id': 'pe-1', 'titre': 'Armand D.'},
 +      ],
 +      'cree': '2026-10-20T03:10:00+00:00',
 +    };
@@ -2380,9 +2380,9 @@ index 0000000000..75a2708c4e
 +      'titre': titre,
 +      'details': [
 +        {
-+          'cible': {'type': 'tache', 'id': 't-$id', 'titre': 'Rappeler Arnaud'},
-+          'avant': 'Rappeler Arnaud (deux fois)',
-+          'apres': 'Rappeler Arnaud',
++          'cible': {'type': 'tache', 'id': 't-$id', 'titre': 'Rappeler Armand'},
++          'avant': 'Rappeler Armand (deux fois)',
++          'apres': 'Rappeler Armand',
 +        },
 +      ],
 +      'fait_le': faitLe,
@@ -2423,8 +2423,8 @@ index 0000000000..75a2708c4e
 +          return _json({
 +            'dossiers': [
 +              {
-+                'id': 'arnaud',
-+                'titre': 'Dossier Arnaud',
++                'id': 'armand',
++                'titre': 'Dossier Armand',
 +                'gabarit': 'pro',
 +                'statut': 'actif',
 +                'maj': '2026-10-09T18:30:00+00:00',
@@ -2542,7 +2542,7 @@ index 0000000000..75a2708c4e
 +      final card = find.byKey(const ValueKey('relecture_card'));
 +      expect(tester.getTopLeft(card).dy, lessThan(tester.getTopLeft(find.text('Maintenant')).dy));
 +      expect(find.byKey(const ValueKey('relecture_changes_link')), findsOneWidget);
-+      expect(find.text('Dossier Arnaud'), findsOneWidget);
++      expect(find.text('Dossier Armand'), findsOneWidget);
 +      // Lue avec le reste de l'onglet.
 +      expect(server.count('GET', '/v1/clone/relecture'), 1);
 +      expect(server.count('GET', '/v1/insights/maintenant'), 1);
@@ -2556,7 +2556,7 @@ index 0000000000..75a2708c4e
 +      expect(find.byKey(const ValueKey('relecture_changes_link')), findsNothing);
 +      expect(find.byKey(const ValueKey('relecture_failure')), findsNothing);
 +      expect(find.text('Maintenant'), findsOneWidget);
-+      expect(find.text('Dossier Arnaud'), findsOneWidget);
++      expect(find.text('Dossier Armand'), findsOneWidget);
 +    });
 +
 +    testWidgets('relecture en panne : une ligne discrète, le reste de l’onglet est là ; relue au rafraîchissement',
@@ -2567,7 +2567,7 @@ index 0000000000..75a2708c4e
 +
 +      expect(find.text('Relecture de nuit indisponible pour l’instant.'), findsOneWidget);
 +      expect(find.text('Maintenant'), findsOneWidget);
-+      expect(find.text('Dossier Arnaud'), findsOneWidget);
++      expect(find.text('Dossier Armand'), findsOneWidget);
 +      expect(find.byKey(const ValueKey('relecture_card')), findsNothing);
 +
 +      server.relectureStatus = 200;
@@ -2599,12 +2599,12 @@ index 0000000000..75a2708c4e
 +          findsOneWidget);
 +      expect(find.textContaining('Dernière relecture : '), findsOneWidget);
 +      expect(_inCard('p-1', find.text('Orthographe')), findsOneWidget);
-+      expect(_inCard('p-1', find.text('Arnaud, pas Arnault')), findsOneWidget);
++      expect(_inCard('p-1', find.text('Armand, pas Armant')), findsOneWidget);
 +      expect(
-+          _inCard('p-1', find.text('Le nom est écrit de deux façons ; Arnaud est la plus fréquente.')), findsOneWidget);
-+      expect(_inCard('p-1', find.text('je dois rappeler Arnault avant midi')), findsOneWidget);
++          _inCard('p-1', find.text('Le nom est écrit de deux façons ; Armand est la plus fréquente.')), findsOneWidget);
++      expect(_inCard('p-1', find.text('je dois rappeler Armant avant midi')), findsOneWidget);
 +      expect(_inCard('p-1', find.text('— Réunion du 12 oct.')), findsOneWidget);
-+      expect(_inCard('p-1', find.text('Arnaud D.')), findsOneWidget);
++      expect(_inCard('p-1', find.text('Armand D.')), findsOneWidget);
 +      expect(_inCard('p-1', find.text('Accepter')), findsOneWidget);
 +      expect(_inCard('p-1', find.text('Ignorer')), findsOneWidget);
 +      expect(_inCard('p-2', find.text('Tâche faite')), findsOneWidget);
@@ -2613,7 +2613,7 @@ index 0000000000..75a2708c4e
 +      // Longs (plusieurs lignes) : l'un sous l'autre, flèche vers le bas.
 +      expect(_inCard('p-3', find.byIcon(Icons.arrow_downward_rounded)), findsOneWidget);
 +      // Le titre est en gras.
-+      final title = tester.widget<Text>(_inCard('p-1', find.text('Arnaud, pas Arnault')));
++      final title = tester.widget<Text>(_inCard('p-1', find.text('Armand, pas Armant')));
 +      expect(title.style!.fontWeight, FontWeight.w600);
 +    });
 +
@@ -2623,8 +2623,8 @@ index 0000000000..75a2708c4e
 +
 +      final before = tester.widget<Text>(_inCard('p-1', find.byKey(const ValueKey('relecture_before'))));
 +      final after = tester.widget<Text>(_inCard('p-1', find.byKey(const ValueKey('relecture_after'))));
-+      expect(before.data, 'Arnault');
-+      expect(after.data, 'Arnaud');
++      expect(before.data, 'Armant');
++      expect(after.data, 'Armand');
 +      expect(before.style!.decoration, TextDecoration.lineThrough);
 +      expect(after.style!.decoration, isNot(TextDecoration.lineThrough));
 +      expect(after.style!.fontWeight, FontWeight.w700);
@@ -2640,7 +2640,7 @@ index 0000000000..75a2708c4e
 +      // Lisibles sur leur fond (thème clair) ; un lecteur d'écran entend « Avant : … Après : … ».
 +      expect(_contrast(before.style!.color!, light.surface0), greaterThanOrEqualTo(4.5));
 +      expect(_contrast(after.style!.color!, light.surface0), greaterThanOrEqualTo(4.5));
-+      expect(find.bySemanticsLabel('Avant : Arnault. Après : Arnaud.'), findsOneWidget);
++      expect(find.bySemanticsLabel('Avant : Armant. Après : Armand.'), findsOneWidget);
 +    });
 +
 +    testWidgets('un extrait ou une conversation touchés ouvrent la conversation ; une tâche, l’onglet Tâches',
@@ -2715,14 +2715,14 @@ index 0000000000..75a2708c4e
 +
 +    testWidgets('409 : le message du serveur s’affiche et la liste est relue', (tester) async {
 +      final server = _Server()
-+        ..conflicts['p-1'] = 'Les données ont changé depuis la relecture : Arnaud est déjà corrigé.';
++        ..conflicts['p-1'] = 'Les données ont changé depuis la relecture : Armand est déjà corrigé.';
 +      await _pump(tester, server);
 +      await _openReview(tester);
 +      final reads = server.count('GET', '/v1/clone/relecture');
 +
 +      await tester.tap(_inCard('p-1', find.text('Accepter')));
 +      await tester.pumpAndSettle();
-+      expect(find.text('Les données ont changé depuis la relecture : Arnaud est déjà corrigé.'), findsOneWidget);
++      expect(find.text('Les données ont changé depuis la relecture : Armand est déjà corrigé.'), findsOneWidget);
 +      _expectNeutralToast(tester, Icons.info_outline_rounded);
 +      expect(server.count('GET', '/v1/clone/relecture'), reads + 1);
 +      // Toujours proposée par le serveur : elle reste, ses boutons de nouveau actifs.
@@ -2785,7 +2785,7 @@ index 0000000000..75a2708c4e
 +      expect(find.text('Ne peut plus être annulé'), findsOneWidget);
 +      // Date en clair, détail avant → après par cible.
 +      expect(find.textContaining('Tâches en double · '), findsNWidgets(3));
-+      expect(find.text('Rappeler Arnaud (deux fois)'), findsNWidgets(3));
++      expect(find.text('Rappeler Armand (deux fois)'), findsNWidgets(3));
 +    });
 +
 +    testWidgets('Annuler demande une confirmation légère, puis le changement se montre annulé', (tester) async {
